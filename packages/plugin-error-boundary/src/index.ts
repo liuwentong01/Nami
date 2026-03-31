@@ -41,3 +41,16 @@ export type { RetryStrategyOptions, RetryResult } from './strategies/retry-strat
 
 export { DegradeStrategy } from './strategies/degrade-strategy';
 export type { DegradeStrategyOptions, DegradeResult } from './strategies/degrade-strategy';
+
+// 导出内置降级页面组件
+export {
+  NotFoundPage,
+  ServerErrorPage,
+  NetworkErrorPage,
+  GenericErrorPage,
+} from './components/fallback-pages';
+export type {
+  FallbackPageProps,
+  ServerErrorPageProps,
+  GenericErrorPageProps,
+} from './components/fallback-pages';
