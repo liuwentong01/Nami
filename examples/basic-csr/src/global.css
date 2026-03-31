@@ -1,0 +1,200 @@
+/* ==================== 全局样式 ==================== */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
+    Ubuntu, Cantarell, 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: #333;
+  line-height: 1.6;
+}
+
+/* ==================== 应用布局 ==================== */
+
+.nami-app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 2rem;
+  background: #f8f9fa;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.app-logo {
+  font-size: 1.25rem;
+  color: #0070f3;
+}
+
+.app-nav a {
+  margin-left: 1.5rem;
+  color: #0070f3;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.app-nav a:hover {
+  text-decoration: underline;
+}
+
+.app-main {
+  flex: 1;
+  padding: 2rem;
+  max-width: 960px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.app-footer {
+  padding: 1rem 2rem;
+  text-align: center;
+  color: #999;
+  font-size: 0.875rem;
+  border-top: 1px solid #e0e0e0;
+}
+
+/* ==================== 首页样式 ==================== */
+
+.hero {
+  margin-bottom: 2rem;
+}
+
+.hero h1 {
+  font-size: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+.hero-desc {
+  color: #666;
+  font-size: 1.05rem;
+}
+
+.counter-section,
+.theme-section,
+.features {
+  margin-bottom: 2rem;
+  padding: 1.5rem;
+  background: #f8f9fa;
+  border-radius: 8px;
+}
+
+.counter-section h2,
+.theme-section h2,
+.features h2 {
+  margin-bottom: 0.75rem;
+}
+
+.counter {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  margin-top: 1rem;
+}
+
+.counter-value {
+  font-size: 2.5rem;
+  font-weight: bold;
+  color: #0070f3;
+  min-width: 80px;
+  text-align: center;
+}
+
+.counter-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+button {
+  padding: 0.5rem 1rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.2s;
+}
+
+button:hover {
+  background: #e8e8e8;
+}
+
+.features ul {
+  padding-left: 1.5rem;
+}
+
+.features li {
+  margin-bottom: 0.5rem;
+}
+
+/* ==================== 主题切换 ==================== */
+
+.theme-dark {
+  background: #1a1a2e;
+  color: #e0e0e0;
+}
+
+.theme-dark .counter-section,
+.theme-dark .theme-section,
+.theme-dark .features {
+  background: #16213e;
+}
+
+/* ==================== 关于页样式 ==================== */
+
+.page-about h1 {
+  font-size: 2rem;
+  margin-bottom: 1rem;
+}
+
+.about-intro {
+  color: #666;
+  margin-bottom: 2rem;
+  font-size: 1.05rem;
+}
+
+.tech-stack,
+.render-modes {
+  margin-bottom: 2rem;
+}
+
+.tech-stack ul {
+  padding-left: 1.5rem;
+}
+
+.tech-stack li {
+  margin-bottom: 0.5rem;
+}
+
+.mode-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.mode-item {
+  padding: 1rem;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  background: #f8f9fa;
+}
+
+.mode-item h3 {
+  margin-bottom: 0.5rem;
+  font-size: 1rem;
+}
+
+.mode-active {
+  border-color: #0070f3;
+  background: #f0f7ff;
+}

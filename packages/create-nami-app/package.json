@@ -1,0 +1,35 @@
+{
+  "name": "create-nami-app",
+  "version": "0.1.0",
+  "description": "Nami 框架项目脚手架 - 快速创建 Nami 项目",
+  "main": "./dist/index.js",
+  "bin": {
+    "create-nami-app": "./bin/create-nami-app.js"
+  },
+  "files": ["dist", "bin", "src/templates"],
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsc --build --watch",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "inquirer": "^8.2.0",
+    "chalk": "^4.1.2",
+    "ora": "^5.4.1",
+    "ejs": "^3.1.9",
+    "fs-extra": "^11.2.0",
+    "validate-npm-package-name": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/inquirer": "^8.2.0",
+    "@types/ejs": "^3.1.0",
+    "@types/fs-extra": "^11.0.0",
+    "@types/validate-npm-package-name": "^4.0.0"
+  },
+  "keywords": ["nami", "create", "scaffolding", "template"],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

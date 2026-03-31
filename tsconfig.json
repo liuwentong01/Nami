@@ -1,0 +1,17 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/core" },
+    { "path": "packages/server" },
+    { "path": "packages/client" },
+    { "path": "packages/webpack" },
+    { "path": "packages/cli" },
+    { "path": "packages/create-nami-app" },
+    { "path": "packages/plugin-cache" },
+    { "path": "packages/plugin-monitor" },
+    { "path": "packages/plugin-skeleton" },
+    { "path": "packages/plugin-request" },
+    { "path": "packages/plugin-error-boundary" }
+  ]
+}

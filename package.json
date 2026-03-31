@@ -1,0 +1,42 @@
+{
+  "name": "nami-framework",
+  "version": "0.0.0",
+  "private": true,
+  "description": "集团级前端框架 - 支持 CSR/SSR/SSG/ISR 多渲染模式的全链路解决方案",
+  "scripts": {
+    "dev": "pnpm --filter @nami/cli run dev",
+    "build": "pnpm -r --filter './packages/**' run build",
+    "build:shared": "pnpm --filter @nami/shared run build",
+    "build:core": "pnpm --filter @nami/core run build",
+    "build:server": "pnpm --filter @nami/server run build",
+    "build:client": "pnpm --filter @nami/client run build",
+    "build:webpack": "pnpm --filter @nami/webpack run build",
+    "build:cli": "pnpm --filter @nami/cli run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint 'packages/*/src/**/*.{ts,tsx}'",
+    "lint:fix": "eslint 'packages/*/src/**/*.{ts,tsx}' --fix",
+    "format": "prettier --write 'packages/*/src/**/*.{ts,tsx}'",
+    "clean": "pnpm -r exec rm -rf dist lib es node_modules/.cache",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "pnpm build && changeset publish",
+    "typecheck": "tsc --build"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.0",
+    "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.56.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.2.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "packageManager": "pnpm@9.0.0"
+}

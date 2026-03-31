@@ -1,0 +1,24 @@
+{
+  "name": "@nami/plugin-skeleton",
+  "version": "0.1.0",
+  "description": "Nami 框架骨架屏插件 - 提供加载占位与降级骨架屏",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsc --build --watch",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@nami/shared": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0"
+  },
+  "keywords": ["nami", "plugin", "skeleton", "loading", "fallback"],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

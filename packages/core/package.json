@@ -1,0 +1,31 @@
+{
+  "name": "@nami/core",
+  "version": "0.1.0",
+  "description": "Nami 框架核心运行时 - 渲染抽象、插件系统、数据预取",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsc --build --watch",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@nami/shared": "workspace:*",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  },
+  "keywords": ["nami", "core", "renderer", "plugin"],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

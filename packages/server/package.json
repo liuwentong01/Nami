@@ -1,0 +1,33 @@
+{
+  "name": "@nami/server",
+  "version": "0.1.0",
+  "description": "Nami 框架服务端 - Koa SSR 渲染中间层",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsc --build --watch",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@nami/shared": "workspace:*",
+    "@nami/core": "workspace:*",
+    "koa": "^3.0.0",
+    "koa-compose": "^4.2.0",
+    "koa-static": "^5.0.0",
+    "ioredis": "^5.3.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/koa": "^2.15.0",
+    "@types/koa-compose": "^3.2.0",
+    "@types/koa-static": "^4.0.0",
+    "@types/uuid": "^9.0.0"
+  },
+  "keywords": ["nami", "server", "koa", "ssr"],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

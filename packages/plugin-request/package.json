@@ -1,0 +1,24 @@
+{
+  "name": "@nami/plugin-request",
+  "version": "0.1.0",
+  "description": "Nami 框架请求插件 - 同构请求、拦截器与 React Hook",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsc --build --watch",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@nami/shared": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0"
+  },
+  "keywords": ["nami", "plugin", "request", "fetch", "isomorphic"],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

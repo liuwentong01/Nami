@@ -1,0 +1,22 @@
+{
+  "name": "@nami/plugin-cache",
+  "version": "0.1.0",
+  "description": "Nami 框架缓存插件 - 支持 LRU、TTL 和 CDN 缓存策略",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsc --build --watch",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@nami/shared": "workspace:*",
+    "lru-cache": "^10.0.0"
+  },
+  "keywords": ["nami", "plugin", "cache", "lru", "ttl", "cdn"],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

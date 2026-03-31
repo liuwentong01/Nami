@@ -1,0 +1,320 @@
+/* ==================== 全局样式 ==================== */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
+    Ubuntu, Cantarell, 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: #333;
+  line-height: 1.6;
+}
+
+/* ==================== 应用布局 ==================== */
+
+.nami-app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 2rem;
+  background: #fff;
+  border-bottom: 2px solid #10b981;
+}
+
+.app-logo {
+  font-size: 1.25rem;
+  color: #10b981;
+}
+
+.app-nav a {
+  margin-left: 1.5rem;
+  color: #555;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.app-nav a:hover {
+  color: #10b981;
+}
+
+.app-main {
+  flex: 1;
+  padding: 2rem;
+  max-width: 960px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.app-footer {
+  padding: 1rem 2rem;
+  text-align: center;
+  color: #999;
+  font-size: 0.875rem;
+  border-top: 1px solid #e0e0e0;
+}
+
+/* ==================== 首页样式 ==================== */
+
+.hero {
+  margin-bottom: 2rem;
+}
+
+.hero h1 {
+  font-size: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+.hero-desc {
+  color: #666;
+  font-size: 1.05rem;
+  margin-bottom: 0.5rem;
+}
+
+.build-time,
+.build-info {
+  color: #10b981;
+  font-size: 0.9rem;
+  font-style: italic;
+}
+
+.section-desc {
+  color: #666;
+  margin-bottom: 1rem;
+}
+
+.featured {
+  margin-bottom: 2rem;
+}
+
+.featured h2 {
+  margin-bottom: 0.5rem;
+}
+
+.featured-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+  margin-top: 0.5rem;
+}
+
+.featured-card {
+  padding: 1.25rem;
+  border: 1px solid #d1fae5;
+  border-radius: 8px;
+  background: #f0fdf4;
+}
+
+.featured-card h3 {
+  margin-bottom: 0.5rem;
+}
+
+.featured-card a {
+  color: #065f46;
+  text-decoration: none;
+}
+
+.featured-card a:hover {
+  text-decoration: underline;
+}
+
+.features {
+  margin-bottom: 2rem;
+  padding: 1.5rem;
+  background: #f8f9fa;
+  border-radius: 8px;
+}
+
+.features h2 {
+  margin-bottom: 0.75rem;
+}
+
+.features ul {
+  padding-left: 1.5rem;
+}
+
+.features li {
+  margin-bottom: 0.5rem;
+}
+
+/* ==================== 博客列表样式 ==================== */
+
+.blog-header {
+  margin-bottom: 1.5rem;
+}
+
+.blog-header h1 {
+  font-size: 2rem;
+  margin-bottom: 0.25rem;
+}
+
+.blog-categories {
+  margin-bottom: 2rem;
+}
+
+.blog-categories h3 {
+  margin-bottom: 0.5rem;
+  font-size: 1rem;
+}
+
+.category-list {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.category-tag {
+  padding: 0.25rem 0.75rem;
+  background: #d1fae5;
+  color: #065f46;
+  border-radius: 999px;
+  font-size: 0.85rem;
+}
+
+.blog-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.blog-card {
+  padding: 1.5rem;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  transition: border-color 0.2s;
+}
+
+.blog-card:hover {
+  border-color: #10b981;
+}
+
+.blog-card-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.blog-category {
+  color: #10b981;
+  font-weight: 600;
+}
+
+.blog-date {
+  color: #999;
+}
+
+.blog-card h2 {
+  margin-bottom: 0.5rem;
+}
+
+.blog-card h2 a {
+  color: #333;
+  text-decoration: none;
+}
+
+.blog-card h2 a:hover {
+  color: #10b981;
+}
+
+.blog-excerpt {
+  color: #666;
+  margin-bottom: 0.75rem;
+}
+
+.blog-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85rem;
+  color: #999;
+}
+
+.blog-tags {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.tag {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  background: #eef2ff;
+  color: #4f46e5;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+/* ==================== 文章详情样式 ==================== */
+
+.article-breadcrumb {
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+  color: #999;
+}
+
+.article-breadcrumb a {
+  color: #10b981;
+  text-decoration: none;
+}
+
+.article-breadcrumb .separator {
+  margin: 0 0.5rem;
+}
+
+.article-header {
+  margin-bottom: 2rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.article-header h1 {
+  font-size: 2rem;
+  margin-bottom: 0.75rem;
+}
+
+.article-meta {
+  display: flex;
+  gap: 1.5rem;
+  color: #999;
+  font-size: 0.9rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.article-tags {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.article-content {
+  font-size: 1.05rem;
+  line-height: 1.8;
+  margin-bottom: 2rem;
+}
+
+.article-content p {
+  margin-bottom: 1.25rem;
+}
+
+.article-footer {
+  padding-top: 1.5rem;
+  border-top: 1px solid #e0e0e0;
+}
+
+.back-link {
+  color: #10b981;
+  text-decoration: none;
+}
+
+.back-link:hover {
+  text-decoration: underline;
+}

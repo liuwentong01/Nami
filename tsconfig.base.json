@@ -1,0 +1,54 @@
+{
+  "compilerOptions": {
+    /* 基础选项 */
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "moduleResolution": "node",
+
+    /* 严格模式 */
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictPropertyInitialization": true,
+    "noImplicitThis": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+
+    /* 输出选项 */
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+
+    /* 互操作 */
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+
+    /* JSX 支持 */
+    "jsx": "react-jsx",
+
+    /* 跳过库检查以加速编译 */
+    "skipLibCheck": true,
+
+    /* 增量编译 */
+    "incremental": true,
+    "composite": true
+  },
+  "exclude": [
+    "node_modules",
+    "dist",
+    "lib",
+    "es",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.spec.ts",
+    "**/*.spec.tsx"
+  ]
+}

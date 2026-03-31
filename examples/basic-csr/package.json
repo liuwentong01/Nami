@@ -1,0 +1,25 @@
+{
+  "name": "@nami/example-basic-csr",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Nami 框架 CSR（客户端渲染）示例项目",
+  "scripts": {
+    "dev": "nami dev",
+    "build": "nami build",
+    "start": "nami start"
+  },
+  "dependencies": {
+    "@nami/core": "workspace:*",
+    "@nami/client": "workspace:*",
+    "@nami/plugin-request": "workspace:*",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@nami/cli": "workspace:*",
+    "@nami/webpack": "workspace:*",
+    "typescript": "^5.3.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@nami/plugin-monitor",
+  "version": "0.1.0",
+  "description": "Nami 框架监控插件 - 性能指标采集、错误收集与上报",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsc --build --watch",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@nami/shared": "workspace:*"
+  },
+  "keywords": ["nami", "plugin", "monitor", "metrics", "performance"],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}
