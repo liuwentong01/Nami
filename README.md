@@ -497,6 +497,88 @@ pnpm test:coverage
 
 ---
 
+## 与 Next.js 的对比
+
+Nami 的渲染模型和数据预取 API 高度借鉴了 Next.js（降低团队迁移和学习成本），但在中间件管线、插件系统、降级策略、缓存后端、部署模型等方面做了面向企业场景的重新设计。
+
+### 相似之处
+
+| 维度 | Next.js | Nami |
+|------|---------|------|
+| 多渲染模式 | CSR / SSR / SSG / ISR | 同样四种 + Streaming SSR |
+| 路由级渲染配置 | 每个页面独立选择渲染模式 | 每条路由独立配置 `renderMode` |
+| 数据预取 API | `getServerSideProps` / `getStaticProps` / `getStaticPaths` | 完全相同的三个 API 命名和语义 |
+| ISR 语义 | `revalidate: 60` stale-while-revalidate | 同样的 SWR 语义 + 可插拔缓存后端 |
+| Hydration | React 18 `hydrateRoot` | 同样基于 React 18 |
+| 构建产物 | Client Bundle + Server Bundle | 同样双产物 + SSG 静态文件 |
+
+### 核心差异
+
+#### 服务端框架
+
+| | Next.js | Nami |
+|---|---------|------|
+| 底层 | 自研 HTTP 服务器 | **Koa 3** |
+| 中间件 | 自有 Middleware API（Edge Runtime） | 标准 Koa 中间件管线（9 层） |
+| 影响 | 生态封闭，不能直接用 Express/Koa 中间件 | 可复用公司已有的 Koa 中间件资产 |
+
+#### 构建工具
+
+| | Next.js | Nami |
+|---|---------|------|
+| 构建器 | Turbopack + SWC | **Webpack 5**（持久化 FS 缓存） |
+| 原因 | 追求极致开发体验 | 兼容企业已有的大量 Webpack Loader / Plugin |
+
+#### 插件系统
+
+| | Next.js | Nami |
+|---|---------|------|
+| 扩展方式 | `next.config.js` + `withXxx()` 包装函数 | 正式的 Plugin API（waterfall / parallel / bail 三种钩子） |
+| 生命周期覆盖 | 主要覆盖构建阶段 | 覆盖构建 + 服务端 + 客户端全生命周期 |
+| 隔离性 | 无 | 插件错误隔离，不影响核心渲染 |
+
+#### 降级策略
+
+| | Next.js | Nami |
+|---|---------|------|
+| SSR 失败 | 返回 500 错误页 | **5 级渐进降级**：重试 → CSR → 骨架屏 → 兜底 HTML → 503 |
+| 设计理念 | 开发者自行处理 | 框架级保障"永远有内容返回" |
+
+#### ISR 缓存后端
+
+| | Next.js | Nami |
+|---|---------|------|
+| 默认 | 文件系统缓存 | Memory / FileSystem / **Redis** 可插拔 |
+| 分布式 | 需要 Vercel 或第三方方案 | 原生支持 Redis 集群缓存 + tag 批量失效 |
+| 按需失效 | `revalidatePath()` / `revalidateTag()` | `invalidate(path)` / `invalidateByTag(tag)` + 预热 |
+
+#### 部署模型
+
+| | Next.js | Nami |
+|---|---------|------|
+| 最佳实践 | Vercel（深度绑定） | **自建集群部署**（Master/Worker 进程管理） |
+| 集群 | 依赖 K8s / PM2 | 内置 cluster 模式 + 优雅停机 |
+
+### 何时选择 Next.js
+
+- 团队规模较小（< 20 前端），维护自研框架的人力成本不划算
+- 没有历史中间件包袱，可以使用 Vercel 部署
+- 追求前沿特性（App Router、Server Components、Partial Prerendering）
+- 招聘考量，Next.js 是市场主流，新人上手快
+
+### 何时选择自研框架（Nami 的定位）
+
+- **基础设施深度定制** — 公司有自己的鉴权、链路追踪、灰度、配置中心，需要深度集成到中间件管线
+- **部署环境受限** — 不能用 Vercel，必须部署在内网/私有云；ISR 需要 Redis 集群做分布式缓存
+- **稳定性要求极高** — 日均 PV 过亿场景下，5 级降级 > 500 错误页；插件错误隔离保障核心可用
+- **大量 Webpack 资产** — 50+ 项目已有自定义 Loader / Plugin，Next.js 迁移到 Turbopack 后兼容性存疑
+- **技术主权** — 不依赖单一商业公司的技术路线，框架升级节奏由自己掌控
+- **统一技术栈治理** — 通过框架内置插件统一全公司的监控、错误上报、缓存策略
+
+> 国内头部大厂（字节 Modern.js、阿里 ICE、腾讯 Hippy）都走了类似路线——借鉴社区方案的渲染模型，但用自己的服务端框架和部署基础设施重新实现。
+
+---
+
 ## 开发
 
 ```bash
