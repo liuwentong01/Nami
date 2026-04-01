@@ -53,17 +53,34 @@ export class NamiRouteCollectPlugin {
   }
 
   apply(compiler: Compiler): void {
+    // beforeCompile：扫描页面目录，将路由信息存储到编译上下文中供其他插件使用
     compiler.hooks.beforeCompile.tapAsync(
       'NamiRouteCollectPlugin',
       (_params, callback) => {
         try {
           const routes = this.scanPages(this.pagesDir);
-          // 将路由信息存储到编译上下文中，供其他插件使用
           (compiler as any).__namiRoutes = routes;
           callback();
         } catch (error) {
           callback(error as Error);
         }
+      },
+    );
+
+    // emit：将收集到的路由清单写入构建输出目录
+    compiler.hooks.emit.tapAsync(
+      'NamiRouteCollectPlugin',
+      (compilation, callback) => {
+        const routes: CollectedRoute[] = (compiler as any).__namiRoutes || [];
+        const manifest = JSON.stringify({ routes, generatedAt: new Date().toISOString() }, null, 2);
+
+        // 通过 Webpack 的 emitAsset API 写入文件，确保纳入构建产物管理
+        compilation.emitAsset(
+          this.outputFilename,
+          new compiler.webpack.sources.RawSource(manifest),
+        );
+
+        callback();
       },
     );
   }

@@ -137,6 +137,9 @@ export class RevalidationQueue {
   /** 是否已关闭 */
   private closed = false;
 
+  /** 活跃的超时计时器句柄（用于 close 时清理，防止内存泄漏） */
+  private readonly activeTimers: Set<ReturnType<typeof setTimeout>> = new Set();
+
   constructor(options: RevalidationQueueOptions) {
     this.maxConcurrency = options.maxConcurrency ?? 2;
     this.timeout = options.timeout ?? 30000;
@@ -225,6 +228,13 @@ export class RevalidationQueue {
     this.closed = true;
     this.pendingQueue.length = 0;
     this.pendingKeys.clear();
+
+    // 清理所有活跃的超时计时器，防止进程退出时的内存泄漏
+    for (const timer of this.activeTimers) {
+      clearTimeout(timer);
+    }
+    this.activeTimers.clear();
+
     logger.info('重验证队列已关闭', {
       activeCount: this.activeCount,
     });
@@ -270,16 +280,22 @@ export class RevalidationQueue {
       /**
        * 使用 Promise.race 实现超时保护
        * 防止渲染函数长时间阻塞占用并发槽位
+       * 超时计时器注册到 activeTimers 中，确保 close() 时能清理
        */
+      let timeoutHandle: ReturnType<typeof setTimeout>;
       const html = await Promise.race([
         job.renderFn(),
         new Promise<never>((_, reject) => {
-          setTimeout(
+          timeoutHandle = setTimeout(
             () => reject(new Error(`重验证超时（${this.timeout}ms）`)),
             this.timeout,
           );
+          this.activeTimers.add(timeoutHandle);
         }),
       ]);
+      // 渲染完成后清理超时计时器
+      clearTimeout(timeoutHandle!);
+      this.activeTimers.delete(timeoutHandle!);
 
       const duration = Date.now() - startTime;
 

@@ -44,7 +44,7 @@ import {
 import { BaseRenderer } from './base-renderer';
 import { SSRRenderer } from './ssr-renderer';
 import { CSRRenderer } from './csr-renderer';
-import type { RendererOptions, AppElementFactory } from './types';
+import type { RendererOptions, AppElementFactory, ModuleLoaderLike } from './types';
 
 /**
  * Streaming SSR 渲染器配置
@@ -52,6 +52,14 @@ import type { RendererOptions, AppElementFactory } from './types';
 export interface StreamingSSRRendererOptions extends RendererOptions {
   /** React 组件树工厂函数 */
   appElementFactory: AppElementFactory;
+
+  /**
+   * 模块加载器
+   *
+   * 用于从 server bundle 中加载 getServerSideProps 等数据预取函数。
+   * 不传时 Streaming SSR 数据预取将无法工作。
+   */
+  moduleLoader?: ModuleLoaderLike;
 
   /**
    * 流式传输超时时间（毫秒）
@@ -95,6 +103,7 @@ export interface StreamingRenderResult extends RenderResult {
  */
 export class StreamingSSRRenderer extends BaseRenderer {
   private readonly appElementFactory: AppElementFactory;
+  private readonly moduleLoader?: ModuleLoaderLike;
   private readonly streamTimeout: number;
   private readonly ssrTimeout: number;
   private readonly progressiveHydration: boolean;
@@ -102,6 +111,7 @@ export class StreamingSSRRenderer extends BaseRenderer {
   constructor(options: StreamingSSRRendererOptions) {
     super(options);
     this.appElementFactory = options.appElementFactory;
+    this.moduleLoader = options.moduleLoader;
     this.streamTimeout = options.streamTimeout ?? 10000;
     this.ssrTimeout = options.config.server.ssrTimeout;
     this.progressiveHydration = options.progressiveHydration ?? true;
@@ -297,12 +307,11 @@ export class StreamingSSRRenderer extends BaseRenderer {
         requestId: context.requestId,
       };
 
-      // 通过 ModuleLoader 解析函数
-      const moduleLoader = (this as any).moduleLoader;
+      // 通过 ModuleLoader 从 server bundle 中解析 getServerSideProps 函数
       let gsspFn: ((ctx: GetServerSidePropsContext) => Promise<GetServerSidePropsResult>) | null = null;
 
-      if (moduleLoader) {
-        gsspFn = await moduleLoader.getExportedFunction(route.component, route.getServerSideProps);
+      if (this.moduleLoader) {
+        gsspFn = await this.moduleLoader.getExportedFunction(route.component, route.getServerSideProps);
       }
 
       if (!gsspFn) {

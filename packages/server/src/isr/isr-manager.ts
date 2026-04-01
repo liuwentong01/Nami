@@ -379,10 +379,23 @@ export class ISRManager {
   /**
    * 关闭 ISR 管理器
    *
-   * 在服务停机时调用，关闭重验证队列并释放资源。
+   * 在服务停机时调用，关闭重验证队列并释放缓存存储资源。
+   * 对于 Redis 等需要连接管理的缓存后端，必须调用此方法释放连接。
    */
   async close(): Promise<void> {
     logger.info('关闭 ISR 管理器');
     this.revalidationQueue.close();
+
+    // 关闭缓存存储后端（释放 Redis 连接等资源）
+    if (typeof (this.cacheStore as any).close === 'function') {
+      try {
+        await (this.cacheStore as any).close();
+        logger.debug('缓存存储已关闭');
+      } catch (error) {
+        logger.warn('缓存存储关闭失败', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
 }

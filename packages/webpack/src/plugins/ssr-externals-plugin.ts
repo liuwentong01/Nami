@@ -44,23 +44,54 @@ export class NamiSSRExternalsPlugin {
   }
 
   apply(compiler: Compiler): void {
-    compiler.hooks.normalModuleFactory.tap('NamiSSRExternalsPlugin', (nmf) => {
-      nmf.hooks.beforeResolve.tap('NamiSSRExternalsPlugin', (resolveData) => {
-        if (!resolveData) return;
+    /**
+     * 通过 externals 配置实现 SSR 外部化
+     *
+     * Webpack 的 normalModuleFactory.hooks.beforeResolve 无法直接标记模块为 external，
+     * 因此改用 compiler.options.externals 函数方式，这是 Webpack 5 推荐的外部化模式。
+     *
+     * 判断逻辑：
+     * 1. 相对路径（./ ../）和绝对路径（/）→ 始终打包（项目自身代码）
+     * 2. 匹配白名单（@nami/*、CSS 文件等）→ 始终打包
+     * 3. 其余 node_modules 包 → 标记为 commonjs external，运行时 require
+     */
+    const existingExternals = compiler.options.externals;
+    const allowlist = this.allowlist;
+    const forcedExternals = this.forcedExternals;
 
-        const request = resolveData.request;
+    const externalsFunction = (
+      { request }: { request?: string },
+      callback: (err?: Error | null, result?: string) => void,
+    ): void => {
+      if (!request) {
+        callback();
+        return;
+      }
 
-        // 相对路径导入：始终打包
-        if (request.startsWith('.') || request.startsWith('/')) return;
+      // 相对路径或绝对路径：始终打包（项目自身代码）
+      if (request.startsWith('.') || request.startsWith('/')) {
+        callback();
+        return;
+      }
 
-        // 检查白名单
-        if (this.allowlist.some((re) => re.test(request))) return;
+      // 白名单匹配：始终打包（框架包、CSS 等需要 Webpack 处理的模块）
+      if (allowlist.some((re) => re.test(request))) {
+        callback();
+        return;
+      }
 
-        // 强制外部化
-        if (this.forcedExternals.has(request)) {
-          resolveData.request = request;
-        }
-      });
-    });
+      // 强制外部化列表或非白名单的 node_modules 包 → 标记为 commonjs external
+      callback(null, `commonjs ${request}`);
+    };
+
+    // 保留已有的 externals 配置，追加 SSR 外部化函数
+    if (existingExternals) {
+      compiler.options.externals = [
+        ...(Array.isArray(existingExternals) ? existingExternals : [existingExternals]),
+        externalsFunction as any,
+      ];
+    } else {
+      compiler.options.externals = [externalsFunction as any];
+    }
   }
 }

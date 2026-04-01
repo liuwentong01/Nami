@@ -26,8 +26,8 @@ function createContentHash(config: NamiConfig): string {
   const content = JSON.stringify({
     appName: config.appName,
     srcDir: config.srcDir,
-    outputDir: config.outputDir,
-    publicPath: config.publicPath,
+    outDir: config.outDir,
+    publicPath: config.assets.publicPath,
     defaultRenderMode: config.defaultRenderMode,
     routes: config.routes?.map((r) => r.path),
   });

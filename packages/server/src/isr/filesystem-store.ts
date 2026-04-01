@@ -378,6 +378,9 @@ export class FilesystemStore implements CacheStore {
 
   /**
    * 将缓存键添加到标签索引
+   *
+   * 使用原子写入（临时文件 + rename）防止并发写入导致的数据丢失。
+   * 多进程环境下 rename 是原子操作，能保证索引文件的完整性。
    */
   private async addKeyToTag(tag: string, key: string): Promise<void> {
     const tagPath = this.getTagPath(tag);
@@ -392,12 +395,16 @@ export class FilesystemStore implements CacheStore {
 
     if (!keys.includes(key)) {
       keys.push(key);
-      await fs.writeFile(tagPath, JSON.stringify(keys), 'utf-8');
+      const tempPath = `${tagPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+      await fs.writeFile(tempPath, JSON.stringify(keys), 'utf-8');
+      await fs.rename(tempPath, tagPath);
     }
   }
 
   /**
    * 从标签索引中移除缓存键
+   *
+   * 同样使用原子写入保证并发安全。
    */
   private async removeKeyFromTag(tag: string, key: string): Promise<void> {
     const tagPath = this.getTagPath(tag);
@@ -410,7 +417,9 @@ export class FilesystemStore implements CacheStore {
       if (keys.length === 0) {
         await fs.unlink(tagPath);
       } else {
-        await fs.writeFile(tagPath, JSON.stringify(keys), 'utf-8');
+        const tempPath = `${tagPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+        await fs.writeFile(tempPath, JSON.stringify(keys), 'utf-8');
+        await fs.rename(tempPath, tagPath);
       }
     } catch {
       // 忽略

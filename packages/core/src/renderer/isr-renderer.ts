@@ -51,7 +51,7 @@ import {
 
 import { BaseRenderer } from './base-renderer';
 import { CSRRenderer } from './csr-renderer';
-import type { RendererOptions, AppElementFactory, ISRManagerLike } from './types';
+import type { RendererOptions, AppElementFactory, ISRManagerLike, ModuleLoaderLike } from './types';
 
 /**
  * ISR 渲染器配置
@@ -72,6 +72,14 @@ export interface ISRRendererOptions extends RendererOptions {
    * 缓存命中时不需要（直接返回缓存的 HTML）。
    */
   appElementFactory: AppElementFactory;
+
+  /**
+   * 模块加载器
+   *
+   * 用于从 server bundle 中加载 getStaticProps 等数据预取函数。
+   * 不传时 ISR 数据预取将无法工作。
+   */
+  moduleLoader?: ModuleLoaderLike;
 }
 
 /**
@@ -87,6 +95,9 @@ export class ISRRenderer extends BaseRenderer {
   /** React 组件树工厂函数 */
   private readonly appElementFactory: AppElementFactory;
 
+  /** 模块加载器 — 用于从 server bundle 中加载数据预取函数 */
+  private readonly moduleLoader?: ModuleLoaderLike;
+
   /** 默认重验证间隔（秒），来自 config.isr.defaultRevalidate */
   private readonly defaultRevalidate: number;
 
@@ -94,6 +105,7 @@ export class ISRRenderer extends BaseRenderer {
     super(options);
     this.isrManager = options.isrManager;
     this.appElementFactory = options.appElementFactory;
+    this.moduleLoader = options.moduleLoader;
     this.defaultRevalidate = options.config.isr.defaultRevalidate;
 
     this.logger.debug('ISR 渲染器已初始化', {
@@ -453,20 +465,22 @@ export class ISRRenderer extends BaseRenderer {
     revalidate: number,
   ): void {
     // 构造渲染函数，供 ISRManager 在后台执行
+    // 使用浅拷贝的 context 避免修改原始请求上下文（原始 context 可能仍在使用中）
+    const revalidationContext = { ...context };
     const renderFn = async (): Promise<string> => {
       this.logger.debug('执行后台重验证渲染', { cacheKey });
 
       // 数据预取
-      const prefetchResult = await this.prefetchData(context);
-      context.initialData = prefetchResult.data as Record<string, unknown>;
+      const prefetchResult = await this.prefetchData(revalidationContext);
+      revalidationContext.initialData = prefetchResult.data as Record<string, unknown>;
 
       // React 渲染
       const { renderToString } = await this.importRenderToString();
-      const appElement = this.appElementFactory(context);
+      const appElement = this.appElementFactory(revalidationContext);
       const appHTML = renderToString(appElement as React.ReactElement);
 
       // HTML 组装
-      return this.assembleHTML(appHTML, context);
+      return this.assembleHTML(appHTML, revalidationContext);
     };
 
     // 委托 ISRManager 调度后台重验证
@@ -593,14 +607,29 @@ export class ISRRenderer extends BaseRenderer {
 
   /**
    * 解析 getStaticProps 函数
+   *
+   * 通过 ModuleLoader 从 server bundle 中加载指定组件的 getStaticProps 导出函数。
+   * ModuleLoader 未配置时返回 null 并打印警告。
+   *
+   * @param componentPath - 组件路径（如 './pages/home'）
+   * @param functionName - 导出函数名（如 'getStaticProps'）
+   * @returns getStaticProps 函数或 null
    */
   private async resolveGetStaticProps(
     componentPath: string,
     functionName: string,
   ): Promise<((ctx: GetStaticPropsContext) => Promise<GetStaticPropsResult>) | null> {
     try {
-      // 占位实现 — 实际应从 server bundle 中加载
       this.logger.debug('解析 getStaticProps', {
+        componentPath,
+        functionName,
+      });
+
+      if (this.moduleLoader) {
+        return await this.moduleLoader.getExportedFunction(componentPath, functionName);
+      }
+
+      this.logger.warn('ModuleLoader 未配置，无法解析 getStaticProps', {
         componentPath,
         functionName,
       });
