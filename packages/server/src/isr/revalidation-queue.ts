@@ -277,13 +277,14 @@ export class RevalidationQueue {
       queueWaitTime: startTime - job.enqueuedAt,
     });
 
+    // 超时计时器在 try 外声明，确保 catch/finally 中都能访问和清理
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     try {
       /**
        * 使用 Promise.race 实现超时保护
        * 防止渲染函数长时间阻塞占用并发槽位
        * 超时计时器注册到 activeTimers 中，确保 close() 时能清理
        */
-      let timeoutHandle: ReturnType<typeof setTimeout>;
       const payload = await Promise.race([
         job.renderFn(),
         new Promise<never>((_, reject) => {
@@ -294,9 +295,6 @@ export class RevalidationQueue {
           this.activeTimers.add(timeoutHandle);
         }),
       ]);
-      // 渲染完成后清理超时计时器
-      clearTimeout(timeoutHandle!);
-      this.activeTimers.delete(timeoutHandle!);
       const normalized = typeof payload === 'string'
         ? { html: payload, tags: job.tags ?? [] }
         : { html: payload.html, tags: payload.tags ?? job.tags ?? [] };
@@ -362,14 +360,14 @@ export class RevalidationQueue {
         }
       }
     } finally {
-      /**
-       * 释放并发槽位
-       * 无论成功还是失败，都要释放并尝试处理下一个任务
-       */
+      // 无论成功、失败或超时，都清理计时器防止泄漏
+      if (timeoutHandle !== undefined) {
+        clearTimeout(timeoutHandle);
+        this.activeTimers.delete(timeoutHandle);
+      }
+
       this.activeKeys.delete(job.key);
       this.activeCount--;
-
-      // 继续处理队列中的下一个任务
       this.processQueue();
     }
   }

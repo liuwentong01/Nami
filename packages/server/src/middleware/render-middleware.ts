@@ -346,7 +346,10 @@ export function renderMiddleware(
         ? await streamingRenderer.renderToStream!(renderContext)
         : await renderer.render(renderContext);
 
-      // ===== 5. 设置响应 =====
+      // ===== 5. 消费插件写入的 extra 字段 =====
+      applyPluginExtras(ctx, renderContext, result, requestLogger);
+
+      // ===== 6. 设置响应 =====
       setResponse(ctx, result, requestLogger);
 
       requestLogger.info('渲染完成', {
@@ -377,6 +380,17 @@ export function renderMiddleware(
         stack: normalizedError.stack,
       });
 
+      // 如果插件提供了骨架屏 fallback，优先使用
+      if (typeof renderContext.extra.__skeleton_fallback === 'string') {
+        const skeletonHtml = renderContext.extra.__skeleton_fallback;
+        ctx.status = 200;
+        ctx.set('Content-Type', 'text/html; charset=utf-8');
+        ctx.set('X-Nami-Render-Mode', 'skeleton-fallback');
+        ctx.body = skeletonHtml;
+        requestLogger.info('使用插件骨架屏降级', { requestId, path: ctx.path });
+        return;
+      }
+
       // 执行降级策略
       const degradationResult = await degradationManager.executeWithDegradation(
         async (ctx: RenderContext) => renderer.render(ctx),
@@ -395,6 +409,56 @@ export function renderMiddleware(
       });
     }
   };
+}
+
+/**
+ * 消费插件通过 context.extra 传递的协议字段
+ *
+ * 插件（cache / skeleton / error-boundary 等）在 onBeforeRender 阶段
+ * 向 context.extra 写入约定字段，render-middleware 在渲染完成后统一读取，
+ * 将插件意图映射到 HTTP 响应上，形成完整的「写入 → 消费」闭环。
+ *
+ * 约定字段：
+ * - __cache_hit: boolean      — 插件级缓存命中标记
+ * - __cache_content: string   — 插件级缓存内容（命中时直接替换 html）
+ * - __skeleton_fallback: string — 骨架屏 HTML（渲染降级时使用）
+ * - __retry_attempted: boolean — 插件已触发重试标记
+ * - __custom_headers: Record<string, string> — 插件注入的自定义响应头
+ */
+function applyPluginExtras(
+  ctx: Koa.Context,
+  renderContext: RenderContext,
+  result: RenderResult,
+  logger: Logger,
+): void {
+  const { extra } = renderContext;
+  if (!extra || Object.keys(extra).length === 0) return;
+
+  // 插件缓存命中 — 直接使用缓存内容替换渲染结果
+  if (extra.__cache_hit === true && typeof extra.__cache_content === 'string') {
+    result.html = extra.__cache_content;
+    result.headers['X-Nami-Plugin-Cache'] = 'HIT';
+    logger.debug('插件缓存命中，使用缓存内容', { path: renderContext.path });
+  }
+
+  // 插件注入的自定义响应头
+  if (extra.__custom_headers && typeof extra.__custom_headers === 'object') {
+    for (const [key, value] of Object.entries(
+      extra.__custom_headers as Record<string, string>,
+    )) {
+      if (typeof value === 'string') {
+        result.headers[key] = value;
+      }
+    }
+  }
+
+  // 重试标记 — 写入响应头便于监控
+  if (extra.__retry_attempted === true) {
+    result.headers['X-Nami-Retry'] = '1';
+  }
+
+  // 将 extra 挂到 ctx.state 供下游中间件消费
+  ctx.state.namiExtra = extra;
 }
 
 /**

@@ -387,11 +387,9 @@ export const NamiHead: React.FC<NamiHeadProps> = ({
   // ==================== SSR 模式处理 ====================
 
   /**
-   * SSR 模式下：通过上下文收集标签数据
-   *
-   * 不执行任何 DOM 操作（服务端没有 document），
-   * 仅将标签信息注册到收集器中。
-   * 渲染完成后由服务端从收集器中提取并生成 <head> HTML。
+   * SSR 模式下：通过上下文收集标签数据，不执行 DOM 操作。
+   * 注意：这里不能 early return，否则下面的 useEffect 会被条件跳过，
+   * 违反 React Hooks 规则（hooks 调用次数必须在每次渲染中一致）。
    */
   if (isSSR) {
     collectTags({
@@ -407,28 +405,21 @@ export const NamiHead: React.FC<NamiHeadProps> = ({
       linkCount: link?.length ?? 0,
       scriptCount: script?.length ?? 0,
     });
-
-    // SSR 模式下不渲染任何可见 DOM
-    return null;
   }
 
   // ==================== CSR 模式处理 ====================
 
-  // eslint-disable-next-line react-hooks/rules-of-hooks
   useEffect(() => {
-    // 服务端环境不执行 DOM 操作
-    if (typeof document === 'undefined') return;
+    // SSR 模式或服务端环境下不执行 DOM 操作
+    if (isSSR || typeof document === 'undefined') return;
 
-    /** 本次 effect 创建的 DOM 元素列表 */
     const elements: HTMLElement[] = [];
 
-    // -------- 处理标题 --------
     if (resolvedTitle !== undefined) {
       document.title = resolvedTitle;
       logger.debug('设置页面标题', { title: resolvedTitle });
     }
 
-    // -------- 处理 meta 标签 --------
     if (meta) {
       for (const tag of meta) {
         const metaEl = createMetaElement(tag);
@@ -438,7 +429,6 @@ export const NamiHead: React.FC<NamiHeadProps> = ({
       }
     }
 
-    // -------- 处理 link 标签 --------
     if (link) {
       for (const tag of link) {
         const linkEl = createLinkElement(tag);
@@ -448,7 +438,6 @@ export const NamiHead: React.FC<NamiHeadProps> = ({
       }
     }
 
-    // -------- 处理 script 标签 --------
     if (script) {
       for (const tag of script) {
         const scriptEl = createScriptElement(tag);
@@ -458,7 +447,6 @@ export const NamiHead: React.FC<NamiHeadProps> = ({
       }
     }
 
-    // 记录管理的元素
     managedElementsRef.current = elements;
 
     logger.debug('NamiHead 已更新', {
@@ -467,26 +455,21 @@ export const NamiHead: React.FC<NamiHeadProps> = ({
       scriptCount: script?.length ?? 0,
     });
 
-    // -------- 清理函数 --------
     return () => {
-      // 恢复标题
       if (resolvedTitle !== undefined) {
         document.title = previousTitleRef.current;
       }
 
-      // 移除本组件添加的所有 DOM 元素
       for (const element of managedElementsRef.current) {
         if (element.parentNode) {
           element.parentNode.removeChild(element);
         }
       }
       managedElementsRef.current = [];
-
       logger.debug('NamiHead 已清理');
     };
-  }, [resolvedTitle, meta, link, script]);
+  }, [isSSR, resolvedTitle, meta, link, script]);
 
-  // NamiHead 不渲染任何可见 DOM
   return null;
 };
 

@@ -149,32 +149,32 @@ export function startMaster(options: MasterOptions = {}): void {
     });
 
     /**
-     * 监听工作进程的 'online' 事件
-     * 工作进程成功启动并准备接受请求时触发
-     */
-    worker.on('online', () => {
-      readyWorkers++;
-      logger.info(`工作进程上线`, {
-        workerPid: worker.process.pid,
-        workerId: worker.id,
-        readyWorkers,
-        totalWorkers: workerCount,
-      });
-
-      if (readyWorkers === workerCount && options.onAllWorkersReady) {
-        options.onAllWorkersReady();
-      }
-    });
-
-    /**
      * 监听工作进程消息
-     * 用于主从进程间通信
+     *
+     * 关键语义：使用 worker:ready 消息（而非 online 事件）判断就绪。
+     * online 事件仅表示进程已 fork 成功，但此时 Koa 尚未绑定端口；
+     * worker:ready 由 startWorker 在 app.listen 回调中发送，
+     * 确保该工作进程确实能处理 HTTP 请求后才计入就绪。
      */
     worker.on('message', (message: Record<string, unknown>) => {
-      logger.debug('收到工作进程消息', {
-        workerPid: worker.process.pid,
-        message,
-      });
+      if (message.type === 'worker:ready') {
+        readyWorkers++;
+        logger.info(`工作进程就绪（已绑定端口）`, {
+          workerPid: worker.process.pid,
+          workerId: worker.id,
+          readyWorkers,
+          totalWorkers: workerCount,
+        });
+
+        if (readyWorkers === workerCount && options.onAllWorkersReady) {
+          options.onAllWorkersReady();
+        }
+      } else {
+        logger.debug('收到工作进程消息', {
+          workerPid: worker.process.pid,
+          message,
+        });
+      }
     });
   }
 

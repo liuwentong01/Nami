@@ -248,9 +248,10 @@ export const SelectiveHydration: React.FC<SelectiveHydrationProps> = ({
   }
 
   /**
-   * 客户端渲染：
-   * - 未触发 Hydration 前：显示 fallback 内容（或保留 SSR HTML）
-   * - 触发 Hydration 后：通过 Suspense 渲染真正的子组件
+   * 客户端 — 未触发 Hydration：
+   * 使用 suppressHydrationWarning 保留 SSR 阶段输出的 DOM，
+   * 不渲染任何子节点，让浏览器原样保持服务端的 innerHTML。
+   * 当 shouldHydrate 翻转后 React 才接管渲染。
    */
   if (!shouldHydrate) {
     return React.createElement(
@@ -259,8 +260,8 @@ export const SelectiveHydration: React.FC<SelectiveHydrationProps> = ({
         ref: containerRef,
         'data-nami-hydration': priority,
         'data-nami-hydration-pending': 'true',
+        suppressHydrationWarning: true,
       },
-      fallback || null,
     );
   }
 

@@ -455,12 +455,12 @@ export class StreamingSSRRenderer extends BaseRenderer {
   }
 
   private buildHTMLShell(context: RenderContext): { headHTML: string; tailHTML: string } {
-    const { config } = this;
-    const publicPath = config.assets.publicPath;
     const title =
-      (context.route.meta?.title as string) ?? config.title ?? config.appName;
+      (context.route.meta?.title as string) ?? this.config.title ?? this.config.appName;
     const description =
-      (context.route.meta?.description as string) ?? config.description ?? '';
+      (context.route.meta?.description as string) ?? this.config.description ?? '';
+
+    const { cssLinks, jsScripts } = this.resolveAssets();
 
     const headHTML = [
       '<!DOCTYPE html>',
@@ -473,7 +473,7 @@ export class StreamingSSRRenderer extends BaseRenderer {
         ? `  <meta name="description" content="${this.escapeHTML(description)}">`
         : '',
       '  <meta name="renderer" content="streaming-ssr">',
-      `  <link rel="stylesheet" href="${publicPath}static/css/main.css">`,
+      cssLinks,
       '</head>',
       '<body>',
       '  <div id="nami-root">',
@@ -488,7 +488,7 @@ export class StreamingSSRRenderer extends BaseRenderer {
     const tailHTML = [
       '  </div>',
       dataScript ? `  ${dataScript}` : '',
-      `  <script defer src="${publicPath}static/js/main.js"></script>`,
+      jsScripts,
       '</body>',
       '</html>',
     ]

@@ -39,7 +39,6 @@ import type {
   RenderResult,
   RenderTiming,
   PrefetchResult,
-  ISRCacheResult,
   GetStaticPropsContext,
   GetStaticPropsResult,
 } from '@nami/shared';
@@ -426,23 +425,23 @@ export class ISRRenderer extends BaseRenderer {
    * 组装完整的 HTML 文档
    */
   private assembleHTML(appHTML: string, context: RenderContext): string {
-    const { config } = this;
-    const publicPath = config.assets.publicPath;
     const containerId = 'nami-root';
 
     const title =
       (context.route.meta?.title as string) ??
-      config.title ??
-      config.appName;
+      this.config.title ??
+      this.config.appName;
 
     const description =
       (context.route.meta?.description as string) ??
-      config.description ??
+      this.config.description ??
       '';
 
     const dataScript = context.initialData
       ? generateDataScript(context.initialData)
       : '';
+
+    const { cssLinks, jsScripts } = this.resolveAssets();
 
     return [
       '<!DOCTYPE html>',
@@ -455,12 +454,12 @@ export class ISRRenderer extends BaseRenderer {
         ? `  <meta name="description" content="${this.escapeHTML(description)}">`
         : '',
       '  <meta name="renderer" content="isr">',
-      `  <link rel="stylesheet" href="${publicPath}static/css/main.css">`,
+      cssLinks,
       '</head>',
       '<body>',
       `  <div id="${containerId}">${appHTML}</div>`,
       dataScript ? `  ${dataScript}` : '',
-      `  <script defer src="${publicPath}static/js/main.js"></script>`,
+      jsScripts,
       '</body>',
       '</html>',
     ]

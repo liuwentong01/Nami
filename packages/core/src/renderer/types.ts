@@ -20,6 +20,8 @@ import type {
   ISRCacheResult,
 } from '@nami/shared';
 
+import type { AssetManifest } from '../html/script-injector';
+
 // ==================== 渲染器配置 ====================
 
 /**
@@ -59,6 +61,15 @@ export interface RendererOptions {
    * SSR/SSG/ISR 渲染器需要此选项来解析数据预取函数。
    */
   moduleLoader?: ModuleLoaderLike;
+
+  /**
+   * 构建产物资源清单
+   *
+   * 从 asset-manifest.json 读取的实际资源路径映射。
+   * 生产环境下文件名含 content hash，必须通过 manifest 获取真实路径，
+   * 否则浏览器会请求到不存在的固定路径而导致白屏。
+   */
+  assetManifest?: AssetManifest;
 }
 
 /**
@@ -70,6 +81,7 @@ export interface RendererOptions {
 export interface CreateRendererOptions extends RendererOptions {
   /** 目标渲染模式 — 决定工厂返回哪种渲染器实例 */
   mode: RenderMode;
+
 
   /**
    * 是否优先使用 Streaming SSR

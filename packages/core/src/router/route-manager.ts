@@ -18,6 +18,7 @@
 import type { NamiRoute, RouteMatchResult } from '@nami/shared';
 import { createLogger } from '@nami/shared';
 import { RouteMatcher } from './route-matcher';
+import { rankRoutes } from './path-matcher';
 
 /** 路由管理器日志 */
 const logger = createLogger('@nami/core:route-manager');
@@ -48,6 +49,9 @@ export class RouteManager {
   /** 路由注册表 */
   private routes: NamiRoute[] = [];
 
+  /** 按优先级排序后的路由缓存 — 注册变更时失效 */
+  private rankedRoutesCache: NamiRoute[] | null = null;
+
   /** 底层路由匹配器 */
   private readonly matcher: RouteMatcher;
 
@@ -68,26 +72,21 @@ export class RouteManager {
   /**
    * 匹配 URL 路径到路由
    *
-   * 遍历所有注册的路由，按注册顺序进行匹配。
-   * 第一个匹配成功的路由将被返回。
-   *
-   * 匹配流程：
-   * 1. 提取路径（去除查询参数和哈希）
-   * 2. 遍历路由列表，尝试逐个匹配
-   * 3. 返回第一个匹配的路由及其提取的参数
+   * 使用 rankRoutes 按优先级排序后匹配，确保静态路由优先于动态参数路由，
+   * 动态参数路由优先于通配符路由。调用方无需关心路由注册顺序。
    *
    * @param path - 请求路径（如 /user/123?tab=profile）
    * @returns 匹配结果，未匹配返回 null
    */
   match(path: string): RouteMatchResult | null {
-    // 提取纯路径（去除查询参数和哈希）
     const cleanPath = this.extractPathname(path);
 
     logger.debug('开始路由匹配', { path: cleanPath });
 
-    // 遍历路由列表进行匹配
-    for (const route of this.routes) {
-      const exact = route.exact !== false; // 默认精确匹配
+    // 使用按优先级排序的路由列表进行匹配
+    const ranked = this.getRankedRoutes();
+    for (const route of ranked) {
+      const exact = route.exact !== false;
       const result = this.matcher.match(route.path, cleanPath, exact);
 
       if (result.matched) {
@@ -105,10 +104,13 @@ export class RouteManager {
       }
     }
 
-    // 尝试匹配子路由（嵌套路由）
-    for (const route of this.routes) {
+    // 尝试匹配子路由（嵌套路由也按优先级排序）
+    for (const route of ranked) {
       if (route.children && route.children.length > 0) {
-        const childResult = this.matchChildren(route.children, cleanPath);
+        const childResult = this.matchChildren(
+          rankRoutes(route.children),
+          cleanPath,
+        );
         if (childResult) {
           return childResult;
         }
@@ -128,16 +130,16 @@ export class RouteManager {
    * @param route - 要注册的路由配置
    */
   register(route: NamiRoute): void {
-    // 检查路径是否已存在
     const existing = this.routes.find((r) => r.path === route.path);
     if (existing) {
       logger.warn('路由路径已存在，将覆盖', { path: route.path });
-      // 覆盖已有路由
       const index = this.routes.indexOf(existing);
       this.routes[index] = route;
     } else {
       this.routes.push(route);
     }
+
+    this.invalidateRankedCache();
 
     logger.debug('注册路由', {
       path: route.path,
@@ -170,6 +172,7 @@ export class RouteManager {
     }
 
     this.routes.splice(index, 1);
+    this.invalidateRankedCache();
     logger.debug('路由已移除', { path });
     return true;
   }
@@ -202,6 +205,24 @@ export class RouteManager {
    */
   get size(): number {
     return this.routes.length;
+  }
+
+  /**
+   * 获取按优先级排序的路由列表（带缓存）
+   *
+   * rankRoutes 内部有编译缓存，但排序本身仍有开销，
+   * 这里额外缓存排序结果，注册/移除时失效。
+   */
+  private getRankedRoutes(): NamiRoute[] {
+    if (!this.rankedRoutesCache) {
+      this.rankedRoutesCache = rankRoutes(this.routes);
+    }
+    return this.rankedRoutesCache;
+  }
+
+  /** 路由变更时清除排序缓存 */
+  private invalidateRankedCache(): void {
+    this.rankedRoutesCache = null;
   }
 
   /**

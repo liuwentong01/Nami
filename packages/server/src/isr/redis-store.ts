@@ -424,6 +424,7 @@ export class RedisStore implements CacheStore {
    * 关闭 Redis 连接
    *
    * 在服务停机时应调用此方法，确保 Redis 连接被正确释放。
+   * 同时提供 close() 别名，与 CacheStore 接口及 ISRManager.close() 保持一致。
    */
   async disconnect(): Promise<void> {
     try {
@@ -434,5 +435,10 @@ export class RedisStore implements CacheStore {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  /** CacheStore 统一关闭接口 — ISRManager.close() 会调用此方法 */
+  async close(): Promise<void> {
+    return this.disconnect();
   }
 }

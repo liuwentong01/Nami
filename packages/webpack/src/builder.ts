@@ -91,6 +91,9 @@ export class NamiBuilder {
   private projectRoot: string;
   private pluginManager?: PluginManager;
 
+  /** SSG 生成阶段收集的路由级错误，最终合并到 BuildResult.errors */
+  private ssgErrors: string[] = [];
+
   constructor(config: NamiConfig, projectRoot: string) {
     this.config = config;
     this.projectRoot = projectRoot;
@@ -165,9 +168,14 @@ export class NamiBuilder {
       }
 
       // 3. 执行 SSG 静态生成（需要 Server Bundle 已就绪）
+      this.ssgErrors = [];
       const ssgTask = tasks.find((t) => t.type === 'ssg');
       if (ssgTask?.routes && ssgTask.routes.length > 0) {
         await this.generateStaticPages(ssgTask.routes);
+      }
+      // 将 SSG 路由级错误纳入 BuildResult，让 CI 能感知部分页面生成失败
+      if (this.ssgErrors.length > 0) {
+        errors.push(...this.ssgErrors);
       }
 
       // 4. 生成框架清单文件
@@ -176,9 +184,10 @@ export class NamiBuilder {
       await this.pluginManager?.callHook('buildEnd');
 
       const duration = Date.now() - startTime;
-      logger.info(`构建完成，耗时 ${duration}ms`);
+      const success = errors.length === 0;
+      logger.info(`构建完成，耗时 ${duration}ms`, { success, errorCount: errors.length });
 
-      return { success: true, duration, errors, warnings, stats };
+      return { success, duration, errors, warnings, stats };
     } catch (error) {
       const err = error as Error;
       logger.error(`构建失败: ${err.message}`);
@@ -689,11 +698,15 @@ export class NamiBuilder {
         }
       } catch (error) {
         const err = error as Error;
-        logger.error(`静态页面生成失败 [${route.path}]: ${err.message}`);
+        const errorMsg = `SSG 路由 [${route.path}] 生成失败: ${err.message}`;
+        logger.error(errorMsg);
+        this.ssgErrors.push(errorMsg);
       }
     }
 
-    logger.info(`静态页面生成完成，共生成 ${generatedCount} 个页面`);
+    logger.info(`静态页面生成完成，共生成 ${generatedCount} 个页面`, {
+      failedRoutes: this.ssgErrors.length,
+    });
   }
 
   /**

@@ -37,7 +37,6 @@ import {
   RenderMode as RenderModeEnum,
   RenderError,
   ErrorCode,
-  safeStringify,
   generateDataScript,
 } from '@nami/shared';
 import type { ReactElement } from 'react';
@@ -458,27 +457,23 @@ export class SSRRenderer extends BaseRenderer {
    * @returns 完整的 HTML 文档字符串
    */
   private assembleHTML(appHTML: string, context: RenderContext): string {
-    const { config } = this;
-    const publicPath = config.assets.publicPath;
     const containerId = 'nami-root';
 
-    // 页面标题
     const title =
       (context.route.meta?.title as string) ??
-      config.title ??
-      config.appName;
+      this.config.title ??
+      this.config.appName;
 
-    // 页面描述
     const description =
       (context.route.meta?.description as string) ??
-      config.description ??
+      this.config.description ??
       '';
 
-    // 生成数据注入脚本
-    // 使用 safeStringify 防止 XSS，数据通过 window.__NAMI_DATA__ 传递给客户端
     const dataScript = context.initialData
       ? generateDataScript(context.initialData)
       : '';
+
+    const { cssLinks, jsScripts } = this.resolveAssets();
 
     return [
       '<!DOCTYPE html>',
@@ -491,13 +486,12 @@ export class SSRRenderer extends BaseRenderer {
         ? `  <meta name="description" content="${this.escapeHTML(description)}">`
         : '',
       '  <meta name="renderer" content="ssr">',
-      `  <link rel="stylesheet" href="${publicPath}static/css/main.css">`,
+      cssLinks,
       '</head>',
       '<body>',
       `  <div id="${containerId}">${appHTML}</div>`,
-      // 数据注入脚本必须在客户端 JS 之前，确保 hydration 时 window.__NAMI_DATA__ 已就绪
       dataScript ? `  ${dataScript}` : '',
-      `  <script defer src="${publicPath}static/js/main.js"></script>`,
+      jsScripts,
       '</body>',
       '</html>',
     ]

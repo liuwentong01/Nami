@@ -6,15 +6,16 @@
  *
  * 中间件注册顺序（由外到内）：
  * ```
- * 1. timing             — 请求计时（记录 X-Response-Time）
- * 2. security           — 安全响应头（XSS、CSP、HSTS）
- * 3. requestContext      — 请求上下文（requestId、logger）
- * 4. healthCheck        — 健康检查（短路 /_health）
- * 5. staticServe        — 静态资源服务（JS/CSS/图片）
+ * 0. shutdownAware       — 停机感知（停机中返回 503）
+ * 1. timing              — 请求计时（记录 X-Response-Time）
+ * 2. security            — 安全响应头（XSS、CSP、HSTS）
+ * 3. requestContext       — 请求上下文（requestId、logger）
+ * 4. healthCheck         — 健康检查（短路 /_health）
+ * 5. staticServe         — 静态资源服务（JS/CSS/图片）
  * 6. [plugin middlewares] — 插件注册的自定义中间件
- * 7. errorIsolation     — 错误隔离（防止渲染错误崩溃进程）
- * 8. isrCache           — ISR 缓存层（stale-while-revalidate）
- * 9. render             — 核心渲染（SSR/CSR/SSG/ISR）
+ * 7. errorIsolation      — 错误隔离（防止渲染错误崩溃进程）
+ * 8. isrCache            — ISR 缓存层（stale-while-revalidate）
+ * 9. render              — 核心渲染（SSR/CSR/SSG/ISR）
  * ```
  *
  * 中间件顺序的设计考量：
@@ -55,6 +56,7 @@ import { dataPrefetchMiddleware } from './middleware/data-prefetch-middleware';
 import { errorIsolationMiddleware } from './middleware/error-isolation';
 import { isrCacheMiddleware } from './middleware/isr-cache-middleware';
 import { renderMiddleware } from './middleware/render-middleware';
+import { createShutdownAwareMiddleware } from './middleware/graceful-shutdown';
 
 // ISR
 import { createCacheStore } from './isr/cache-store';
@@ -79,6 +81,9 @@ export interface NamiServerInstance {
 
   /** 降级管理器 */
   degradationManager: DegradationManager;
+
+  /** 触发停机感知中间件 — 调用后新请求返回 503 */
+  triggerShutdown: () => void;
 }
 
 /**
@@ -216,6 +221,15 @@ export async function createNamiServer(
   // ===== 5. 注册中间件管线 =====
 
   /**
+   * 中间件 0: 停机感知
+   * 在最外层，进入停机状态后对新请求返回 503 + Connection: close，
+   * 配合优雅停机流程让负载均衡器及时摘除此节点。
+   */
+  const shutdownAware = createShutdownAwareMiddleware();
+  app.use(shutdownAware.middleware);
+  appLogger.debug('中间件已注册: shutdownAware');
+
+  /**
    * 中间件 1: 请求计时
    * 位于最外层，确保 X-Response-Time 头覆盖所有中间件的耗时
    */
@@ -335,5 +349,6 @@ export async function createNamiServer(
     pluginManager,
     isrManager,
     degradationManager,
+    triggerShutdown: shutdownAware.triggerShutdown,
   };
 }

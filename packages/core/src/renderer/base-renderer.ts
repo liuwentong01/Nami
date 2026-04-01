@@ -39,6 +39,8 @@ import {
 } from '@nami/shared';
 
 import type { RendererOptions, PluginManagerLike } from './types';
+import type { AssetManifest } from '../html/script-injector';
+import { ScriptInjector } from '../html/script-injector';
 
 /**
  * 渲染器抽象基类
@@ -67,12 +69,20 @@ export abstract class BaseRenderer {
   /** 插件管理器引用（可选，未提供时跳过钩子调用） */
   protected readonly pluginManager?: PluginManagerLike;
 
+  /** 构建产物资源清单 — 从 asset-manifest.json 中读取 */
+  protected readonly assetManifest?: AssetManifest;
+
+  /** 脚本注入器 — 基于 manifest 生成正确的 JS/CSS 标签 */
+  protected readonly scriptInjector: ScriptInjector;
+
   /**
    * @param options - 渲染器配置选项
    */
   constructor(options: RendererOptions) {
     this.config = options.config;
     this.pluginManager = options.pluginManager;
+    this.assetManifest = options.assetManifest;
+    this.scriptInjector = new ScriptInjector(options.config.assets.publicPath);
 
     // 创建带渲染模式前缀的日志实例，方便在日志中区分不同渲染器的输出
     this.logger = createLogger(`@nami/renderer:${this.getMode()}`);
@@ -261,6 +271,31 @@ export abstract class BaseRenderer {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  /**
+   * 解析 JS/CSS 资源标签
+   *
+   * 优先从 assetManifest 中获取真实文件路径（含 content hash），
+   * 当 manifest 未提供时降级为约定路径 static/css/main.css + static/js/main.js。
+   *
+   * @returns { cssLinks: string, jsScripts: string } HTML 标签字符串
+   */
+  protected resolveAssets(): { cssLinks: string; jsScripts: string } {
+    const publicPath = this.config.assets.publicPath;
+
+    if (this.assetManifest) {
+      return {
+        cssLinks: this.scriptInjector.injectStyles(this.assetManifest),
+        jsScripts: this.scriptInjector.injectChunks(this.assetManifest, { defer: true }),
+      };
+    }
+
+    // 没有 manifest 时使用约定路径（开发模式 / 未做 hash 的场景）
+    return {
+      cssLinks: `  <link rel="stylesheet" href="${publicPath}static/css/main.css">`,
+      jsScripts: `  <script defer src="${publicPath}static/js/main.js"></script>`,
+    };
   }
 
   /**

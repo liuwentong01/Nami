@@ -27,7 +27,6 @@ import type {
   RenderContext,
   RenderResult,
   PrefetchResult,
-  NamiConfig,
 } from '@nami/shared';
 import { RenderMode as RenderModeEnum } from '@nami/shared';
 
@@ -168,27 +167,19 @@ export class CSRRenderer extends BaseRenderer {
    * @returns 空壳 HTML 字符串
    */
   private generateShellHTML(context: RenderContext): string {
-    const { config } = this;
-    const publicPath = config.assets.publicPath;
     const containerId = 'nami-root';
 
-    // 页面标题：路由 meta 中的 title > 全局配置 title > 应用名称
     const title =
       (context.route.meta?.title as string) ??
-      config.title ??
-      config.appName;
+      this.config.title ??
+      this.config.appName;
 
-    // 页面描述
     const description =
       (context.route.meta?.description as string) ??
-      config.description ??
+      this.config.description ??
       '';
 
-    // 构建 CSS 资源标签
-    const cssLinks = this.buildCSSLinks(publicPath);
-
-    // 构建 JS 资源标签
-    const jsScripts = this.buildJSScripts(publicPath);
+    const { cssLinks, jsScripts } = this.resolveAssets();
 
     return [
       '<!DOCTYPE html>',
@@ -209,40 +200,6 @@ export class CSRRenderer extends BaseRenderer {
     ]
       .filter(Boolean)
       .join('\n');
-  }
-
-  /**
-   * 构建 CSS 资源 link 标签
-   *
-   * 根据 assets 配置中的 publicPath 生成 CSS 文件引用。
-   * 生产环境下文件名包含 content hash，确保缓存有效性。
-   *
-   * @param publicPath - 静态资源公共路径前缀
-   * @returns CSS link 标签字符串
-   */
-  private buildCSSLinks(publicPath: string): string {
-    // 实际项目中应从 asset-manifest.json 读取真实文件名
-    // 这里使用约定的入口文件名
-    const cssFile = `${publicPath}static/css/main.css`;
-    return `  <link rel="stylesheet" href="${cssFile}">`;
-  }
-
-  /**
-   * 构建 JS 资源 script 标签
-   *
-   * 使用 defer 属性加载，确保：
-   * 1. 不阻塞 HTML 解析
-   * 2. 按照文档顺序执行
-   * 3. 在 DOMContentLoaded 前执行完毕
-   *
-   * @param publicPath - 静态资源公共路径前缀
-   * @returns JS script 标签字符串
-   */
-  private buildJSScripts(publicPath: string): string {
-    // 实际项目中应从 asset-manifest.json 读取真实文件名
-    // 这里使用约定的入口文件名
-    const jsFile = `${publicPath}static/js/main.js`;
-    return `  <script defer src="${jsFile}"></script>`;
   }
 
   /**
