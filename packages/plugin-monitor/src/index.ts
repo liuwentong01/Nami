@@ -25,7 +25,7 @@
  */
 
 // 导出插件主体
-export { NamiMonitorPlugin } from './monitor-plugin';
+import { NamiMonitorPlugin } from './monitor-plugin';
 export type { MonitorPluginOptions } from './monitor-plugin';
 
 // 导出收集器
@@ -44,3 +44,35 @@ export type { BeaconReporterOptions } from './reporters/beacon-reporter';
 
 export { ConsoleReporter } from './reporters/console-reporter';
 export type { ConsoleReporterOptions } from './reporters/console-reporter';
+
+type LegacyMonitorPluginOptions = {
+  reportUrl?: string;
+  sampleRate?: number;
+} & Partial<import('./monitor-plugin').MonitorPluginOptions>;
+
+function normalizeMonitorPluginOptions(
+  options: LegacyMonitorPluginOptions = {},
+): import('./monitor-plugin').MonitorPluginOptions {
+  return {
+    endpoint: options.endpoint ?? options.reportUrl ?? '/api/monitor/report',
+    reporterOptions: options.reporterOptions,
+    performanceThresholds: options.performanceThresholds,
+    errorCollectorOptions: {
+      ...options.errorCollectorOptions,
+      sampleRate: options.sampleRate ?? options.errorCollectorOptions?.sampleRate,
+    },
+    flushInterval: options.flushInterval,
+    enableWebVitals: options.enableWebVitals,
+    meta: options.meta,
+    enabled: options.enabled,
+  };
+}
+
+/**
+ * 兼容历史 `pluginMonitor({...})` 调用方式的默认导出工厂。
+ */
+export default function pluginMonitor(options: LegacyMonitorPluginOptions = {}): NamiMonitorPlugin {
+  return new NamiMonitorPlugin(normalizeMonitorPluginOptions(options));
+}
+
+export { NamiMonitorPlugin };

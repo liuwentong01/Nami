@@ -12,6 +12,7 @@ import type { Command } from 'commander';
 import { loadConfig } from '../config/load-config';
 import { cliLogger } from '../utils/logger';
 import { findAvailablePort } from '../utils/port-finder';
+import { resolveServerRuntime } from '../utils/server-runtime';
 import chalk from 'chalk';
 import path from 'path';
 import fs from 'fs';
@@ -28,15 +29,17 @@ export function registerStartCommand(program: Command): void {
     .option('--cluster', '启用集群模式')
     .action(async (options) => {
       try {
-        // 检查构建产物是否存在
-        const outDir = path.resolve(process.cwd(), 'dist');
-        if (!fs.existsSync(outDir)) {
-          cliLogger.error('未找到构建产物。请先运行 `nami build`');
-          process.exit(1);
-        }
-
         // 加载配置
         const config = await loadConfig(process.cwd());
+
+        // 检查构建产物是否存在。
+        // 这里使用合并后的 config.outDir，而不是写死 dist，
+        // 避免自定义输出目录的项目被误判为“未构建”。
+        const outDir = path.resolve(process.cwd(), config.outDir);
+        if (!fs.existsSync(outDir)) {
+          cliLogger.error(`未找到构建产物目录: ${config.outDir}。请先运行 \`nami build\``);
+          process.exit(1);
+        }
 
         // 端口配置
         if (options.port) {
@@ -58,8 +61,17 @@ export function registerStartCommand(program: Command): void {
 
         // 动态导入服务端模块
         const { startServer } = await import('@nami/server');
+        const runtime = resolveServerRuntime({
+          projectRoot: process.cwd(),
+          config,
+          fresh: false,
+        });
 
-        await startServer(config, process.cwd());
+        await startServer(config, {
+          appElementFactory: runtime.appElementFactory,
+          htmlRenderer: runtime.htmlRenderer,
+          moduleLoader: runtime.moduleLoader,
+        });
 
         cliLogger.newline();
         cliLogger.success('生产服务器已启动');

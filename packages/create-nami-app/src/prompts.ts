@@ -55,7 +55,7 @@ export async function promptUserOptions(
   projectName?: string,
   template?: string,
 ): Promise<ProjectOptions> {
-  const questions: inquirer.QuestionCollection = [];
+  const questions: inquirer.DistinctQuestion[] = [];
 
   // 项目名称
   if (!projectName) {

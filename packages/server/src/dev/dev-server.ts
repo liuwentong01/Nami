@@ -35,11 +35,11 @@
  */
 
 import type Koa from 'koa';
-import type { NamiConfig, Logger } from '@nami/shared';
+import type { NamiConfig, Logger, NamiPlugin } from '@nami/shared';
 import { createLogger } from '@nami/shared';
-import type { Configuration as WebpackConfiguration, Compiler } from 'webpack';
-import type { PluginManager } from '@nami/core';
-import type { DegradationManager } from '@nami/core';
+import type { Configuration as WebpackConfiguration, Compiler, Stats } from 'webpack';
+import { DegradationManager, PluginLoader, PluginManager } from '@nami/core';
+import type { AppElementFactory, HTMLRenderer, ModuleLoaderLike } from '@nami/core';
 
 /**
  * 开发服务器配置选项
@@ -71,6 +71,27 @@ export interface DevServerOptions {
    * 配合 pluginManager 使用，提供渲染降级能力。
    */
   degradationManager?: DegradationManager;
+
+  /** React 元素工厂（新 SSR 协议） */
+  appElementFactory?: AppElementFactory;
+
+  /** 兼容 entry-server.renderToHTML() 的 HTML 渲染函数 */
+  htmlRenderer?: HTMLRenderer;
+
+  /** 页面模块加载器 */
+  moduleLoader?: ModuleLoaderLike;
+
+  /**
+   * 动态运行时提供器
+   *
+   * 开发模式下服务端 bundle 会持续重编译，这里允许按请求读取最新 runtime，
+   * 避免 SSR 渲染继续使用旧代码。
+   */
+  runtimeProvider?: () => Promise<{
+    appElementFactory?: AppElementFactory;
+    htmlRenderer?: HTMLRenderer;
+    moduleLoader?: ModuleLoaderLike;
+  }>;
 
   /**
    * 开发服务器就绪回调
@@ -119,6 +140,9 @@ export async function createDevServer(
 ): Promise<DevServer> {
   const { config, clientWebpackConfig, serverWebpackConfig } = options;
   const logger = options.logger ?? defaultLogger;
+  let effectivePluginManager = options.pluginManager;
+  let effectiveDegradationManager = options.degradationManager;
+  const shouldDisposePluginManager = !options.pluginManager;
 
   logger.info('正在创建开发服务器...', {
     appName: config.appName,
@@ -131,9 +155,14 @@ export async function createDevServer(
    * webpack 是一个大型依赖，动态导入避免在生产环境中被加载。
    * 开发服务器仅在开发环境中使用。
    */
-  let webpack: typeof import('webpack');
+  let webpackFactory: (config: WebpackConfiguration) => Compiler;
   try {
-    webpack = await import('webpack');
+    const webpackModule = await import('webpack');
+    // `webpack` 在不同编译目标下可能表现为 default export 或模块本身。
+    // 这里统一收敛成可调用工厂，避免 dev server 因模块互操作差异失效。
+    webpackFactory = (
+      (webpackModule as unknown as { default?: unknown }).default ?? webpackModule
+    ) as (config: WebpackConfiguration) => Compiler;
   } catch {
     throw new Error(
       '开发服务器需要 webpack 依赖，请确保已安装: pnpm add -D webpack',
@@ -144,8 +173,43 @@ export async function createDevServer(
   const Koa = (await import('koa')).default;
   const app = new Koa();
 
+  // ===== 初始化插件系统 =====
+  if (!effectivePluginManager) {
+    effectivePluginManager = new PluginManager(config, logger);
+
+    if (config.plugins.length > 0) {
+      const resolvedPlugins: NamiPlugin[] = [];
+
+      for (const pluginEntry of config.plugins) {
+        try {
+          const plugin = typeof pluginEntry === 'string'
+            ? PluginLoader.load(pluginEntry, logger)
+            : pluginEntry;
+          resolvedPlugins.push(plugin);
+        } catch (error) {
+          logger.error('开发模式插件加载失败，已跳过', {
+            plugin: pluginEntry,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      await effectivePluginManager.registerPlugins(resolvedPlugins);
+    }
+  }
+
+  if (!effectiveDegradationManager) {
+    effectiveDegradationManager = new DegradationManager();
+  }
+
+  // 经过上面的兜底初始化后，开发服务器始终应持有一套可用的
+  // pluginManager / degradationManager。这里收窄类型，避免后续中间件装配阶段
+  // 不必要地继续传播 `undefined`。
+  const resolvedPluginManager = effectivePluginManager!;
+  const resolvedDegradationManager = effectiveDegradationManager!;
+
   // ===== 创建 Webpack 编译器 =====
-  const clientCompiler: Compiler = webpack.default(clientWebpackConfig);
+  const clientCompiler: Compiler = webpackFactory(clientWebpackConfig);
 
   /**
    * 注册客户端 Webpack dev 和 hot 中间件
@@ -180,12 +244,13 @@ export async function createDevServer(
    */
   let serverCompiler: Compiler | undefined;
   if (serverWebpackConfig) {
-    serverCompiler = webpack.default(serverWebpackConfig);
+    const activeServerCompiler = webpackFactory(serverWebpackConfig);
+    serverCompiler = activeServerCompiler;
 
     // 以 watch 模式启动服务端编译
-    serverCompiler.watch(
+    activeServerCompiler.watch(
       { aggregateTimeout: 300 },
-      (err, stats) => {
+      (err?: Error | null, stats?: Stats) => {
         if (err) {
           logger.error('服务端 Webpack 编译错误', {
             error: err.message,
@@ -195,7 +260,7 @@ export async function createDevServer(
 
         if (stats?.hasErrors()) {
           logger.error('服务端 Webpack 编译失败', {
-            errors: stats.compilation.errors.map((e) => e.message),
+            errors: stats.compilation.errors.map((e: Error) => e.message),
           });
           return;
         }
@@ -222,68 +287,34 @@ export async function createDevServer(
   app.use(errorIsolationMiddleware());
 
   // ===== 开发模式渲染中间件 =====
-  if (options.pluginManager && options.degradationManager) {
-    /**
-     * 提供了 pluginManager 和 degradationManager 时，
-     * 使用完整的 renderMiddleware 进行 SSR 渲染（与生产模式一致的渲染管线）。
-     * 开发环境不启用 ISR 缓存，每次都重新渲染。
-     */
-    const { renderMiddleware } = await import('../middleware/render-middleware');
+  /**
+   * 开发模式统一复用正式的 renderMiddleware。
+   *
+   * 这样做有两个好处：
+   * 1. dev / start / production 三条链路共享同一套渲染语义
+   * 2. runtimeProvider 可以在每次请求前读取最新 server bundle，避免 HMR 后 SSR 仍用旧入口
+   *
+   * 如果运行时 bundle 尚未产出，renderMiddleware 会在内部按既有降级逻辑回退，
+   * 不会阻塞整个开发服务器启动。
+   */
+  const { renderMiddleware } = await import('../middleware/render-middleware');
 
-    app.use(renderMiddleware({
-      config,
-      pluginManager: options.pluginManager,
-      degradationManager: options.degradationManager,
-    }));
+  app.use(renderMiddleware({
+    config,
+    pluginManager: resolvedPluginManager,
+    degradationManager: resolvedDegradationManager,
+    appElementFactory: options.appElementFactory,
+    htmlRenderer: options.htmlRenderer,
+    moduleLoader: options.moduleLoader,
+    runtimeProvider: options.runtimeProvider,
+  }));
 
-    logger.info('已注册 SSR 渲染中间件（开发模式）');
-  } else {
-    /**
-     * 未提供 pluginManager / degradationManager 时，
-     * 回退到简单的 CSR HTML shell，让客户端路由接管渲染。
-     */
-    app.use(async (ctx: Koa.Context, next: Koa.Next) => {
-      // 只处理 GET/HEAD 的 HTML 请求
-      if (ctx.method !== 'GET' && ctx.method !== 'HEAD') {
-        await next();
-        return;
-      }
-
-      // 跳过静态资源和 API 请求
-      const skipPaths = ['/static/', '/__webpack_hmr', '/favicon.ico', '/api/'];
-      if (skipPaths.some(p => ctx.path.startsWith(p)) || ctx.path.includes('.')) {
-        await next();
-        return;
-      }
-
-      const publicPath = clientWebpackConfig.output?.publicPath as string || '/';
-      const title = config.title || config.appName || 'Nami App';
-
-      ctx.type = 'html';
-      ctx.body = [
-        '<!DOCTYPE html>',
-        '<html lang="zh-CN">',
-        '<head>',
-        '  <meta charset="utf-8">',
-        '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
-        `  <title>${title} — Dev</title>`,
-        '  <meta name="renderer" content="csr-dev">',
-        '</head>',
-        '<body>',
-        '  <div id="nami-root"></div>',
-        `  <script defer src="${publicPath}main.js"></script>`,
-        '</body>',
-        '</html>',
-      ].join('\n');
-    });
-
-    logger.info('已注册 CSR HTML shell 中间件（开发模式，未提供 pluginManager）');
-  }
+  logger.info('已注册 SSR 渲染中间件（开发模式）');
 
   // ===== 监听首次编译完成 =====
   let isReady = false;
 
-  clientCompiler.hooks.done.tap('NamiDevServer', (stats) => {
+  clientCompiler.hooks.done.tap('NamiDevServer', (stats: Stats) => {
     if (!isReady && !stats.hasErrors()) {
       isReady = true;
       logger.info('Webpack 首次编译完成，开发服务器就绪');
@@ -325,11 +356,15 @@ export async function createDevServer(
       // 关闭 HTTP 服务器
       if (httpServer) {
         await new Promise<void>((resolve, reject) => {
-          httpServer!.close((err) => {
+          httpServer!.close((err?: Error | null) => {
             if (err) reject(err);
             else resolve();
           });
         });
+      }
+
+      if (shouldDisposePluginManager) {
+        await resolvedPluginManager.dispose();
       }
 
       logger.info('开发服务器已关闭');

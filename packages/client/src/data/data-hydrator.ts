@@ -146,12 +146,12 @@ export function cleanupServerData(): void {
 
   // 1. 删除全局变量
   try {
-    delete (window as Record<string, unknown>)[NAMI_DATA_VARIABLE];
+    delete (window as unknown as Record<string, unknown>)[NAMI_DATA_VARIABLE];
     logger.debug('已删除 window.__NAMI_DATA__ 全局变量');
   } catch (error) {
     // 某些严格模式下 delete 可能失败
     try {
-      (window as Record<string, unknown>)[NAMI_DATA_VARIABLE] = undefined;
+      (window as unknown as Record<string, unknown>)[NAMI_DATA_VARIABLE] = undefined;
     } catch {
       // 忽略 — 清理失败不影响应用运行
     }

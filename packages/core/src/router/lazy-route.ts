@@ -13,7 +13,7 @@
  * - 优化首屏：减少初始 JS 体积，加快首屏渲染
  */
 
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, createElement } from 'react';
 import type { ComponentType, ReactNode } from 'react';
 import { createLogger } from '@nami/shared';
 
@@ -127,10 +127,10 @@ export function lazyRoute(
    * 在加载期间显示 loading 状态
    */
   const WrappedComponent: ComponentType<Record<string, unknown>> = (props) => {
-    return (
-      <Suspense fallback={loading}>
-        <LazyComponent {...props} />
-      </Suspense>
+    return createElement(
+      Suspense,
+      { fallback: loading },
+      createElement(LazyComponent, props),
     );
   };
 

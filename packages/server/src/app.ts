@@ -58,7 +58,7 @@ import { renderMiddleware } from './middleware/render-middleware';
 // ISR
 import { createCacheStore } from './isr/cache-store';
 import { ISRManager } from './isr/isr-manager';
-import type { AppElementFactory } from '@nami/core';
+import type { AppElementFactory, HTMLRenderer, ModuleLoaderLike } from '@nami/core';
 
 /** 模块级日志实例 */
 const logger: Logger = createLogger('@nami/server:app');
@@ -89,6 +89,31 @@ export interface CreateServerOptions {
    * SSR/ISR 模式下需要此函数来创建 React 元素树
    */
   appElementFactory?: AppElementFactory;
+
+  /**
+   * 兼容 entry-server.renderToHTML() 的 HTML 渲染函数
+   */
+  htmlRenderer?: HTMLRenderer;
+
+  /**
+   * 页面模块加载器
+   *
+   * 用于让默认服务端链路也能解析页面级数据预取函数，
+   * 避免只有手写接入时才能拿到 getServerSideProps / getStaticProps。
+   */
+  moduleLoader?: ModuleLoaderLike;
+
+  /**
+   * 开发模式动态运行时提供器
+   *
+   * 当 server bundle 持续重编译时，通过该函数按请求读取最新 runtime，
+   * 以免 Koa 进程一直持有旧版本入口。
+   */
+  runtimeProvider?: () => Promise<{
+    appElementFactory?: AppElementFactory;
+    htmlRenderer?: HTMLRenderer;
+    moduleLoader?: ModuleLoaderLike;
+  }>;
 
   /**
    * 自定义日志实例
@@ -127,7 +152,7 @@ export async function createNamiServer(
    * 这是最后一道防线，理论上不应该触发（errorIsolation 中间件会先捕获）。
    * 但为了绝对安全，还是注册一个全局错误处理器。
    */
-  app.on('error', (err, ctx) => {
+  app.on('error', (err: Error, ctx?: Koa.Context) => {
     appLogger.error('Koa 全局错误（兜底捕获）', {
       error: err.message,
       stack: err.stack,
@@ -275,6 +300,10 @@ export async function createNamiServer(
     pluginManager,
     degradationManager,
     appElementFactory: options.appElementFactory,
+    htmlRenderer: options.htmlRenderer,
+    moduleLoader: options.moduleLoader,
+    isrManager,
+    runtimeProvider: options.runtimeProvider,
   }));
   appLogger.debug('中间件已注册: render');
 

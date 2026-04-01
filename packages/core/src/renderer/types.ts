@@ -20,8 +20,6 @@ import type {
   ISRCacheResult,
 } from '@nami/shared';
 
-import type { ModuleLoader } from '../module/module-loader';
-
 // ==================== 渲染器配置 ====================
 
 /**
@@ -92,13 +90,33 @@ export interface CreateRendererOptions extends RendererOptions {
   appElementFactory?: AppElementFactory;
 
   /**
+   * 服务端 HTML 渲染函数
+   *
+   * 这是对 `appElementFactory` 的兼容补充，主要用于接入
+   * `entry-server.tsx` 中导出的 `renderToHTML(url, props)` 风格入口。
+   *
+   * 当业务侧尚未迁移到 React 元素工厂协议时，
+   * 渲染器可以直接复用这个 HTML 入口，避免默认 SSR/ISR 链路断开。
+   */
+  htmlRenderer?: HTMLRenderer;
+
+  /**
+   * ISR 管理器实例
+   *
+   * 该字段保留给上层 server 中间件传递 ISR 运行时依赖。
+   * 当前默认链路中，缓存命中/重验证由 server 侧缓存层统一处理，
+   * core 内部的 ISRRenderer 只负责产出可缓存的 HTML。
+   */
+  isrManager?: ISRManagerLike;
+
+  /**
    * 模块加载器实例
    *
    * 用于从编译后的 server bundle 中加载组件模块，
    * 获取 getServerSideProps / getStaticProps / getStaticPaths 等数据预取函数。
    * 可选，不传时渲染器会尝试直接 require 组件路径作为降级方案。
    */
-  moduleLoader?: ModuleLoader;
+  moduleLoader?: ModuleLoaderLike;
 }
 
 // ==================== 辅助类型 ====================
@@ -116,11 +134,24 @@ export interface CreateRendererOptions extends RendererOptions {
 export type AppElementFactory = (context: RenderContext) => unknown;
 
 /**
+ * 服务端 HTML 渲染函数
+ *
+ * 输入是完整的渲染上下文和已预取的数据，
+ * 输出既可以是页面主体 HTML 片段，也可以是完整 HTML 文档。
+ * 渲染器会在运行时判断输出形态，并在需要时补齐外层文档壳。
+ */
+export type HTMLRenderer = (
+  context: RenderContext,
+  initialData: Record<string, unknown>,
+) => Promise<string> | string;
+
+/**
  * 插件管理器的最小接口
  *
- * 渲染器只需要调用插件管理器的 callHook 方法，
- * 因此这里只声明渲染器实际需要的最小接口，
- * 避免引入完整的 PluginManager 类型产生循环依赖。
+ * 渲染器通过这个最小接口触发生命周期钩子。
+ * 当前核心会优先调用兼容入口 `callHook()`，
+ * 由 `PluginManager` 内部将旧钩子名映射到正式生命周期名称，
+ * 避免渲染器层和插件层出现双协议分叉。
  */
 export interface PluginManagerLike {
   /**
@@ -135,8 +166,9 @@ export interface PluginManagerLike {
 /**
  * ISR 管理器接口
  *
- * ISRRenderer 依赖此接口完成缓存查询和后台重验证。
- * 具体实现由 @nami/core 的缓存模块提供。
+ * 这是 server 层 ISR 缓存中间件依赖的最小能力接口。
+ * 为了避免 core 渲染器和 server 缓存层各自维护一套 ISR 协议，
+ * 这里收敛为与 `packages/server/src/isr/isr-manager.ts` 一致的签名。
  */
 export interface ISRManagerLike {
   /**
@@ -148,31 +180,15 @@ export interface ISRManagerLike {
    * 3. 缓存未命中 → 阻塞渲染并缓存结果
    *
    * @param key - 缓存键（通常是请求路径）
-   * @param revalidate - 重验证间隔（秒）
+   * @param renderFn - 缓存未命中或后台重验证时使用的渲染函数
+   * @param revalidateSeconds - 重验证间隔（秒）
    * @returns ISR 缓存结果
    */
-  getOrRevalidate(key: string, revalidate: number): Promise<ISRCacheResult | null>;
-
-  /**
-   * 将渲染结果写入缓存
-   *
-   * @param key - 缓存键
-   * @param html - HTML 内容
-   * @param revalidate - 重验证间隔（秒）
-   * @param tags - 缓存标签（用于按标签失效）
-   */
-  set(key: string, html: string, revalidate: number, tags?: string[]): Promise<void>;
-
-  /**
-   * 触发后台重验证
-   *
-   * 异步执行，不阻塞当前请求。
-   * 重验证完成后自动更新缓存。
-   *
-   * @param key - 缓存键
-   * @param renderFn - 重新渲染的函数
-   */
-  scheduleRevalidation(key: string, renderFn: () => Promise<string>): void;
+  getOrRevalidate(
+    key: string,
+    renderFn: () => Promise<string>,
+    revalidateSeconds: number,
+  ): Promise<ISRCacheResult>;
 }
 
 /**

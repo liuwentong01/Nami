@@ -93,6 +93,17 @@ export function createBaseConfig(options: BaseConfigOptions): Configuration {
       },
       // 模块查找目录
       modules: ['node_modules', path.resolve(projectRoot, 'node_modules')],
+      ...(isServer ? {} : {
+        // 浏览器端不应打入 Node.js 内建模块。
+        // 某些共享包入口当前会通过 CommonJS re-export 间接带到这些依赖，
+        // 这里显式禁用 fallback，避免客户端构建误要求 polyfill。
+        fallback: {
+          fs: false,
+          path: false,
+          crypto: false,
+          stream: false,
+        },
+      }),
     },
 
     // 模块规则

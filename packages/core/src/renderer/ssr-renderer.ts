@@ -40,10 +40,11 @@ import {
   safeStringify,
   generateDataScript,
 } from '@nami/shared';
+import type { ReactElement } from 'react';
 
 import { BaseRenderer } from './base-renderer';
 import { CSRRenderer } from './csr-renderer';
-import type { RendererOptions, AppElementFactory, ModuleLoaderLike } from './types';
+import type { RendererOptions, AppElementFactory, HTMLRenderer, ModuleLoaderLike } from './types';
 
 /**
  * SSR 渲染器配置
@@ -64,7 +65,16 @@ export interface SSRRendererOptions extends RendererOptions {
    * );
    * ```
    */
-  appElementFactory: AppElementFactory;
+  appElementFactory?: AppElementFactory;
+
+  /**
+   * 服务端 HTML 渲染函数
+   *
+   * 兼容已有 `entry-server.tsx` 直接导出 `renderToHTML(url, props)` 的接入方式。
+   * 当业务侧尚未切换到 React 元素工厂协议时，SSRRenderer 会优先复用它，
+   * 以保证默认 SSR 启动链路可以正常工作。
+   */
+  htmlRenderer?: HTMLRenderer;
 }
 
 /**
@@ -75,7 +85,10 @@ export interface SSRRendererOptions extends RendererOptions {
  */
 export class SSRRenderer extends BaseRenderer {
   /** React 组件树工厂函数 */
-  private readonly appElementFactory: AppElementFactory;
+  private readonly appElementFactory?: AppElementFactory;
+
+  /** 兼容 entry-server.renderToHTML() 的 HTML 渲染函数 */
+  private readonly htmlRenderer?: HTMLRenderer;
 
   /** SSR 超时时间（毫秒），来自 config.server.ssrTimeout */
   private readonly ssrTimeout: number;
@@ -86,11 +99,14 @@ export class SSRRenderer extends BaseRenderer {
   constructor(options: SSRRendererOptions) {
     super(options);
     this.appElementFactory = options.appElementFactory;
+    this.htmlRenderer = options.htmlRenderer;
     this.ssrTimeout = options.config.server.ssrTimeout;
     this.moduleLoader = options.moduleLoader;
 
     this.logger.debug('SSR 渲染器已初始化', {
       timeout: this.ssrTimeout,
+      hasAppElementFactory: !!this.appElementFactory,
+      hasHtmlRenderer: !!this.htmlRenderer,
     });
   }
 
@@ -311,23 +327,14 @@ export class SSRRenderer extends BaseRenderer {
     // 将预取数据注入到渲染上下文中，供 React 组件读取
     context.initialData = prefetchResult.data as Record<string, unknown>;
 
-    // ========== 阶段二：React 渲染 ==========
+    // ========== 阶段二：服务端渲染 ==========
     timing.renderStart = Date.now();
-
-    // 条件导入 react-dom/server，仅在服务端执行
-    // 使用动态 import 确保客户端 Bundle 不包含此依赖
-    const { renderToString } = await this.importRenderToString();
-
-    // 通过工厂函数创建 React 元素树
-    const appElement = this.appElementFactory(context);
-
-    // 执行 renderToString — 这是 SSR 最核心也最耗时的步骤
-    const appHTML = renderToString(appElement as React.ReactElement);
+    const renderedHTML = await this.renderAppHTML(context);
 
     timing.renderEnd = Date.now();
 
     // ========== 阶段三：HTML 组装 ==========
-    const fullHTML = this.assembleHTML(appHTML, context);
+    const fullHTML = this.ensureDocumentHTML(renderedHTML, context);
 
     timing.htmlEnd = Date.now();
 
@@ -351,7 +358,7 @@ export class SSRRenderer extends BaseRenderer {
         },
         degraded: prefetchResult.degraded,
         degradeReason: prefetchResult.degraded
-          ? `数据预取降级: ${prefetchResult.errors.map((e) => e.message).join('; ')}`
+          ? `数据预取降级: ${prefetchResult.errors.map((error: Error) => error.message).join('; ')}`
           : undefined,
       },
     );
@@ -370,7 +377,7 @@ export class SSRRenderer extends BaseRenderer {
    * @returns renderToString 函数
    */
   private async importRenderToString(): Promise<{
-    renderToString: (element: React.ReactElement) => string;
+    renderToString: (element: ReactElement) => string;
   }> {
     try {
       // 动态 import，Webpack 可以通过 magic comment 排除此依赖
@@ -386,6 +393,52 @@ export class SSRRenderer extends BaseRenderer {
         },
       );
     }
+  }
+
+  /**
+   * 执行真正的服务端页面渲染
+   *
+   * 兼容两种历史接入协议：
+   * 1. `appElementFactory(context)` -> ReactElement
+   * 2. `htmlRenderer(context, initialData)` -> string
+   *
+   * 这样可以在不破坏现有 renderer 设计的前提下，
+   * 打通 CLI / server bundle / entry-server 的默认 SSR 链路。
+   */
+  private async renderAppHTML(context: RenderContext): Promise<string> {
+    if (this.htmlRenderer) {
+      return await this.htmlRenderer(context, context.initialData ?? {});
+    }
+
+    if (!this.appElementFactory) {
+      throw new RenderError(
+        'SSR 渲染缺少可用的服务端渲染入口',
+        ErrorCode.RENDER_SSR_FAILED,
+        {
+          hint: '请提供 appElementFactory，或在 entry-server 中导出 renderToHTML()',
+        },
+      );
+    }
+
+    // 条件导入 react-dom/server，仅在服务端执行
+    // 使用动态 import 确保客户端 Bundle 不包含此依赖
+    const { renderToString } = await this.importRenderToString();
+    const appElement = this.appElementFactory(context);
+    return renderToString(appElement as ReactElement);
+  }
+
+  /**
+   * 将渲染结果规范化为完整 HTML 文档
+   *
+   * `htmlRenderer` 可能直接返回页面片段，也可能已经返回完整文档。
+   * 这里做一次轻量检测，避免对完整 HTML 再次包壳导致嵌套文档结构错误。
+   */
+  private ensureDocumentHTML(renderedHTML: string, context: RenderContext): string {
+    if (/<!doctype html>/i.test(renderedHTML) || /<html[\s>]/i.test(renderedHTML)) {
+      return renderedHTML;
+    }
+
+    return this.assembleHTML(renderedHTML, context);
   }
 
   /**

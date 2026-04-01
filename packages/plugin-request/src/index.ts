@@ -33,7 +33,7 @@
  */
 
 // 导出插件主体
-export { NamiRequestPlugin } from './request-plugin';
+import { NamiRequestPlugin } from './request-plugin';
 export type { RequestPluginOptions } from './request-plugin';
 
 // 导出同构请求客户端
@@ -98,3 +98,32 @@ export type { TimeoutInterceptorOptions } from './interceptors/timeout';
 
 export { CacheInterceptor } from './interceptors/cache';
 export type { CacheInterceptorOptions } from './interceptors/cache';
+
+type LegacyRequestPluginOptions = {
+  baseURL?: string;
+  timeout?: number;
+} & import('./request-plugin').RequestPluginOptions;
+
+function normalizeRequestPluginOptions(
+  options: LegacyRequestPluginOptions = {},
+): import('./request-plugin').RequestPluginOptions {
+  const normalizedTimeout = typeof options.timeout === 'number'
+    ? { defaultTimeout: options.timeout }
+    : options.timeout;
+
+  return {
+    ...options,
+    serverOptions: options.serverOptions ?? (options.baseURL ? { baseURL: options.baseURL } : undefined),
+    clientOptions: options.clientOptions ?? (options.baseURL ? { baseURL: options.baseURL } : undefined),
+    timeout: normalizedTimeout,
+  };
+}
+
+/**
+ * 兼容历史 `pluginRequest({...})` 调用方式的默认导出工厂。
+ */
+export default function pluginRequest(options: LegacyRequestPluginOptions = {}): NamiRequestPlugin {
+  return new NamiRequestPlugin(normalizeRequestPluginOptions(options));
+}
+
+export { NamiRequestPlugin };

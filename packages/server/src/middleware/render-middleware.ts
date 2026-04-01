@@ -47,10 +47,18 @@ import {
   createLogger,
   createTimer,
 } from '@nami/shared';
-import { RendererFactory, matchPath, rankRoutes } from '@nami/core';
-import type { BaseRenderer, PluginManagerLike, AppElementFactory } from '@nami/core';
+import { RendererFactory } from '@nami/core';
+import type {
+  BaseRenderer,
+  PluginManagerLike,
+  AppElementFactory,
+  HTMLRenderer,
+  ModuleLoaderLike,
+  ISRManagerLike,
+} from '@nami/core';
 import { PluginManager } from '@nami/core';
 import { DegradationManager } from '@nami/core';
+import { matchConfiguredRoute } from './route-match';
 
 /**
  * 渲染中间件配置选项
@@ -70,6 +78,37 @@ export interface RenderMiddlewareOptions {
    * SSR/ISR 模式下需要此函数来创建 React 元素树
    */
   appElementFactory?: AppElementFactory;
+
+  /**
+   * 兼容 entry-server.renderToHTML() 的 HTML 渲染函数
+   *
+   * 这是对 `appElementFactory` 的补充兼容，
+   * 用于打通默认 CLI / server bundle 的 SSR、ISR 渲染链路。
+   */
+  htmlRenderer?: HTMLRenderer;
+
+  /**
+   * 页面模块加载器
+   *
+   * 用于解析 getServerSideProps / getStaticProps / getStaticPaths，
+   * 让服务端默认启动路径也能拿到页面级数据预取函数。
+   */
+  moduleLoader?: ModuleLoaderLike;
+
+  /** ISR 管理器实例（仅 ISR 路由会用到） */
+  isrManager?: ISRManagerLike;
+
+  /**
+   * 动态运行时提供器
+   *
+   * 开发模式下 server bundle 会持续重编译，静态注入的 runtime 很容易过期。
+   * 因此这里允许调用方在每个请求前动态解析最新的 server runtime。
+   */
+  runtimeProvider?: () => Promise<{
+    appElementFactory?: AppElementFactory;
+    htmlRenderer?: HTMLRenderer;
+    moduleLoader?: ModuleLoaderLike;
+  }>;
 
   /**
    * 自定义路由匹配函数
@@ -98,28 +137,7 @@ const moduleLogger: Logger = createLogger('@nami/server:render');
  * @param routes - 路由配置列表
  * @returns 匹配结果，未匹配返回 null
  */
-function defaultMatchRoute(
-  requestPath: string,
-  routes: NamiRoute[],
-): RouteMatchResult | null {
-  // 按优先级排序（最具体的路由排在最前面）
-  const sortedRoutes = rankRoutes(routes);
-
-  for (const route of sortedRoutes) {
-    const exact = route.exact !== false;
-    const result = matchPath(route.path, requestPath, { exact });
-
-    if (result) {
-      return {
-        route,
-        params: result.params,
-        isExact: !route.path.includes('*'),
-      };
-    }
-  }
-
-  return null;
-}
+const defaultMatchRoute = matchConfiguredRoute;
 
 /**
  * 根据 Koa 上下文创建 RenderContext
@@ -144,7 +162,7 @@ function createRenderContext(
    */
   const query: Record<string, string | string[]> = {};
   for (const [key, value] of Object.entries(ctx.query)) {
-    if (value !== undefined) {
+    if (typeof value === 'string' || Array.isArray(value)) {
       query[key] = value;
     }
   }
@@ -155,7 +173,9 @@ function createRenderContext(
    */
   const headers: Record<string, string | string[] | undefined> = {};
   for (const [key, value] of Object.entries(ctx.headers)) {
-    headers[key.toLowerCase()] = value;
+    if (typeof value === 'string' || Array.isArray(value) || value === undefined) {
+      headers[key.toLowerCase()] = value;
+    }
   }
 
   return {
@@ -226,6 +246,10 @@ export function renderMiddleware(
     pluginManager,
     degradationManager,
     appElementFactory,
+    htmlRenderer,
+    moduleLoader,
+    isrManager,
+    runtimeProvider,
     matchRoute = defaultMatchRoute,
   } = options;
 
@@ -276,11 +300,18 @@ export function renderMiddleware(
     let renderer: BaseRenderer;
 
     try {
+      // 开发模式下 runtimeProvider 会在请求前重新读取最新的 server bundle，
+      // 避免 SSR 仍然使用上一次编译的入口函数或页面模块。
+      const runtime = runtimeProvider ? await runtimeProvider() : undefined;
+
       renderer = RendererFactory.create({
         mode: renderMode,
         config,
         pluginManager: pluginManager as unknown as PluginManagerLike,
-        appElementFactory,
+        appElementFactory: runtime?.appElementFactory ?? appElementFactory,
+        htmlRenderer: runtime?.htmlRenderer ?? htmlRenderer,
+        moduleLoader: runtime?.moduleLoader ?? moduleLoader,
+        isrManager,
       });
     } catch (error) {
       requestLogger.error('创建渲染器失败，降级处理', {
@@ -297,16 +328,13 @@ export function renderMiddleware(
     }
 
     try {
-      // ===== 4. 执行 onBeforeRender 钩子 =====
-      await pluginManager.runParallelHook('onBeforeRender', renderContext);
-
-      // ===== 5. 执行渲染 =====
+      // ===== 4. 执行渲染 =====
+      // 插件钩子统一由具体 renderer 内部触发。
+      // 这里不再额外执行 onBeforeRender / onAfterRender / onRenderError，
+      // 避免中间件层和渲染器层双重触发同一生命周期。
       const result: RenderResult = await renderer.render(renderContext);
 
-      // ===== 6. 执行 onAfterRender 钩子 =====
-      await pluginManager.runParallelHook('onAfterRender', renderContext, result);
-
-      // ===== 7. 设置响应 =====
+      // ===== 5. 设置响应 =====
       setResponse(ctx, result, requestLogger);
 
       requestLogger.info('渲染完成', {
@@ -337,23 +365,9 @@ export function renderMiddleware(
         stack: normalizedError.stack,
       });
 
-      // 执行 onRenderError 钩子（错误隔离，不影响降级流程）
-      try {
-        await pluginManager.runParallelHook(
-          'onRenderError',
-          renderContext,
-          normalizedError,
-        );
-      } catch (hookError) {
-        requestLogger.warn('onRenderError 钩子执行失败', {
-          requestId,
-          error: hookError instanceof Error ? hookError.message : String(hookError),
-        });
-      }
-
       // 执行降级策略
       const degradationResult = await degradationManager.executeWithDegradation(
-        async (ctx) => renderer.render(ctx),
+        async (ctx: RenderContext) => renderer.render(ctx),
         renderContext,
         config.fallback,
       );
@@ -405,6 +419,9 @@ function setResponse(
       cacheValue += `, stale-while-revalidate=${staleWhileRevalidate}`;
     }
 
+    // 将最终缓存语义挂到请求上下文上，供外层中间件在响应收尾阶段兜底回写。
+    // 这样即使后续链路里有历史逻辑覆盖了 Cache-Control，ISR/SSG 仍能保持一致的协议表达。
+    ctx.state.namiCacheControl = cacheValue;
     ctx.set('Cache-Control', cacheValue);
   }
 

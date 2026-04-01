@@ -62,7 +62,7 @@ export function createStyleRules(options: StyleRuleOptions = {}): RuleSetRule[] 
     return [
       {
         test: /\.css$/,
-        use: 'null-loader',
+        type: 'asset/source',
       },
     ];
   }

@@ -24,7 +24,7 @@
  */
 
 // 导出插件主体
-export { NamiCachePlugin } from './cache-plugin';
+import { NamiCachePlugin } from './cache-plugin';
 export type { CachePluginOptions, CacheStrategy, CacheKeyGenerator } from './cache-plugin';
 
 // 导出缓存策略
@@ -36,3 +36,34 @@ export type { TTLCacheOptions } from './strategies/ttl-cache';
 
 export { CDNCacheManager } from './strategies/cdn-cache';
 export type { CDNCacheConfig, CDNCachePreset } from './strategies/cdn-cache';
+
+type LegacyCachePluginOptions = {
+  maxAge?: number;
+  maxSize?: number;
+} & import('./cache-plugin').CachePluginOptions;
+
+function normalizeCachePluginOptions(
+  options: LegacyCachePluginOptions = {},
+): import('./cache-plugin').CachePluginOptions {
+  const normalizedLRUOptions = options.strategy === 'ttl'
+    ? options.lruOptions
+    : {
+        maxSize: options.maxSize ?? options.lruOptions?.maxSize,
+        ttl: options.maxAge ?? options.lruOptions?.ttl,
+        enableStats: options.lruOptions?.enableStats,
+      };
+
+  return {
+    ...options,
+    lruOptions: normalizedLRUOptions,
+  };
+}
+
+/**
+ * 兼容历史 `pluginCache({...})` 调用方式的默认导出工厂。
+ */
+export default function pluginCache(options: LegacyCachePluginOptions = {}): NamiCachePlugin {
+  return new NamiCachePlugin(normalizeCachePluginOptions(options));
+}
+
+export { NamiCachePlugin };

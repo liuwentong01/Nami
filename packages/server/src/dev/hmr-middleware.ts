@@ -67,6 +67,11 @@ export function createHMRMiddleware(
   options: HMRMiddlewareOptions = {},
 ): Koa.Middleware {
   const logger = options.logger ?? defaultLogger;
+  type ExpressStyleMiddleware = (
+    req: Koa.Context['req'],
+    res: Koa.Context['res'],
+    next: () => void,
+  ) => void;
 
   /**
    * 动态导入 webpack-hot-middleware
@@ -74,7 +79,7 @@ export function createHMRMiddleware(
    * webpack-hot-middleware 是开发依赖，仅在开发模式下加载。
    * 使用动态 require 避免在生产环境中引入。
    */
-  let hotMiddleware: ReturnType<typeof import('webpack-hot-middleware')> | null = null;
+  let hotMiddleware: ExpressStyleMiddleware | null = null;
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -83,7 +88,7 @@ export function createHMRMiddleware(
       path: options.path ?? '/__webpack_hmr',
       heartbeat: options.heartbeat ?? 10000,
       log: false, // 使用我们自己的日志系统
-    });
+    }) as ExpressStyleMiddleware;
 
     logger.info('HMR 中间件已初始化', {
       path: options.path ?? '/__webpack_hmr',
@@ -149,8 +154,11 @@ export function createHMRMiddleware(
        * 不会触发 finish 事件。通过拦截 writeHead 来及时检测。
        */
       const originalWriteHead = ctx.res.writeHead;
-      ctx.res.writeHead = function interceptedWriteHead(...args: any[]) {
-        const result = originalWriteHead.apply(this, args as any);
+      ctx.res.writeHead = function interceptedWriteHead(
+        this: typeof ctx.res,
+        ...args: Parameters<typeof originalWriteHead>
+      ) {
+        const result = originalWriteHead.apply(this, args);
         // 响应头已发送，说明中间件接管了此请求
         settle(true);
         return result;
@@ -169,7 +177,7 @@ export function createHMRMiddleware(
 
       // 调用 Express 中间件
       try {
-        (hotMiddleware as any)(ctx.req, ctx.res, () => {
+        hotMiddleware(ctx.req, ctx.res, () => {
           // 信号 3：HMR 中间件调用了 next()，说明不是 HMR 请求
           settle(false);
         });

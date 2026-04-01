@@ -13,6 +13,7 @@ import { loadConfig } from '../config/load-config';
 import { cliLogger } from '../utils/logger';
 import { findAvailablePort } from '../utils/port-finder';
 import { createSpinner } from '../utils/spinner';
+import { resolveServerRuntime } from '../utils/server-runtime';
 import chalk from 'chalk';
 
 /**
@@ -61,13 +62,20 @@ export function registerDevCommand(program: Command): void {
           projectRoot: process.cwd(),
         });
 
-        // 创建并启动开发服务器
+        // 开发模式下 server bundle 会持续重编译。
+        // 因此这里不把运行时对象固定死，而是每个请求按需读取最新的构建产物。
         const devServer = await createDevServer({
           config,
           clientWebpackConfig: clientConfig,
           serverWebpackConfig: serverConfig,
-          projectRoot: process.cwd(),
+          runtimeProvider: async () => resolveServerRuntime({
+            projectRoot: process.cwd(),
+            config,
+            fresh: true,
+          }),
         });
+
+        devServer.listen(port, options.host);
 
         spinner.stop();
 

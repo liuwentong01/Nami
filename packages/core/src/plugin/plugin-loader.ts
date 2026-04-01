@@ -59,6 +59,27 @@ export class PluginLoader {
   }
 
   /**
+   * 静态便捷方法：加载单个插件
+   *
+   * 历史代码中已有 `PluginLoader.load(...)` 的调用方式。
+   * 为了兼容这条调用链，这里保留一个无状态的静态入口，
+   * 内部仍复用实例方法，避免分叉两套实现。
+   */
+  static load(nameOrPlugin: NamiPlugin | string, logger?: Logger): NamiPlugin {
+    return new PluginLoader(logger).loadPlugin(nameOrPlugin);
+  }
+
+  /**
+   * 静态便捷方法：批量加载插件
+   *
+   * 与 `load()` 一样，这里主要用于兼容旧调用方，
+   * 保证插件加载逻辑始终集中在实例方法中维护。
+   */
+  static loadAll(items: Array<NamiPlugin | string>, logger?: Logger): NamiPlugin[] {
+    return new PluginLoader(logger).loadPlugins(items);
+  }
+
+  /**
    * 加载单个插件
    *
    * 接受两种输入：

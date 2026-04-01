@@ -57,6 +57,7 @@ export type {
   RendererOptions,
   CreateRendererOptions,
   AppElementFactory,
+  HTMLRenderer,
   PluginManagerLike,
   ISRManagerLike,
   StaticFileReader,
@@ -119,7 +120,7 @@ export class RendererFactory {
    * @throws {RenderError} 渲染模式无效或必要参数缺失时抛出
    */
   static create(options: CreateRendererOptions): BaseRenderer {
-    const { mode, config, pluginManager, appElementFactory, moduleLoader } = options;
+    const { mode, config, pluginManager, appElementFactory, htmlRenderer, moduleLoader } = options;
 
     switch (mode) {
       // ==================== CSR ====================
@@ -131,14 +132,16 @@ export class RendererFactory {
 
       // ==================== SSR ====================
       case RenderModeEnum.SSR: {
-        // SSR 必须提供 appElementFactory，否则无法执行 React 渲染
-        if (!appElementFactory) {
+        // SSR 至少需要一种可用的服务端渲染入口：
+        // 1. appElementFactory：新的 React 元素工厂协议
+        // 2. htmlRenderer：兼容已有 entry-server.renderToHTML() 协议
+        if (!appElementFactory && !htmlRenderer) {
           throw new RenderError(
-            '创建 SSR 渲染器需要提供 appElementFactory 参数',
+            '创建 SSR 渲染器需要提供 appElementFactory 或 htmlRenderer 参数',
             ErrorCode.RENDER_SSR_FAILED,
             {
               mode,
-              hint: 'SSRRenderer 需要 appElementFactory 来创建 React 元素树，请在 CreateRendererOptions 中配置',
+              hint: '请提供 React 元素工厂，或提供兼容 entry-server 的 HTML 渲染入口',
             },
           );
         }
@@ -147,6 +150,7 @@ export class RendererFactory {
           config,
           pluginManager,
           appElementFactory,
+          htmlRenderer,
           moduleLoader,
         });
       }
@@ -163,29 +167,14 @@ export class RendererFactory {
 
       // ==================== ISR ====================
       case RenderModeEnum.ISR: {
-        // ISR 必须提供 appElementFactory（缓存未命中时需要渲染）
-        if (!appElementFactory) {
+        // ISR 缓存未命中时同样需要一个真正可执行的服务端渲染入口。
+        if (!appElementFactory && !htmlRenderer) {
           throw new RenderError(
-            '创建 ISR 渲染器需要提供 appElementFactory 参数',
+            '创建 ISR 渲染器需要提供 appElementFactory 或 htmlRenderer 参数',
             ErrorCode.RENDER_ISR_REVALIDATE_FAILED,
             {
               mode,
-              hint: 'ISRRenderer 在缓存未命中时需要执行 React 渲染',
-            },
-          );
-        }
-
-        // ISR 需要 ISRManager 来管理缓存
-        // 如果调用方未通过 options 提供 isrManager，
-        // 这里创建一个基于传入 options 的提示错误
-        // 实际项目中 ISRManager 应在更上层创建并注入
-        if (!(options as Record<string, unknown>)['isrManager']) {
-          throw new RenderError(
-            '创建 ISR 渲染器需要提供 isrManager 参数',
-            ErrorCode.RENDER_ISR_REVALIDATE_FAILED,
-            {
-              mode,
-              hint: '请创建 ISRManager 实例并通过 options.isrManager 传入',
+              hint: 'ISRRenderer 在缓存未命中时需要执行 React 渲染或 HTML 渲染',
             },
           );
         }
@@ -194,8 +183,8 @@ export class RendererFactory {
           config,
           pluginManager,
           appElementFactory,
+          htmlRenderer,
           moduleLoader,
-          isrManager: (options as Record<string, unknown>)['isrManager'] as import('./types').ISRManagerLike,
         });
       }
 

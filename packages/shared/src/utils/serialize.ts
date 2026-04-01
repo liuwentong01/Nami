@@ -81,5 +81,5 @@ export function hydrateData<T = Record<string, unknown>>(
   variableName: string = NAMI_DATA_VARIABLE,
 ): T | null {
   if (typeof window === 'undefined') return null;
-  return (window as Record<string, unknown>)[variableName] as T | null;
+  return (window as unknown as Record<string, unknown>)[variableName] as T | null;
 }

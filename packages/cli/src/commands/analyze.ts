@@ -6,6 +6,7 @@
  */
 
 import type { Command } from 'commander';
+import type { WebpackPluginInstance } from 'webpack';
 import { loadConfig } from '../config/load-config';
 import { cliLogger } from '../utils/logger';
 import { withSpinner } from '../utils/spinner';
@@ -27,7 +28,17 @@ export function registerAnalyzeCommand(program: Command): void {
         await withSpinner('正在构建并分析...', async () => {
           const { createClientConfig, createServerConfig } = await import('@nami/webpack');
           const webpack = (await import('webpack')).default;
-          const { BundleAnalyzerPlugin } = await import('webpack-bundle-analyzer');
+          // 分析能力不是 CLI 主链路必需依赖，这里使用运行时 require，
+          // 避免缺少类型声明时影响整个 CLI 的编译与启动验证。
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { BundleAnalyzerPlugin } = require('webpack-bundle-analyzer') as {
+            BundleAnalyzerPlugin: new (options: {
+              analyzerMode: string;
+              reportFilename: string;
+              openAnalyzer: boolean;
+              logLevel: string;
+            }) => WebpackPluginInstance;
+          };
 
           // 创建配置
           const webpackConfig =

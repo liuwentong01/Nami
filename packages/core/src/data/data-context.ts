@@ -11,8 +11,8 @@
  * 3. 组件：通过 useNamiContext() 读取 Context 中的数据
  */
 
-import { createContext, useContext } from 'react';
-import type { ReactNode } from 'react';
+import { createContext, useContext, createElement } from 'react';
+import type { ReactNode, ReactElement } from 'react';
 
 /**
  * Nami 数据上下文的值类型
@@ -92,17 +92,17 @@ export function NamiDataProvider({
   degraded = false,
   requestId,
   children,
-}: NamiDataProviderProps): JSX.Element {
+}: NamiDataProviderProps): ReactElement {
   const contextValue: NamiDataContextValue = {
     data: initialData,
     degraded,
     requestId,
   };
 
-  return (
-    <NamiDataContext.Provider value={contextValue}>
-      {children}
-    </NamiDataContext.Provider>
+  return createElement(
+    NamiDataContext.Provider,
+    { value: contextValue },
+    children,
   );
 }
 

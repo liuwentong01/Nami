@@ -387,6 +387,36 @@ export class PluginManager {
     return undefined;
   }
 
+  /**
+   * 兼容旧渲染器调用的统一钩子入口
+   *
+   * `BaseRenderer` 历史上通过 `callHook('beforeRender')` 之类的名称
+   * 触发插件钩子，而插件系统当前的正式钩子名是
+   * `onBeforeRender / onAfterRender / onRenderError`。
+   *
+   * 这里做一层名称适配，把旧调用统一映射到现有的 parallel hook，
+   * 以最小改动打通 renderer -> pluginManager 的链路，
+   * 同时不影响已经直接调用 `runParallelHook()` 的历史逻辑。
+   */
+  async callHook(hookName: string, ...args: unknown[]): Promise<void> {
+    const hookAliasMap: Record<string, string> = {
+      beforeRender: 'onBeforeRender',
+      afterRender: 'onAfterRender',
+      renderError: 'onRenderError',
+      clientInit: 'onClientInit',
+      hydrated: 'onHydrated',
+      routeChange: 'onRouteChange',
+      serverStart: 'onServerStart',
+      buildStart: 'onBuildStart',
+      buildEnd: 'onBuildEnd',
+      error: 'onError',
+      dispose: 'onDispose',
+    };
+
+    const resolvedHookName = hookAliasMap[hookName] ?? hookName;
+    await this.runParallelHook(resolvedHookName, ...args);
+  }
+
   // ==================== 中间件管理 ====================
 
   /**

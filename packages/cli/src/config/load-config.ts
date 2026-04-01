@@ -11,6 +11,7 @@ import { build } from 'esbuild';
 import type { NamiConfig, UserNamiConfig } from '@nami/shared';
 import {
   deepMerge,
+  RenderMode,
   DEFAULT_SERVER_CONFIG,
   DEFAULT_ISR_CONFIG,
   DEFAULT_MONITOR_CONFIG,
@@ -128,5 +129,29 @@ function mergeWithDefaults(userConfig: UserNamiConfig): NamiConfig {
     plugins: [],
   };
 
-  return deepMerge(defaults as unknown as NamiConfig, userConfig as unknown as Partial<NamiConfig>);
+  const merged = deepMerge(
+    defaults as unknown as Record<string, unknown>,
+    userConfig as unknown as Partial<Record<string, unknown>>,
+  ) as unknown as NamiConfig & {
+    isr: NamiConfig['isr'] & {
+      cacheStrategy?: NamiConfig['isr']['cacheAdapter'];
+    };
+  };
+
+  // 兼容历史 ISR 配置字段：`cacheStrategy`
+  if (merged.isr.cacheStrategy && !merged.isr.cacheAdapter) {
+    merged.isr.cacheAdapter = merged.isr.cacheStrategy;
+  }
+
+  // 兼容历史约定：只要默认模式或任一路由使用 ISR，就自动开启 ISR。
+  // 否则业务方还需要再额外写一遍 `isr.enabled = true`，容易让示例和旧项目“看起来是 ISR，实际没启用缓存层”。
+  const hasISRRoute =
+    merged.defaultRenderMode === RenderMode.ISR
+    || merged.routes.some((route) => route.renderMode === RenderMode.ISR);
+
+  if (userConfig.isr?.enabled === undefined && hasISRRoute) {
+    merged.isr.enabled = true;
+  }
+
+  return merged;
 }

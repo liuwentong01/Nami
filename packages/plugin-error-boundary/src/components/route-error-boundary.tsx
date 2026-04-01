@@ -46,7 +46,7 @@ export interface RouteErrorBoundaryProps {
   routePath?: string;
 
   /** 子组件 */
-  children: React.ReactNode;
+  children?: React.ReactNode;
 }
 
 /**

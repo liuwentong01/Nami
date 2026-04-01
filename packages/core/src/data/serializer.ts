@@ -165,7 +165,7 @@ export class DataSerializer {
 
     try {
       // 删除 window 上的数据变量
-      delete (window as Record<string, unknown>)[this.variableName];
+      delete (window as unknown as Record<string, unknown>)[this.variableName];
       logger.debug('已清理 window 上的初始数据', {
         variableName: this.variableName,
       });

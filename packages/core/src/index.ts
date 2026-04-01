@@ -18,7 +18,13 @@ export { CSRRenderer } from './renderer/csr-renderer';
 export { SSRRenderer } from './renderer/ssr-renderer';
 export { SSGRenderer } from './renderer/ssg-renderer';
 export { ISRRenderer } from './renderer/isr-renderer';
-export type { ModuleLoaderLike } from './renderer/types';
+export type {
+  ModuleLoaderLike,
+  HTMLRenderer,
+  AppElementFactory,
+  PluginManagerLike,
+  ISRManagerLike,
+} from './renderer/types';
 export { StreamingSSRRenderer } from './renderer/streaming-ssr-renderer';
 
 // 插件系统
@@ -40,7 +46,7 @@ export { getDefaultConfig, defineConfig } from './config';
 
 // 错误处理
 export { ErrorHandler } from './error/error-handler';
-export { NamiErrorBoundary } from './error/error-boundary';
+export { ErrorBoundary as NamiErrorBoundary } from './error/error-boundary';
 export { DegradationManager } from './error/degradation';
 export { ErrorReporter } from './error/error-reporter';
 

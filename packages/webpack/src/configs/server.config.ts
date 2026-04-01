@@ -54,6 +54,23 @@ export function createServerConfig(options: ServerConfigOptions): Configuration 
   });
 
   const outputDir = path.resolve(projectRoot, config.outDir, 'server');
+  const routeEntries = Object.fromEntries(
+    Array.from(
+      new Set(
+        config.routes
+          .map((route) => route.component)
+          .filter((componentPath: unknown): componentPath is string => (
+            typeof componentPath === 'string' && componentPath.length > 0
+          )),
+      ),
+    ).map((componentPath) => {
+      const normalizedEntryName = componentPath.replace(/^\.\//, '');
+      return [
+        normalizedEntryName,
+        path.resolve(projectRoot, config.srcDir, componentPath.replace(/^\.\//, '')),
+      ];
+    }),
+  );
 
   return {
     ...baseConfig,
@@ -62,7 +79,11 @@ export function createServerConfig(options: ServerConfigOptions): Configuration 
 
     // 入口
     entry: {
+      // `entry-server` 负责承载应用级服务端入口（例如 renderToHTML）。
+      // 页面模块则作为独立 entry 输出，供 ModuleLoader 在运行时解析
+      // getServerSideProps / getStaticProps / getStaticPaths。
       'entry-server': path.resolve(projectRoot, config.srcDir, 'entry-server'),
+      ...routeEntries,
     },
 
     // 输出

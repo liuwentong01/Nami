@@ -27,6 +27,7 @@ import {
 } from 'react-router-dom';
 import type { NamiRoute, NamiConfig } from '@nami/shared';
 import { createLogger } from '@nami/shared';
+import { generatedComponentLoaders } from '@nami/generated-route-modules';
 
 // ==================== 类型定义 ====================
 
@@ -81,19 +82,35 @@ const logger = createLogger('@nami/client:router');
 /**
  * 默认的组件解析器
  *
- * 使用动态 import 加载组件。
- * 注意：在实际项目中，webpack 会在构建阶段将 componentPath 替换为
- * 确定的 chunk 路径，这里的动态 import 仅作为运行时降级方案。
+ * 默认使用构建阶段生成的静态模块映射来加载路由组件。
+ * 这样既保留页面级懒加载能力，也避免表达式 import 导致的 webpack
+ * `Critical dependency` 告警。
  */
 const defaultComponentResolver: ComponentResolver = (componentPath: string) => {
-  return () =>
-    import(/* webpackChunkName: "[request]" */ `${componentPath}`).catch((error) => {
+  return () => {
+    const loadComponent = generatedComponentLoaders[componentPath];
+
+    if (!loadComponent) {
+      const error = new Error(
+        `未找到路由组件加载器: ${componentPath}。请检查路由配置，或通过 initNamiClient({ componentResolver }) 传入自定义解析器。`,
+      );
+
+      logger.error('路由组件加载失败', {
+        componentPath,
+        error: error.message,
+      });
+
+      return Promise.reject(error);
+    }
+
+    return loadComponent().catch((error) => {
       logger.error('路由组件加载失败', {
         componentPath,
         error: error instanceof Error ? error.message : String(error),
       });
       throw error;
     });
+  };
 };
 
 /**

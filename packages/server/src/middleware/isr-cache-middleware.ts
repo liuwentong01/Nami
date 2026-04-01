@@ -45,6 +45,7 @@ import type {
 } from '@nami/shared';
 import { RenderMode, createLogger } from '@nami/shared';
 import type { ISRManager } from '../isr/isr-manager';
+import { matchConfiguredRoute } from './route-match';
 
 /**
  * ISR 缓存中间件配置选项
@@ -84,42 +85,7 @@ const moduleLogger: Logger = createLogger('@nami/server:isr-cache');
  * 与 render-middleware 中的匹配器逻辑一致。
  * 在实际项目中，建议通过配置注入统一的路由匹配器。
  */
-function defaultMatchRoute(
-  requestPath: string,
-  routes: NamiRoute[],
-): RouteMatchResult | null {
-  for (const route of routes) {
-    const params: Record<string, string> = {};
-    const patternParts = route.path.split('/');
-    const pathParts = requestPath.split('/');
-
-    if (route.exact !== false && patternParts.length !== pathParts.length) {
-      continue;
-    }
-
-    let matched = true;
-    for (let i = 0; i < patternParts.length; i++) {
-      const pattern = patternParts[i]!;
-      const segment = pathParts[i];
-
-      if (pattern.startsWith(':')) {
-        if (segment === undefined || segment === '') {
-          matched = false;
-          break;
-        }
-        params[pattern.slice(1)] = decodeURIComponent(segment);
-      } else if (pattern !== segment) {
-        matched = false;
-        break;
-      }
-    }
-
-    if (matched) {
-      return { route, params, isExact: patternParts.length === pathParts.length };
-    }
-  }
-  return null;
-}
+const defaultMatchRoute = matchConfiguredRoute;
 
 /**
  * 默认的缓存键生成函数
@@ -133,6 +99,10 @@ function defaultMatchRoute(
  */
 function defaultGenerateCacheKey(ctx: Koa.Context): string {
   return ctx.path;
+}
+
+function buildISRCacheControl(revalidateSeconds: number): string {
+  return `public, s-maxage=${revalidateSeconds}, stale-while-revalidate=${revalidateSeconds * 2}`;
 }
 
 /**
@@ -226,8 +196,10 @@ export function isrCacheMiddleware(
         ctx.body = cacheResult.html;
 
         // 设置缓存相关的响应头
+        ctx.state.namiCacheControl = buildISRCacheControl(revalidateSeconds);
         ctx.set('X-Nami-Cache', cacheResult.isStale ? 'STALE' : 'HIT');
         ctx.set('X-Nami-Render-Mode', RenderMode.ISR);
+        ctx.set('Cache-Control', ctx.state.namiCacheControl);
 
         if (cacheResult.etag) {
           ctx.set('ETag', cacheResult.etag);
@@ -259,7 +231,9 @@ export function isrCacheMiddleware(
        * 缓存未命中 — next() 已在 renderFn 中被调用
        * 渲染中间件已设置了 ctx.body，此处添加缓存标记头
        */
+      ctx.state.namiCacheControl = buildISRCacheControl(revalidateSeconds);
       ctx.set('X-Nami-Cache', 'MISS');
+      ctx.set('Cache-Control', ctx.state.namiCacheControl);
 
       requestLogger.info('ISR 缓存未命中，已执行渲染', {
         requestId,

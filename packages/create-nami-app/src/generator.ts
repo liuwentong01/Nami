@@ -217,11 +217,19 @@ function generateNamiConfig(data: Record<string, unknown>): string {
   const renderMode = data.isSSR ? 'ssr' : data.isSSG ? 'ssg' : 'csr';
 
   const pluginImports = ((data.plugins as string[]) || [])
-    .map((p, i) => `import plugin${i} from '${p}';`)
+    .map((p) => {
+      const className = resolvePluginClassName(p);
+      return className ? `import { ${className} } from '${p}';` : '';
+    })
+    .filter(Boolean)
     .join('\n');
 
   const pluginArray = ((data.plugins as string[]) || [])
-    .map((_p, i) => `    plugin${i}()`)
+    .map((p) => {
+      const className = resolvePluginClassName(p);
+      return className ? `    new ${className}()` : '';
+    })
+    .filter(Boolean)
     .join(',\n');
 
   return `/**
@@ -257,6 +265,18 @@ ${pluginArray}
   ],
 });
 `;
+}
+
+function resolvePluginClassName(packageName: string): string | null {
+  const pluginClassMap: Record<string, string> = {
+    '@nami/plugin-cache': 'NamiCachePlugin',
+    '@nami/plugin-monitor': 'NamiMonitorPlugin',
+    '@nami/plugin-skeleton': 'NamiSkeletonPlugin',
+    '@nami/plugin-request': 'NamiRequestPlugin',
+    '@nami/plugin-error-boundary': 'NamiErrorBoundaryPlugin',
+  };
+
+  return pluginClassMap[packageName] ?? null;
 }
 
 function generateGitignore(): string {

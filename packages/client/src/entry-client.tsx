@@ -35,7 +35,7 @@ import {
   ErrorSeverity,
   isDev,
 } from '@nami/shared';
-import { PluginManager } from '@nami/core';
+import { PluginManager } from '@nami/core-client-shim';
 import { NamiApp } from './app';
 import type { NamiAppProps } from './app';
 import { hydrateApp, renderApp } from './hydration/hydrate';
@@ -209,11 +209,22 @@ export async function initNamiClient(options: InitClientOptions): Promise<void> 
     const pluginManager = new PluginManager(config);
 
     /**
-     * 过滤出 NamiPlugin 实例（排除字符串形式的插件名）
+     * 客户端运行时只接受已经解析完成的插件实例。
      *
-     * 客户端不支持动态加载插件（字符串形式），
-     * 所有客户端插件必须在构建阶段解析为实际的插件对象。
+     * 历史实现里这里会直接静默过滤掉字符串插件，容易让调用方误以为插件已经生效。
+     * 现在改为显式告警：服务端仍可通过 PluginLoader 解析字符串插件，
+     * 但客户端必须在构建阶段把它们转换成真实插件对象再传入。
      */
+    const unresolvedPluginNames = plugins.filter(
+      (plugin) => typeof plugin === 'string',
+    ) as string[];
+
+    if (unresolvedPluginNames.length > 0) {
+      logger.warn('检测到未解析的客户端插件字符串，相关插件将在客户端被忽略', {
+        plugins: unresolvedPluginNames,
+      });
+    }
+
     const pluginInstances = plugins.filter(
       (p): p is NamiPlugin => typeof p !== 'string',
     );

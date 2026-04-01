@@ -309,12 +309,11 @@ const myPlugin: NamiPlugin = {
   setup(api) {
     api.onBeforeRender(async (ctx) => {
       console.log(`Rendering: ${ctx.path}`);
-      return ctx;
     });
 
-    api.onAfterRender(async (result) => {
+    api.onAfterRender(async (ctx, result) => {
+      console.log(`Rendered: ${ctx.path}`);
       result.headers['X-Custom'] = 'hello';
-      return result;
     });
   },
 };
@@ -388,11 +387,16 @@ export default defineConfig({
   isr: {
     enabled: true,
     defaultRevalidate: 60,
-    cacheBackend: 'redis',
+    cacheAdapter: 'redis',
     redis: { host: '127.0.0.1', port: 6379 },
   },
 });
 ```
+
+说明：
+- 当前正式字段为 `cacheAdapter`
+- 历史项目中的 `cacheStrategy` 仍兼容，会在 CLI 加载配置时自动归一化为 `cacheAdapter`
+- 当默认渲染模式或任一路由使用 `ISR` 时，若未显式关闭，CLI 会自动开启 `isr.enabled`
 
 ---
 
@@ -400,9 +404,9 @@ export default defineConfig({
 
 ```bash
 nami dev        # 启动开发服务器（HMR）
-nami build      # 生产构建（Client + Server + SSG）
+nami build      # 生产构建（Client + Server + SSG/ISR 预生成）
 nami start      # 启动生产服务器
-nami generate   # SSG 静态页面生成
+nami generate   # SSG / ISR 静态页面生成
 nami analyze    # 构建产物分析
 nami info       # 输出环境信息
 ```
@@ -418,7 +422,7 @@ nami info       # 输出环境信息
 | `examples/basic-csr` | CSR | 交互式计数器 + 主题切换 |
 | `examples/basic-ssr` | SSR | 文章列表 + 详情页（服务端数据预取） |
 | `examples/basic-ssg` | SSG | 博客站点（构建时生成） |
-| `examples/basic-isr` | ISR | 电商产品页（60s 自动重新生成） |
+| `examples/basic-isr` | ISR | 电商产品页（首页 60s、列表/详情 30s 重验证，含 `getStaticPaths + fallback: 'blocking'` 动态预生成示例） |
 
 ```bash
 # 克隆后运行示例

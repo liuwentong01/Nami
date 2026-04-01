@@ -14,10 +14,11 @@
  * │   └─ 缓存未命中 → 阻塞渲染，结果写入缓存后返回            │
  * └──────────────────────────────────────────────────────┘
  *
- * 与 ISRManager 的关系：
- * ISRRenderer 本身不管理缓存存储，而是通过 ISRManagerLike 接口
- * 委托给外部的 ISRManager 处理缓存的读写和后台重验证。
- * 这种设计使得缓存策略（内存/文件/Redis）可以独立替换。
+ * 与 server ISR 缓存层的关系：
+ * 默认服务端链路会先经过 `isr-cache-middleware`，
+ * 由 server 侧的 ISRManager 统一处理缓存命中、stale 返回和后台重验证。
+ * 因此 ISRRenderer 自身只负责在需要真正执行渲染时产出 HTML，
+ * 避免 core 与 server 各自再维护一套重复的 ISR 缓存协议。
  *
  * 适用场景：
  * - 电商商品页（内容频繁更新但允许短暂过期）
@@ -48,30 +49,31 @@ import {
   ErrorCode,
   generateDataScript,
 } from '@nami/shared';
+import type { ReactElement } from 'react';
 
 import { BaseRenderer } from './base-renderer';
 import { CSRRenderer } from './csr-renderer';
-import type { RendererOptions, AppElementFactory, ISRManagerLike, ModuleLoaderLike } from './types';
+import type { RendererOptions, AppElementFactory, HTMLRenderer, ModuleLoaderLike } from './types';
 
 /**
  * ISR 渲染器配置
  */
 export interface ISRRendererOptions extends RendererOptions {
   /**
-   * ISR 管理器实例
-   *
-   * 负责缓存的读写和后台重验证调度。
-   * 必须提供，否则 ISR 无法工作。
-   */
-  isrManager: ISRManagerLike;
-
-  /**
    * React 组件树工厂函数
    *
    * 在缓存未命中时用于执行 React 渲染。
    * 缓存命中时不需要（直接返回缓存的 HTML）。
    */
-  appElementFactory: AppElementFactory;
+  appElementFactory?: AppElementFactory;
+
+  /**
+   * 服务端 HTML 渲染函数
+   *
+   * 用于兼容 `entry-server.renderToHTML()` 风格的历史接入方式。
+   * 当缓存未命中或后台重验证时，ISR 可以直接复用这个入口产出 HTML。
+   */
+  htmlRenderer?: HTMLRenderer;
 
   /**
    * 模块加载器
@@ -89,11 +91,11 @@ export interface ISRRendererOptions extends RendererOptions {
  * 通过 ISRManager 管理缓存，支持后台异步重验证。
  */
 export class ISRRenderer extends BaseRenderer {
-  /** ISR 管理器 — 负责缓存读写和重验证调度 */
-  private readonly isrManager: ISRManagerLike;
-
   /** React 组件树工厂函数 */
-  private readonly appElementFactory: AppElementFactory;
+  private readonly appElementFactory?: AppElementFactory;
+
+  /** 兼容 entry-server.renderToHTML() 的 HTML 渲染函数 */
+  private readonly htmlRenderer?: HTMLRenderer;
 
   /** 模块加载器 — 用于从 server bundle 中加载数据预取函数 */
   private readonly moduleLoader?: ModuleLoaderLike;
@@ -103,14 +105,16 @@ export class ISRRenderer extends BaseRenderer {
 
   constructor(options: ISRRendererOptions) {
     super(options);
-    this.isrManager = options.isrManager;
     this.appElementFactory = options.appElementFactory;
+    this.htmlRenderer = options.htmlRenderer;
     this.moduleLoader = options.moduleLoader;
     this.defaultRevalidate = options.config.isr.defaultRevalidate;
 
     this.logger.debug('ISR 渲染器已初始化', {
       defaultRevalidate: this.defaultRevalidate,
       cacheAdapter: options.config.isr.cacheAdapter,
+      hasAppElementFactory: !!this.appElementFactory,
+      hasHtmlRenderer: !!this.htmlRenderer,
     });
   }
 
@@ -153,19 +157,10 @@ export class ISRRenderer extends BaseRenderer {
     await this.callPluginHook('beforeRender', context);
 
     try {
-      // ========== 步骤一：查询 ISR 缓存 ==========
-      const cacheResult = await this.isrManager.getOrRevalidate(cacheKey, revalidate);
-
-      // ========== 步骤二：根据缓存状态选择处理路径 ==========
-      let result: RenderResult;
-
-      if (cacheResult && !cacheResult.isCacheMiss) {
-        // 缓存命中 — 无论是否过期，先返回缓存内容
-        result = this.handleCacheHit(cacheResult, context, timing, revalidate, cacheKey);
-      } else {
-        // 缓存未命中 — 需要执行完整渲染
-        result = await this.handleCacheMiss(context, timing, cacheKey, revalidate);
-      }
+      // 默认服务端链路中的缓存命中与后台重验证由上游 isr-cache-middleware 处理。
+      // 走到 ISRRenderer 时，说明当前请求已经明确需要执行一次真实渲染
+      // （如缓存未命中，或由其他环境直接调用 ISRRenderer）。
+      const result = await this.handleCacheMiss(context, timing, cacheKey, revalidate);
 
       // 触发渲染后钩子
       await this.callPluginHook('afterRender', context, result);
@@ -301,74 +296,14 @@ export class ISRRenderer extends BaseRenderer {
   // ==================== 私有方法 ====================
 
   /**
-   * 处理缓存命中
+   * 执行 ISR 实际渲染
    *
-   * 缓存命中分为两种情况：
-   * - 新鲜缓存（!isStale）：直接返回，无需任何后台操作
-   * - 过期缓存（isStale）：先返回旧内容，同时调度后台重验证
+   * 这里不直接读写缓存，而是专注于：
+   * 1. 数据预取
+   * 2. React / HTML 渲染
+   * 3. 返回带 ISR 缓存头的响应结果
    *
-   * @param cacheResult - ISR 缓存查询结果
-   * @param context - 渲染上下文
-   * @param timing - 性能计时
-   * @param revalidate - 重验证间隔
-   * @param cacheKey - 缓存键
-   * @returns 渲染结果
-   */
-  private handleCacheHit(
-    cacheResult: ISRCacheResult,
-    context: RenderContext,
-    timing: RenderTiming,
-    revalidate: number,
-    cacheKey: string,
-  ): RenderResult {
-    timing.renderStart = Date.now();
-    timing.renderEnd = Date.now();
-    timing.htmlEnd = Date.now();
-
-    if (cacheResult.isStale) {
-      // 过期缓存 — 返回旧内容 + 异步重验证
-      this.logger.debug('ISR 缓存已过期，调度后台重验证', {
-        url: context.url,
-        cacheKey,
-        createdAt: cacheResult.createdAt,
-      });
-
-      // 调度后台重验证（异步，不阻塞当前请求）
-      this.scheduleBackgroundRevalidation(cacheKey, context, revalidate);
-    } else {
-      this.logger.debug('ISR 缓存命中（新鲜）', {
-        url: context.url,
-        cacheKey,
-      });
-    }
-
-    return this.createDefaultResult(
-      cacheResult.html,
-      200,
-      RenderModeEnum.ISR,
-      timing,
-      {
-        headers: {
-          // 通过 stale-while-revalidate 头告知 CDN 缓存策略
-          'Cache-Control': `public, s-maxage=${revalidate}, stale-while-revalidate=${revalidate * 2}`,
-          // 如果有 ETag，设置用于条件请求
-          ...(cacheResult.etag ? { ETag: cacheResult.etag } : {}),
-        },
-        cacheHit: true,
-        cacheStale: cacheResult.isStale,
-        cacheControl: {
-          revalidate,
-          staleWhileRevalidate: revalidate * 2,
-        },
-      },
-    );
-  }
-
-  /**
-   * 处理缓存未命中
-   *
-   * 执行完整的渲染流程：数据预取 → React 渲染 → HTML 组装 → 写入缓存。
-   * 这是 ISR 中最慢的路径，仅在首次请求或缓存失效后触发。
+   * 缓存命中、stale 返回与后台重验证由 server 侧 ISR 缓存层统一处理。
    *
    * @param context - 渲染上下文
    * @param timing - 性能计时
@@ -382,7 +317,7 @@ export class ISRRenderer extends BaseRenderer {
     cacheKey: string,
     revalidate: number,
   ): Promise<RenderResult> {
-    this.logger.debug('ISR 缓存未命中，执行完整渲染', {
+    this.logger.debug('执行 ISR 实际渲染', {
       url: context.url,
       cacheKey,
     });
@@ -394,32 +329,17 @@ export class ISRRenderer extends BaseRenderer {
 
     context.initialData = prefetchResult.data as Record<string, unknown>;
 
-    // ========== React 渲染 ==========
+    // ========== 服务端渲染 ==========
     timing.renderStart = Date.now();
-
-    const { renderToString } = await this.importRenderToString();
-    const appElement = this.appElementFactory(context);
-    const appHTML = renderToString(appElement as React.ReactElement);
+    const renderedHTML = await this.renderAppHTML(context);
 
     timing.renderEnd = Date.now();
 
     // ========== HTML 组装 ==========
-    const fullHTML = this.assembleHTML(appHTML, context);
+    const fullHTML = this.ensureDocumentHTML(renderedHTML, context);
     timing.htmlEnd = Date.now();
 
-    // ========== 异步写入缓存（不阻塞响应） ==========
-    const cacheTags = this.extractCacheTags(context);
-    this.isrManager
-      .set(cacheKey, fullHTML, revalidate, cacheTags)
-      .catch((error) => {
-        // 缓存写入失败不影响本次响应，仅打印警告
-        this.logger.warn('ISR 缓存写入失败', {
-          cacheKey,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-
-    this.logger.debug('ISR 完整渲染完成', {
+    this.logger.debug('ISR 实际渲染完成', {
       url: context.url,
       cacheKey,
       totalDuration: Date.now() - timing.startTime,
@@ -432,13 +352,14 @@ export class ISRRenderer extends BaseRenderer {
       timing,
       {
         headers: {
+          // 响应头仍声明 ISR 语义，便于上游 CDN / 缓存层保持一致策略。
           'Cache-Control': `public, s-maxage=${revalidate}, stale-while-revalidate=${revalidate * 2}`,
         },
         cacheHit: false,
         cacheStale: false,
         degraded: prefetchResult.degraded,
         degradeReason: prefetchResult.degraded
-          ? `数据预取降级: ${prefetchResult.errors.map((e) => e.message).join('; ')}`
+          ? `数据预取降级: ${prefetchResult.errors.map((error: Error) => error.message).join('; ')}`
           : undefined,
         cacheControl: {
           revalidate,
@@ -446,45 +367,6 @@ export class ISRRenderer extends BaseRenderer {
         },
       },
     );
-  }
-
-  /**
-   * 调度后台重验证
-   *
-   * 将重新渲染任务交给 ISRManager 异步执行。
-   * 重验证过程：数据预取 → React 渲染 → HTML 组装 → 更新缓存。
-   * 不阻塞当前请求，失败时仅打印日志。
-   *
-   * @param cacheKey - 缓存键
-   * @param context - 渲染上下文（用于构造渲染函数）
-   * @param revalidate - 重验证间隔
-   */
-  private scheduleBackgroundRevalidation(
-    cacheKey: string,
-    context: RenderContext,
-    revalidate: number,
-  ): void {
-    // 构造渲染函数，供 ISRManager 在后台执行
-    // 使用浅拷贝的 context 避免修改原始请求上下文（原始 context 可能仍在使用中）
-    const revalidationContext = { ...context };
-    const renderFn = async (): Promise<string> => {
-      this.logger.debug('执行后台重验证渲染', { cacheKey });
-
-      // 数据预取
-      const prefetchResult = await this.prefetchData(revalidationContext);
-      revalidationContext.initialData = prefetchResult.data as Record<string, unknown>;
-
-      // React 渲染
-      const { renderToString } = await this.importRenderToString();
-      const appElement = this.appElementFactory(revalidationContext);
-      const appHTML = renderToString(appElement as React.ReactElement);
-
-      // HTML 组装
-      return this.assembleHTML(appHTML, revalidationContext);
-    };
-
-    // 委托 ISRManager 调度后台重验证
-    this.isrManager.scheduleRevalidation(cacheKey, renderFn);
   }
 
   /**
@@ -589,7 +471,7 @@ export class ISRRenderer extends BaseRenderer {
    * 条件导入 react-dom/server
    */
   private async importRenderToString(): Promise<{
-    renderToString: (element: React.ReactElement) => string;
+    renderToString: (element: ReactElement) => string;
   }> {
     try {
       const ReactDOMServer = await import(/* webpackIgnore: true */ 'react-dom/server');
@@ -603,6 +485,46 @@ export class ISRRenderer extends BaseRenderer {
         },
       );
     }
+  }
+
+  /**
+   * 执行实际的页面渲染
+   *
+   * ISR 在缓存未命中和后台重验证时都会走到这里。
+   * 为了兼容老项目，这里同时支持 React 元素工厂和 HTML 渲染函数两套协议。
+   */
+  private async renderAppHTML(context: RenderContext): Promise<string> {
+    if (this.htmlRenderer) {
+      return await this.htmlRenderer(context, context.initialData ?? {});
+    }
+
+    if (!this.appElementFactory) {
+      throw new RenderError(
+        'ISR 渲染缺少可用的服务端渲染入口',
+        ErrorCode.RENDER_ISR_REVALIDATE_FAILED,
+        {
+          hint: '请提供 appElementFactory，或在 entry-server 中导出 renderToHTML()',
+        },
+      );
+    }
+
+    const { renderToString } = await this.importRenderToString();
+    const appElement = this.appElementFactory(context);
+    return renderToString(appElement as ReactElement);
+  }
+
+  /**
+   * 将渲染结果规范化为完整 HTML 文档
+   *
+   * 对 `htmlRenderer` 返回的完整 HTML 文档直接透传；
+   * 对仅返回页面片段的情况，再由框架补齐文档外壳和数据注入。
+   */
+  private ensureDocumentHTML(renderedHTML: string, context: RenderContext): string {
+    if (/<!doctype html>/i.test(renderedHTML) || /<html[\s>]/i.test(renderedHTML)) {
+      return renderedHTML;
+    }
+
+    return this.assembleHTML(renderedHTML, context);
   }
 
   /**

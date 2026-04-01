@@ -12,6 +12,8 @@
  */
 
 import { createLogger } from '@nami/shared';
+import path from 'path';
+import fs from 'fs';
 
 const logger = createLogger('@nami/core:module-loader');
 
@@ -114,6 +116,16 @@ export class ModuleLoader {
       return mod;
     }
 
+    // 策略 1.5：如果 manifest 指向的是独立编译出来的页面文件，
+    // 则直接从 dist/server 中 require 对应产物。
+    if (manifestKey) {
+      const fileModule = this.loadCompiledModuleFromFile(manifestKey);
+      if (fileModule) {
+        this.moduleCache.set(componentPath, fileModule);
+        return fileModule;
+      }
+    }
+
     // 策略 2：直接以组件路径为 key 查找
     if (bundle[componentPath]) {
       const mod = bundle[componentPath] as Record<string, unknown>;
@@ -138,6 +150,16 @@ export class ModuleLoader {
       }
     }
 
+    // 策略 3.5：当 server bundle 本身不直接导出页面模块时，
+    // 退一步尝试从 dist/server 下的独立页面产物中加载。
+    for (const candidate of this.buildCompiledModuleCandidates(componentPath)) {
+      const fileModule = this.loadCompiledModuleFromFile(candidate);
+      if (fileModule) {
+        this.moduleCache.set(componentPath, fileModule);
+        return fileModule;
+      }
+    }
+
     // 策略 4：如果 bundle 自身就是单个模块的导出（简单场景），直接返回 bundle
     // 这处理的是 server bundle 直接导出所有页面函数的情况
     if (typeof bundle['getServerSideProps'] === 'function' ||
@@ -155,6 +177,65 @@ export class ModuleLoader {
     });
 
     return {};
+  }
+
+  /**
+   * 根据页面组件路径推导可能的编译产物相对路径
+   *
+   * 当前 server 构建会将页面作为独立 entry 输出到 `dist/server/<entry>.js`。
+   * 为了兼容历史 manifest 缺失或运行时未显式传入映射的情况，
+   * 这里保留一组保守的文件名候选规则。
+   */
+  private buildCompiledModuleCandidates(componentPath: string): string[] {
+    const normalizedPath = componentPath.replace(/^\.\//, '');
+    const withoutPagesPrefix = normalizedPath.replace(/^pages\//, '');
+
+    return [
+      `${normalizedPath}.js`,
+      `${withoutPagesPrefix}.js`,
+      `pages/${withoutPagesPrefix}.js`,
+      `${normalizedPath}/index.js`,
+      `pages/${withoutPagesPrefix}/index.js`,
+    ];
+  }
+
+  /**
+   * 从编译产物文件中加载页面模块
+   *
+   * 这是对“server bundle 统一导出所有页面模块”方案的兼容补充。
+   * 当页面被单独编译为 `dist/server/pages/foo.js` 之类的文件时，
+   * ModuleLoader 可以直接从磁盘加载对应模块。
+   */
+  private loadCompiledModuleFromFile(relativeOrAbsolutePath: string): Record<string, unknown> | null {
+    if (!this.serverBundlePath) {
+      return null;
+    }
+
+    const absolutePath = path.isAbsolute(relativeOrAbsolutePath)
+      ? relativeOrAbsolutePath
+      : path.resolve(path.dirname(this.serverBundlePath), relativeOrAbsolutePath);
+
+    if (!fs.existsSync(absolutePath)) {
+      return null;
+    }
+
+    try {
+      // 开发模式下 server bundle 可能持续重编译。
+      // 这里按文件维度清除 require 缓存，保证后续解析拿到的是最新页面模块。
+      delete require.cache[require.resolve(absolutePath)];
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const loaded = require(absolutePath) as Record<string, unknown>;
+      logger.debug('从编译产物文件加载模块成功', {
+        source: absolutePath,
+      });
+      return loaded;
+    } catch (error) {
+      logger.warn('从编译产物文件加载模块失败', {
+        source: absolutePath,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
   }
 
   /**

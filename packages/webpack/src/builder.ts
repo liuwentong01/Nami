@@ -28,6 +28,7 @@ import webpack from 'webpack';
 import type { Configuration, Stats } from 'webpack';
 import type { NamiConfig, NamiRoute } from '@nami/shared';
 import { RenderMode, createLogger, NAMI_MANIFEST_FILENAME } from '@nami/shared';
+import { ModuleLoader } from '@nami/core';
 import path from 'path';
 import fs from 'fs';
 import { createClientConfig } from './configs/client.config';
@@ -193,7 +194,7 @@ export class NamiBuilder {
 
     // 检查是否需要服务端 Bundle
     const hasSSR = routes.some(
-      (r) => r.renderMode === RenderMode.SSR || r.renderMode === RenderMode.ISR,
+      (route: NamiRoute) => route.renderMode === RenderMode.SSR || route.renderMode === RenderMode.ISR,
     );
     if (hasSSR) {
       const serverConfig = this.enhanceConfig(
@@ -209,7 +210,7 @@ export class NamiBuilder {
 
     // 检查是否需要 SSG
     const ssgRoutes = routes.filter(
-      (r) => r.renderMode === RenderMode.SSG || r.renderMode === RenderMode.ISR,
+      (route: NamiRoute) => route.renderMode === RenderMode.SSG || route.renderMode === RenderMode.ISR,
     );
     if (ssgRoutes.length > 0 && !isDev) {
       tasks.push({ type: 'ssg', config: {}, routes: ssgRoutes });
@@ -241,7 +242,7 @@ export class NamiBuilder {
     if (name === 'client') {
       plugins.push(new NamiManifestPlugin());
       // CSR 模式需要 HTML 模板
-      const hasCSR = this.config.routes.some((r) => r.renderMode === RenderMode.CSR);
+      const hasCSR = this.config.routes.some((route: NamiRoute) => route.renderMode === RenderMode.CSR);
       if (hasCSR) {
         plugins.push(
           new NamiHtmlInjectPlugin({
@@ -300,7 +301,7 @@ export class NamiBuilder {
     return new Promise((resolve) => {
       const compiler = webpack(config);
 
-      compiler.run((err, stats) => {
+      compiler.run((err?: Error | null, stats?: Stats) => {
         const errors: string[] = [];
         const warnings: string[] = [];
 
@@ -313,10 +314,14 @@ export class NamiBuilder {
           // Webpack 5 的 stats.toJson() 返回的 errors/warnings 可能是字符串或对象
           const info = stats.toJson({ errors: true, warnings: true });
           if (info.errors) {
-            errors.push(...info.errors.map((e) => (typeof e === 'string' ? e : e.message)));
+            errors.push(...info.errors.map((error: string | { message?: string }) => (
+              typeof error === 'string' ? error : (error.message ?? 'Unknown webpack error')
+            )));
           }
           if (info.warnings) {
-            warnings.push(...info.warnings.map((w) => (typeof w === 'string' ? w : w.message)));
+            warnings.push(...info.warnings.map((warning: string | { message?: string }) => (
+              typeof warning === 'string' ? warning : (warning.message ?? 'Unknown webpack warning')
+            )));
           }
         }
 
@@ -360,27 +365,26 @@ export class NamiBuilder {
 
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const serverBundle = require(serverBundlePath);
+    const moduleManifest = this.buildModuleManifest();
+    const moduleLoader = new ModuleLoader({
+      serverBundlePath,
+      moduleManifest,
+    });
 
-    /**
-     * 从 server bundle 中解析页面模块的导出函数
-     *
-     * server bundle 可能有多种结构：
-     * 1. 每个页面作为独立的命名导出（bundle[componentPath]）
-     * 2. 页面函数直接作为顶层导出（bundle.getStaticProps）
-     * 3. 通过 renderToHTML 统一入口
-     */
-    const resolvePageModule = (route: NamiRoute): Record<string, unknown> => {
-      // 尝试通过组件路径查找模块
-      const componentPath = route.component;
-      const candidates = [
-        componentPath,
-        componentPath.replace(/^\.\//, ''),
-        `pages/${componentPath.replace(/^\.\/?(pages\/)?/, '')}`,
-      ];
+    const resolvePageModule = async (route: NamiRoute): Promise<Record<string, unknown>> => {
+      const loadedModule = await moduleLoader.loadModule(route.component);
 
-      for (const key of candidates) {
-        if (serverBundle[key] && typeof serverBundle[key] === 'object') {
-          return serverBundle[key] as Record<string, unknown>;
+      if (Object.keys(loadedModule).length > 0) {
+        return loadedModule;
+      }
+
+      const manifestPath = moduleManifest[route.component];
+      if (manifestPath) {
+        const absolutePageModulePath = path.resolve(path.dirname(serverBundlePath), manifestPath);
+        if (fs.existsSync(absolutePageModulePath)) {
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const pageModule = require(absolutePageModulePath) as Record<string, unknown>;
+          return pageModule;
         }
       }
 
@@ -394,14 +398,16 @@ export class NamiBuilder {
       try {
         logger.debug(`生成静态页面: ${route.path}`);
 
-        const pageModule = resolvePageModule(route);
+        const pageModule = await resolvePageModule(route);
 
         // 获取 getStaticPaths（动态路由需要）
         let paths: Array<{ params: Record<string, string> }> = [{ params: {} }];
         const isDynamicRoute = route.path.includes(':');
 
         if (isDynamicRoute && route.getStaticPaths) {
-          const getStaticPathsFn = pageModule[route.getStaticPaths];
+          const getStaticPathsFn = await moduleLoader.getExportedFunction<
+            () => Promise<{ paths?: Array<{ params: Record<string, string> }> }>
+          >(route.component, route.getStaticPaths);
           if (typeof getStaticPathsFn === 'function') {
             const staticPathsResult = await getStaticPathsFn();
             paths = staticPathsResult.paths || [];
@@ -419,7 +425,9 @@ export class NamiBuilder {
           // 执行 getStaticProps
           let props: Record<string, unknown> = {};
           if (route.getStaticProps) {
-            const getStaticPropsFn = pageModule[route.getStaticProps];
+            const getStaticPropsFn = await moduleLoader.getExportedFunction<
+              (context: { params: Record<string, string> }) => Promise<{ props?: Record<string, unknown> }>
+            >(route.component, route.getStaticProps);
             if (typeof getStaticPropsFn === 'function') {
               const result = await getStaticPropsFn({
                 params: pathConfig.params,
@@ -505,15 +513,24 @@ export class NamiBuilder {
    * 服务端运行时读取此文件来决定如何处理每个请求。
    */
   private async generateManifest(): Promise<void> {
+    const moduleManifest = this.buildModuleManifest();
+
     const manifest = {
       appName: this.config.appName,
       generatedAt: new Date().toISOString(),
-      routes: this.config.routes.map((route) => ({
+      routes: this.config.routes.map((route: NamiRoute) => ({
         path: route.path,
+        component: route.component,
         renderMode: route.renderMode,
+        getServerSideProps: route.getServerSideProps,
+        getStaticProps: route.getStaticProps,
+        getStaticPaths: route.getStaticPaths,
         revalidate: route.revalidate,
         fallback: route.fallback,
       })),
+      // 运行时通过这份映射定位独立编译出来的页面模块，
+      // 让默认 SSR/ISR 启动路径也能解析页面级数据预取函数。
+      moduleManifest,
       buildInfo: {
         nodeVersion: process.version,
         namiVersion: this.resolveNamiVersion(),
@@ -574,5 +591,30 @@ export class NamiBuilder {
     }
 
     return '0.0.0-unknown';
+  }
+
+  /**
+   * 根据路由组件路径生成页面模块清单
+   *
+   * 这份映射既用于运行时 ModuleLoader，也用于构建阶段的 SSG/ISR 预生成，
+   * 保证两条链路对页面模块定位规则完全一致。
+   */
+  private buildModuleManifest(): Record<string, string> {
+    const uniqueComponentPaths: string[] = Array.from(
+      new Set(
+        this.config.routes
+          .map((route: NamiRoute) => route.component)
+          .filter((componentPath: unknown): componentPath is string => (
+            typeof componentPath === 'string' && componentPath.length > 0
+          )),
+      ),
+    );
+
+    return Object.fromEntries(
+      uniqueComponentPaths.map((componentPath) => [
+        componentPath,
+        `${componentPath.replace(/^\.\//, '')}.js`,
+      ]),
+    );
   }
 }

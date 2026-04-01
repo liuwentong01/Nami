@@ -142,6 +142,15 @@ export function securityMiddleware(options: SecurityOptions = {}): Koa.Middlewar
     // 执行下游中间件
     await next();
 
+    /**
+     * 某些历史链路会在更内层或更外层中间件里覆盖 Cache-Control。
+     * 如果当前请求已经由框架核心计算出明确的缓存语义，
+     * 则在响应收尾阶段再统一回写一次，确保最终对外协议稳定。
+     */
+    if (typeof ctx.state.namiCacheControl === 'string' && ctx.state.namiCacheControl.length > 0) {
+      ctx.set('Cache-Control', ctx.state.namiCacheControl);
+    }
+
     // ===== 1. 点击劫持防护 =====
     if (frameOptions) {
       ctx.set('X-Frame-Options', frameOptionsValue);

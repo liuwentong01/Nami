@@ -290,7 +290,7 @@ export class NamiRequestPlugin implements NamiPlugin {
     }
 
     // 缓存拦截器（默认不启用）
-    if (this.options.cache && this.options.cache !== false) {
+    if (this.options.cache) {
       this.cacheInterceptor = new CacheInterceptor(this.options.cache);
     }
   }

@@ -12,6 +12,7 @@
 import type { Configuration } from 'webpack';
 import type { NamiConfig } from '@nami/shared';
 import path from 'path';
+import fs from 'fs';
 import webpack from 'webpack';
 import { createBaseConfig } from './base.config';
 import { createStyleRules, createCssExtractPlugin } from '../rules/styles';
@@ -28,6 +29,88 @@ export interface ClientConfigOptions {
   projectRoot: string;
   /** 是否为开发模式 */
   isDev?: boolean;
+}
+
+function toPosixImportPath(filePath: string): string {
+  return filePath.split(path.sep).join('/');
+}
+
+function createChunkName(componentPath: string): string {
+  return `route-${componentPath.replace(/^\.\//, '').replace(/[^a-zA-Z0-9/_-]/g, '-').replace(/\//g, '-')}`;
+}
+
+function ensureGeneratedRouteModules(projectRoot: string, config: NamiConfig): string {
+  const generatedDir = path.resolve(projectRoot, '.nami');
+  const generatedFile = path.join(generatedDir, 'generated-route-modules.ts');
+
+  const uniqueComponentPaths = Array.from(
+    new Set(
+      config.routes
+        .map((route) => route.component)
+        .filter((componentPath: unknown): componentPath is string => (
+          typeof componentPath === 'string' && componentPath.length > 0
+        )),
+    ),
+  );
+
+  const fileContent = [
+    '/**',
+    ' * 构建阶段自动生成的路由模块映射。',
+    ' *',
+    ' * 这里使用静态 import 工厂而不是表达式 import，',
+    ' * 避免 webpack 对 `import(`${componentPath}`)` 发出 Critical dependency 警告。',
+    ' */',
+    'export const generatedComponentLoaders = {',
+    ...uniqueComponentPaths.map((componentPath) => {
+      const sourceFilePath = path.resolve(
+        projectRoot,
+        config.srcDir,
+        componentPath.replace(/^\.\//, ''),
+      );
+      const relativeImportPath = path.relative(generatedDir, sourceFilePath);
+      const normalizedImportPath = toPosixImportPath(relativeImportPath.startsWith('.')
+        ? relativeImportPath
+        : `./${relativeImportPath}`);
+      const chunkName = createChunkName(componentPath);
+
+      return `  ${JSON.stringify(componentPath)}: () => import(/* webpackChunkName: ${JSON.stringify(chunkName)} */ ${JSON.stringify(normalizedImportPath)}),`;
+    }),
+    '} as Record<string, () => Promise<unknown>>;',
+    '',
+  ].join('\n');
+
+  fs.mkdirSync(generatedDir, { recursive: true });
+  fs.writeFileSync(generatedFile, fileContent, 'utf-8');
+
+  return generatedFile;
+}
+
+function ensureGeneratedCoreClientShim(projectRoot: string): string {
+  const generatedDir = path.resolve(projectRoot, '.nami');
+  const generatedFile = path.join(generatedDir, 'generated-core-client-shim.ts');
+  const corePackageRoot = path.dirname(require.resolve('@nami/core/package.json'));
+  const pluginManagerEntry = path.join(corePackageRoot, 'dist/plugin/plugin-manager');
+  const relativeImportPath = path.relative(generatedDir, pluginManagerEntry);
+  const normalizedImportPath = toPosixImportPath(relativeImportPath.startsWith('.')
+    ? relativeImportPath
+    : `./${relativeImportPath}`);
+
+  const fileContent = [
+    '/**',
+    ' * client bundle 专用的 @nami/core 精简入口。',
+    ' *',
+    ' * 浏览器端当前只需要 PluginManager，直接引用完整 core 入口会把',
+    ' * config-loader / module-loader / plugin-loader 这类 Node 专属模块一并卷入，',
+    ' * 从而触发表达式 require 的 webpack 警告。',
+    ' */',
+    `export { PluginManager } from ${JSON.stringify(normalizedImportPath)};`,
+    '',
+  ].join('\n');
+
+  fs.mkdirSync(generatedDir, { recursive: true });
+  fs.writeFileSync(generatedFile, fileContent, 'utf-8');
+
+  return generatedFile;
 }
 
 /**
@@ -63,6 +146,8 @@ export function createClientConfig(options: ClientConfigOptions): Configuration 
   });
 
   const outputDir = path.resolve(projectRoot, config.outDir, 'client');
+  const generatedRouteModulesPath = ensureGeneratedRouteModules(projectRoot, config);
+  const generatedCoreClientShimPath = ensureGeneratedCoreClientShim(projectRoot);
 
   // 客户端专属插件
   const plugins: webpack.WebpackPluginInstance[] = [
@@ -120,6 +205,15 @@ export function createClientConfig(options: ClientConfigOptions): Configuration 
       publicPath: config.assets.publicPath,
       // 清理旧构建产物
       clean: !isDev,
+    },
+
+    resolve: {
+      ...(baseConfig.resolve || {}),
+      alias: {
+        ...((baseConfig.resolve && baseConfig.resolve.alias) || {}),
+        '@nami/core-client-shim': generatedCoreClientShimPath,
+        '@nami/generated-route-modules': generatedRouteModulesPath,
+      },
     },
 
     // 模块规则：追加样式规则
