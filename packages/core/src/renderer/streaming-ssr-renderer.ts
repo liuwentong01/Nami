@@ -353,6 +353,7 @@ export class StreamingSSRRenderer extends BaseRenderer {
     return new SSRRenderer({
       config: this.config,
       pluginManager: this.pluginManager,
+      assetManifest: this.assetManifest,
       appElementFactory: this.appElementFactory,
     });
   }

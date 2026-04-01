@@ -13,8 +13,8 @@
  * - 优化首屏：减少初始 JS 体积，加快首屏渲染
  */
 
-import { lazy, Suspense, createElement } from 'react';
-import type { ComponentType, ReactNode } from 'react';
+import { lazy, Suspense, createElement, Component } from 'react';
+import type { ComponentType, ReactNode, ErrorInfo } from 'react';
 import { createLogger } from '@nami/shared';
 
 /** 懒加载路由日志 */
@@ -91,11 +91,48 @@ export interface LazyRouteComponent {
  * </Link>
  * ```
  */
+/**
+ * 轻量级 Error Boundary，用于捕获懒加载组件的渲染/加载错误。
+ * 仅在 lazyRoute 内部使用，对外不暴露。
+ */
+interface LazyErrorBoundaryProps {
+  fallback: ReactNode;
+  children: ReactNode;
+}
+interface LazyErrorBoundaryState {
+  hasError: boolean;
+}
+
+class LazyErrorBoundary extends Component<LazyErrorBoundaryProps, LazyErrorBoundaryState> {
+  constructor(props: LazyErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(): LazyErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    logger.error('路由组件渲染失败', {
+      error: error.message,
+      componentStack: info.componentStack ?? '',
+    });
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback;
+    }
+    return this.props.children;
+  }
+}
+
 export function lazyRoute(
   importFn: ComponentImportFn,
   options: LazyRouteOptions = {},
 ): LazyRouteComponent {
-  const { loading = null } = options;
+  const { loading = null, errorFallback } = options;
 
   // 缓存 import 的 Promise，避免重复加载
   let importPromise: Promise<{ default: ComponentType<Record<string, unknown>> }> | null = null;
@@ -123,15 +160,26 @@ export function lazyRoute(
   const LazyComponent = lazy(cachedImport);
 
   /**
-   * 包裹 Suspense 的组件
-   * 在加载期间显示 loading 状态
+   * 包裹 Suspense + ErrorBoundary 的组件
+   * - Suspense: 加载期间显示 loading
+   * - ErrorBoundary: 加载/渲染失败时显示 errorFallback（如果提供）
    */
   const WrappedComponent: ComponentType<Record<string, unknown>> = (props) => {
-    return createElement(
+    const suspenseTree = createElement(
       Suspense,
       { fallback: loading },
       createElement(LazyComponent, props),
     );
+
+    if (errorFallback !== undefined) {
+      return createElement(
+        LazyErrorBoundary,
+        { fallback: errorFallback },
+        suspenseTree,
+      );
+    }
+
+    return suspenseTree;
   };
 
   // 设置 displayName 以便在 React DevTools 中识别

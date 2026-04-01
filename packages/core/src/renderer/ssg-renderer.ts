@@ -326,6 +326,7 @@ export class SSGRenderer extends BaseRenderer {
     return new CSRRenderer({
       config: this.config,
       pluginManager: this.pluginManager,
+      assetManifest: this.assetManifest,
     });
   }
 

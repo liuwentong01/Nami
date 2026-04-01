@@ -20,6 +20,7 @@ export type { ErrorBoundaryProps } from './error-boundary';
 
 // 降级管理器
 export { DegradationManager } from './degradation';
+export type { DegradationManagerOptions } from './degradation';
 export type { DegradationResult } from './degradation';
 
 // 错误上报器

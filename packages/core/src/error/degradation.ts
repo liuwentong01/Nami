@@ -40,6 +40,8 @@ import {
   createLogger,
   createTimer,
 } from '@nami/shared';
+import type { AssetManifest } from '../html/script-injector';
+import { ScriptInjector } from '../html/script-injector';
 
 /** 降级管理器日志 */
 const logger = createLogger('@nami/core:degradation');
@@ -82,7 +84,40 @@ export interface DegradationResult {
  * }
  * ```
  */
+export interface DegradationManagerOptions {
+  /** 静态资源公共路径前缀 */
+  publicPath?: string;
+  /** 构建产物资源清单 */
+  assetManifest?: AssetManifest;
+}
+
 export class DegradationManager {
+  private readonly publicPath: string;
+  private readonly assetManifest?: AssetManifest;
+  private readonly scriptInjector: ScriptInjector;
+
+  constructor(options: DegradationManagerOptions = {}) {
+    this.publicPath = options.publicPath ?? '/';
+    this.assetManifest = options.assetManifest;
+    this.scriptInjector = new ScriptInjector(this.publicPath);
+  }
+
+  /**
+   * 解析 JS/CSS 资源标签，与 BaseRenderer.resolveAssets 保持一致
+   */
+  private resolveAssets(): { cssLinks: string; jsScripts: string } {
+    if (this.assetManifest) {
+      return {
+        cssLinks: this.scriptInjector.injectStyles(this.assetManifest),
+        jsScripts: this.scriptInjector.injectChunks(this.assetManifest, { defer: true }),
+      };
+    }
+    return {
+      cssLinks: `  <link rel="stylesheet" href="${this.publicPath}static/css/main.css">`,
+      jsScripts: `  <script defer src="${this.publicPath}static/js/main.js"></script>`,
+    };
+  }
+
   /**
    * 带降级保护的渲染执行
    *
@@ -277,19 +312,22 @@ export class DegradationManager {
    * @returns CSR 降级的渲染结果
    */
   private createCSRFallback(context: RenderContext): RenderResult {
+    const { cssLinks, jsScripts } = this.resolveAssets();
+
     const html = [
       '<!DOCTYPE html>',
       '<html>',
       '<head>',
       '  <meta charset="utf-8">',
       '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
+      cssLinks,
       '</head>',
       '<body>',
       '  <div id="nami-root"></div>',
-      '  <!-- SSR 降级到 CSR: 等待客户端 JS 加载后渲染 -->',
+      jsScripts,
       '</body>',
       '</html>',
-    ].join('\n');
+    ].filter(Boolean).join('\n');
 
     return {
       html,

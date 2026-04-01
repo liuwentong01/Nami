@@ -321,13 +321,13 @@ export class PluginManager {
         try {
           await handler.fn(...args);
         } catch (error) {
-          // 重新抛出以便 allSettled 捕获
           this.handleHookError(hookName, handler.pluginName, error);
+          // 记录日志后仍需 re-throw，否则 allSettled 无法感知 rejected 状态
+          throw error;
         }
       }),
     );
 
-    // 统计失败数量（用于调试日志）
     const failedCount = results.filter((r) => r.status === 'rejected').length;
     if (failedCount > 0) {
       this.logger.warn(
@@ -475,6 +475,7 @@ export class PluginManager {
             await handler.fn();
           } catch (error) {
             this.handleHookError('onDispose', handler.pluginName, error);
+            throw error;
           }
         }),
       );

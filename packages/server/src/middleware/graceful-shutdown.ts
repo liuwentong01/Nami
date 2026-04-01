@@ -71,6 +71,12 @@ export interface GracefulShutdownOptions {
   onShutdown?: () => Promise<void> | void;
 
   /**
+   * 收到停机信号后、server.close() 之前执行的同步回调。
+   * 用于激活 shutdownAware 中间件，让后续到达的请求立即 503。
+   */
+  onSignalReceived?: () => void;
+
+  /**
    * 自定义日志实例
    */
   logger?: Logger;
@@ -91,6 +97,7 @@ export function setupGracefulShutdown(options: GracefulShutdownOptions): void {
     server,
     timeout = 30000,
     onShutdown,
+    onSignalReceived,
     logger = defaultLogger,
   } = options;
 
@@ -126,6 +133,12 @@ export function setupGracefulShutdown(options: GracefulShutdownOptions): void {
     }
 
     isShuttingDown = true;
+
+    // 立即激活 shutdownAware 中间件，让新到达的请求返回 503
+    if (onSignalReceived) {
+      onSignalReceived();
+    }
+
     logger.info(`收到 ${signal} 信号，开始优雅停机...`, {
       signal,
       activeConnections,

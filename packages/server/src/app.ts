@@ -199,7 +199,9 @@ export async function createNamiServer(
   }
 
   // ===== 3. 初始化降级管理器 =====
-  const degradationManager = new DegradationManager();
+  const degradationManager = new DegradationManager({
+    publicPath: config.assets.publicPath,
+  });
 
   // ===== 4. 初始化 ISR 管理器（如果启用） =====
   let isrManager: ISRManager | undefined;

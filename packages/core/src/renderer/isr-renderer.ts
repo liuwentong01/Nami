@@ -289,6 +289,7 @@ export class ISRRenderer extends BaseRenderer {
     return new CSRRenderer({
       config: this.config,
       pluginManager: this.pluginManager,
+      assetManifest: this.assetManifest,
     });
   }
 

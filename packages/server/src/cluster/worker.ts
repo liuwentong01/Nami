@@ -82,7 +82,7 @@ export async function startWorker(options: WorkerOptions): Promise<void> {
 
   try {
     // ===== 1. 创建 Koa 应用 =====
-    const { app } = await createNamiServer(config);
+    const { app, pluginManager, isrManager, triggerShutdown } = await createNamiServer(config);
 
     // ===== 2. 启动 HTTP 服务器 =====
     const server = app.listen(port, host, () => {
@@ -118,13 +118,22 @@ export async function startWorker(options: WorkerOptions): Promise<void> {
       server,
       timeout: config.server.gracefulShutdownTimeout,
       logger,
+      onSignalReceived: triggerShutdown,
       onShutdown: async () => {
         logger.info('工作进程开始清理资源', {
           workerId,
           pid,
         });
 
-        // 执行自定义清理逻辑
+        // 关闭 ISR 管理器（释放 Redis 连接等）
+        if (isrManager) {
+          await isrManager.close();
+        }
+
+        // 销毁插件管理器
+        await pluginManager.dispose();
+
+        // 执行用户自定义清理逻辑
         if (onShutdown) {
           await onShutdown();
         }

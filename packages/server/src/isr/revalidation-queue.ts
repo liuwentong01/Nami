@@ -303,6 +303,8 @@ export class RevalidationQueue {
 
       /**
        * 重验证成功 → 更新缓存
+       * TTL = revalidateSeconds * 2 与主路径写入保持一致，
+       * 多出的一倍时间用于 stale-while-revalidate 窗口。
        */
       const cacheEntry: CacheEntry = {
         content: normalized.html,
@@ -311,7 +313,7 @@ export class RevalidationQueue {
         tags: normalized.tags,
       };
 
-      await this.cacheStore.set(job.key, cacheEntry, job.revalidateSeconds);
+      await this.cacheStore.set(job.key, cacheEntry, job.revalidateSeconds * 2);
 
       logger.info('重验证成功，缓存已更新', {
         key: job.key,

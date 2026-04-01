@@ -139,6 +139,17 @@ export async function startServer(
         isWorker: cluster.isWorker,
         appName: config.appName,
       });
+
+      // 集群 Worker 进程需要通知主进程端口已绑定、可接受请求
+      if (cluster.isWorker && process.send) {
+        process.send({
+          type: 'worker:ready',
+          workerId: cluster.worker?.id ?? 0,
+          pid: process.pid,
+          port,
+        });
+      }
+
       resolve(server);
     });
 
@@ -164,6 +175,7 @@ export async function startServer(
       server: httpServer,
       timeout: config.server.gracefulShutdownTimeout,
       logger: serverLogger,
+      onSignalReceived: serverInstance.triggerShutdown,
       onShutdown: async () => {
         serverLogger.info('开始执行停机清理...');
 
