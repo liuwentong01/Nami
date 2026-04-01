@@ -43,7 +43,7 @@ import {
 
 import { BaseRenderer } from './base-renderer';
 import { CSRRenderer } from './csr-renderer';
-import type { RendererOptions, AppElementFactory } from './types';
+import type { RendererOptions, AppElementFactory, ModuleLoaderLike } from './types';
 
 /**
  * SSR 渲染器配置
@@ -80,10 +80,14 @@ export class SSRRenderer extends BaseRenderer {
   /** SSR 超时时间（毫秒），来自 config.server.ssrTimeout */
   private readonly ssrTimeout: number;
 
+  /** 模块加载器（用于解析数据预取函数） */
+  private readonly moduleLoader?: import('./types').ModuleLoaderLike;
+
   constructor(options: SSRRendererOptions) {
     super(options);
     this.appElementFactory = options.appElementFactory;
     this.ssrTimeout = options.config.server.ssrTimeout;
+    this.moduleLoader = options.moduleLoader;
 
     this.logger.debug('SSR 渲染器已初始化', {
       timeout: this.ssrTimeout,
@@ -485,18 +489,20 @@ export class SSRRenderer extends BaseRenderer {
     functionName: string,
   ): Promise<((ctx: GetServerSidePropsContext) => Promise<GetServerSidePropsResult>) | null> {
     try {
-      // 实际实现中应通过 ModuleLoader 从 server bundle 加载组件模块
-      // 这里使用 require 作为占位实现，生产环境应替换为完整的模块加载逻辑
-      //
-      // const mod = await moduleLoader.load(componentPath);
-      // return mod[functionName] ?? null;
-      //
-      // 当前返回 null，等待 ModuleLoader 模块实现后对接
       this.logger.debug('解析 getServerSideProps', {
         componentPath,
         functionName,
       });
 
+      // 通过 ModuleLoader 从 server bundle 加载组件模块
+      if (this.moduleLoader) {
+        return await this.moduleLoader.getExportedFunction(componentPath, functionName);
+      }
+
+      this.logger.warn('ModuleLoader 未配置，无法解析 getServerSideProps', {
+        componentPath,
+        functionName,
+      });
       return null;
     } catch (error) {
       this.logger.error('getServerSideProps 函数解析失败', {

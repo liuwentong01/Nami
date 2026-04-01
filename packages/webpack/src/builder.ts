@@ -79,6 +79,21 @@ export class NamiBuilder {
   }
 
   /**
+   * 清理构建输出目录
+   *
+   * 在每次构建前调用，确保不会残留上次构建的产物。
+   * 仅清理框架管理的 outDir 目录（默认 dist/）。
+   */
+  private clean(): void {
+    const outDir = path.resolve(this.projectRoot, this.config.outDir);
+    if (fs.existsSync(outDir)) {
+      logger.info(`清理构建输出目录: ${outDir}`);
+      fs.rmSync(outDir, { recursive: true, force: true });
+    }
+    fs.mkdirSync(outDir, { recursive: true });
+  }
+
+  /**
    * 执行完整构建流程
    *
    * @param mode - 构建模式
@@ -92,6 +107,9 @@ export class NamiBuilder {
     const stats: Record<string, Stats | null> = {};
 
     logger.info(`开始构建 [${this.config.appName}]，模式: ${mode}`);
+
+    // 构建前清理产物目录
+    this.clean();
 
     try {
       // 1. 分析路由，确定构建任务
@@ -302,27 +320,71 @@ export class NamiBuilder {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const serverBundle = require(serverBundlePath);
 
+    /**
+     * 从 server bundle 中解析页面模块的导出函数
+     *
+     * server bundle 可能有多种结构：
+     * 1. 每个页面作为独立的命名导出（bundle[componentPath]）
+     * 2. 页面函数直接作为顶层导出（bundle.getStaticProps）
+     * 3. 通过 renderToHTML 统一入口
+     */
+    const resolvePageModule = (route: NamiRoute): Record<string, unknown> => {
+      // 尝试通过组件路径查找模块
+      const componentPath = route.component;
+      const candidates = [
+        componentPath,
+        componentPath.replace(/^\.\//, ''),
+        `pages/${componentPath.replace(/^\.\/?(pages\/)?/, '')}`,
+      ];
+
+      for (const key of candidates) {
+        if (serverBundle[key] && typeof serverBundle[key] === 'object') {
+          return serverBundle[key] as Record<string, unknown>;
+        }
+      }
+
+      // 兜底：直接使用 serverBundle（单页面场景）
+      return serverBundle;
+    };
+
+    let generatedCount = 0;
+
     for (const route of routes) {
       try {
         logger.debug(`生成静态页面: ${route.path}`);
 
+        const pageModule = resolvePageModule(route);
+
         // 获取 getStaticPaths（动态路由需要）
         let paths: Array<{ params: Record<string, string> }> = [{ params: {} }];
+        const isDynamicRoute = route.path.includes(':');
 
-        if (route.getStaticPaths && serverBundle[route.getStaticPaths]) {
-          const staticPathsResult = await serverBundle[route.getStaticPaths]();
-          paths = staticPathsResult.paths;
+        if (isDynamicRoute && route.getStaticPaths) {
+          const getStaticPathsFn = pageModule[route.getStaticPaths];
+          if (typeof getStaticPathsFn === 'function') {
+            const staticPathsResult = await getStaticPathsFn();
+            paths = staticPathsResult.paths || [];
+          } else {
+            logger.warn(`getStaticPaths 函数 "${route.getStaticPaths}" 未找到，跳过动态路由`, {
+              route: route.path,
+              availableExports: Object.keys(pageModule),
+            });
+            continue;
+          }
         }
 
         // 对每个路径执行数据预取和渲染
         for (const pathConfig of paths) {
           // 执行 getStaticProps
-          let props = {};
-          if (route.getStaticProps && serverBundle[route.getStaticProps]) {
-            const result = await serverBundle[route.getStaticProps]({
-              params: pathConfig.params,
-            });
-            props = result.props || {};
+          let props: Record<string, unknown> = {};
+          if (route.getStaticProps) {
+            const getStaticPropsFn = pageModule[route.getStaticProps];
+            if (typeof getStaticPropsFn === 'function') {
+              const result = await getStaticPropsFn({
+                params: pathConfig.params,
+              });
+              props = result.props || {};
+            }
           }
 
           // 生成实际路径
@@ -331,10 +393,41 @@ export class NamiBuilder {
             actualPath = actualPath.replace(`:${key}`, value);
           }
 
-          // 渲染 HTML
-          if (serverBundle.renderToHTML) {
-            const html = await serverBundle.renderToHTML(actualPath, props);
+          // 渲染 HTML — 支持多种 server bundle 导出格式
+          let html: string | null = null;
 
+          if (typeof serverBundle.renderToHTML === 'function') {
+            // 方式 1：统一的 renderToHTML 入口
+            html = await serverBundle.renderToHTML(actualPath, props);
+          } else if (typeof pageModule.default === 'function' || typeof pageModule.render === 'function') {
+            // 方式 2：页面模块导出 render 函数或 default 组件
+            const renderFn = (pageModule.render || pageModule.default) as Function;
+            html = await renderFn({ path: actualPath, props });
+          } else {
+            // 方式 3：使用框架的 SSGRenderer 生成 HTML
+            // 构造最小化的 HTML 壳（此场景下 SSG 渲染由上层 SSGRenderer 负责）
+            const title = (route.meta?.title as string) || this.config.title || this.config.appName;
+            const publicPath = this.config.assets.publicPath;
+            html = [
+              '<!DOCTYPE html>',
+              '<html lang="zh-CN">',
+              '<head>',
+              `  <meta charset="utf-8">`,
+              `  <meta name="viewport" content="width=device-width, initial-scale=1.0">`,
+              `  <title>${title}</title>`,
+              '  <meta name="renderer" content="ssg">',
+              `  <link rel="stylesheet" href="${publicPath}static/css/main.css">`,
+              '</head>',
+              '<body>',
+              '  <div id="nami-root"></div>',
+              `  <script>window.__NAMI_DATA__ = ${JSON.stringify(props).replace(/</g, '\\u003c')}</script>`,
+              `  <script defer src="${publicPath}static/js/main.js"></script>`,
+              '</body>',
+              '</html>',
+            ].join('\n');
+          }
+
+          if (html) {
             // 写入文件
             const outputPath = path.join(
               staticOutputDir,
@@ -342,6 +435,7 @@ export class NamiBuilder {
             );
             fs.mkdirSync(path.dirname(outputPath), { recursive: true });
             fs.writeFileSync(outputPath, html, 'utf-8');
+            generatedCount++;
 
             logger.debug(`已生成: ${outputPath}`);
           }
@@ -352,7 +446,7 @@ export class NamiBuilder {
       }
     }
 
-    logger.info('静态页面生成完成');
+    logger.info(`静态页面生成完成，共生成 ${generatedCount} 个页面`);
   }
 
   /**
@@ -373,7 +467,7 @@ export class NamiBuilder {
       })),
       buildInfo: {
         nodeVersion: process.version,
-        namiVersion: '0.1.0',
+        namiVersion: this.resolveNamiVersion(),
       },
     };
 
@@ -387,5 +481,49 @@ export class NamiBuilder {
     fs.writeFileSync(outputPath, JSON.stringify(manifest, null, 2), 'utf-8');
 
     logger.info(`框架清单已生成: ${outputPath}`);
+  }
+
+  /**
+   * 解析 Nami 框架版本号
+   *
+   * 优先级：
+   * 1. 环境变量 NAMI_VERSION（CI/CD 场景注入）
+   * 2. 项目根目录 package.json 的 version 字段
+   * 3. @nami/webpack 自身 package.json 的 version 字段
+   * 4. 兜底 '0.0.0-unknown'
+   */
+  private resolveNamiVersion(): string {
+    // 优先使用环境变量
+    if (process.env.NAMI_VERSION) {
+      return process.env.NAMI_VERSION;
+    }
+
+    // 尝试从项目根目录 package.json 读取
+    try {
+      const rootPkgPath = path.resolve(this.projectRoot, 'package.json');
+      if (fs.existsSync(rootPkgPath)) {
+        const rootPkg = JSON.parse(fs.readFileSync(rootPkgPath, 'utf-8'));
+        if (rootPkg.version) {
+          return rootPkg.version;
+        }
+      }
+    } catch {
+      // 读取失败，继续尝试下一个来源
+    }
+
+    // 尝试从 @nami/webpack 自身 package.json 读取
+    try {
+      const selfPkgPath = path.resolve(__dirname, '..', 'package.json');
+      if (fs.existsSync(selfPkgPath)) {
+        const selfPkg = JSON.parse(fs.readFileSync(selfPkgPath, 'utf-8'));
+        if (selfPkg.version) {
+          return selfPkg.version;
+        }
+      }
+    } catch {
+      // 读取失败，使用兜底值
+    }
+
+    return '0.0.0-unknown';
   }
 }

@@ -120,26 +120,62 @@ export function createWebpackDevMiddleware(
       return;
     }
 
-    const handled = await new Promise<boolean>((resolve) => {
-      /**
-       * 将 Webpack devMiddleware 的编译状态注入到 ctx.state
-       * 下游中间件（如 SSR 渲染中间件）可以据此获取编译产物
-       */
-      devMiddlewareInstance(ctx.req, ctx.res, () => {
-        // webpack-dev-middleware 调用了 next()，说明它没有处理这个请求
-        resolve(false);
-      });
+    /**
+     * Express → Koa 适配器（无竞态版本）
+     *
+     * 通过三种互斥信号判断 Express 中间件的处理结果：
+     * 1. next() 被调用 → 中间件未处理，继续 Koa 管线
+     * 2. res 'finish' / 'close' 事件 → 中间件已完成响应
+     * 3. 超时兜底 → 防止 Promise 永远挂起
+     *
+     * resolved 标志确保只 resolve 一次，彻底避免竞态。
+     */
+    const ADAPTER_TIMEOUT_MS = 30_000;
+    const handled = await new Promise<boolean>((resolve, reject) => {
+      let resolved = false;
 
-      /**
-       * webpack-dev-middleware 可能直接通过 res.end() 响应请求
-       * 检查 headersSent 来判断是否已处理
-       */
-      // 使用 setImmediate 确保 webpack-dev-middleware 有机会同步处理
-      setImmediate(() => {
-        if (ctx.res.headersSent) {
-          resolve(true);
+      /** 统一的清理 + resolve 入口，保证只执行一次 */
+      const settle = (value: boolean) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timeoutHandle);
+        ctx.res.removeListener('finish', onFinish);
+        ctx.res.removeListener('close', onFinish);
+        resolve(value);
+      };
+
+      // 信号 1：中间件直接写入 res 并完成响应（如返回编译后的静态文件）
+      const onFinish = () => settle(true);
+      ctx.res.once('finish', onFinish);
+      ctx.res.once('close', onFinish);
+
+      // 信号 2：超时兜底，防止 Promise 永远挂起
+      const timeoutHandle = setTimeout(() => {
+        if (!resolved) {
+          logger.warn('webpack-dev-middleware 适配器超时，跳过该请求', {
+            path: ctx.path,
+            timeoutMs: ADAPTER_TIMEOUT_MS,
+          });
+          settle(false);
         }
-      });
+      }, ADAPTER_TIMEOUT_MS);
+
+      // 调用 Express 中间件
+      try {
+        devMiddlewareInstance(ctx.req, ctx.res, () => {
+          // 信号 3：webpack-dev-middleware 调用了 next()，说明它未处理此请求
+          settle(false);
+        });
+      } catch (err) {
+        // 同步异常：清理资源后向上抛出
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeoutHandle);
+          ctx.res.removeListener('finish', onFinish);
+          ctx.res.removeListener('close', onFinish);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      }
     });
 
     if (handled) {

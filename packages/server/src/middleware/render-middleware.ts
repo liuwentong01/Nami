@@ -47,7 +47,7 @@ import {
   createLogger,
   createTimer,
 } from '@nami/shared';
-import { RendererFactory } from '@nami/core';
+import { RendererFactory, PathMatcher } from '@nami/core';
 import type { BaseRenderer, PluginManagerLike, AppElementFactory } from '@nami/core';
 import { PluginManager } from '@nami/core';
 import { DegradationManager } from '@nami/core';
@@ -87,11 +87,14 @@ export interface RenderMiddlewareOptions {
 /** 模块级日志实例 */
 const moduleLogger: Logger = createLogger('@nami/server:render');
 
+/** 路由匹配器单例（全局复用） */
+const pathMatcher = new PathMatcher();
+
 /**
- * 内置的简单路由匹配器
+ * 内置路由匹配器（使用 PathMatcher）
  *
- * 支持静态路径精确匹配和简单的动态参数匹配（:param 语法）。
- * 生产环境建议使用 path-to-regexp 等成熟的路由匹配库。
+ * 支持动态参数、正则约束、可选参数、通配符。
+ * 使用优先级评分算法，自动选择最佳匹配。
  *
  * @param requestPath - 请求路径
  * @param routes - 路由配置列表
@@ -101,54 +104,23 @@ function defaultMatchRoute(
   requestPath: string,
   routes: NamiRoute[],
 ): RouteMatchResult | null {
+  let bestResult: RouteMatchResult | null = null;
+  let bestScore = -1;
+
   for (const route of routes) {
-    const params: Record<string, string> = {};
+    const matchResult = pathMatcher.match(route.path, requestPath);
 
-    // 将路由模式转换为正则表达式
-    // 例如: /user/:id → /user/([^/]+)
-    const patternParts = route.path.split('/');
-    const pathParts = requestPath.split('/');
-
-    // 精确匹配模式（默认）
-    if (route.exact !== false && patternParts.length !== pathParts.length) {
-      continue;
-    }
-
-    // 前缀匹配模式
-    if (route.exact === false && pathParts.length < patternParts.length) {
-      continue;
-    }
-
-    let matched = true;
-    for (let i = 0; i < patternParts.length; i++) {
-      const pattern = patternParts[i]!;
-      const segment = pathParts[i];
-
-      if (pattern.startsWith(':')) {
-        // 动态参数段
-        if (segment === undefined || segment === '') {
-          matched = false;
-          break;
-        }
-        const paramName = pattern.slice(1);
-        params[paramName] = decodeURIComponent(segment);
-      } else if (pattern !== segment) {
-        // 静态段不匹配
-        matched = false;
-        break;
-      }
-    }
-
-    if (matched) {
-      return {
+    if (matchResult.matched && matchResult.score > bestScore) {
+      bestScore = matchResult.score;
+      bestResult = {
         route,
-        params,
-        isExact: patternParts.length === pathParts.length,
+        params: matchResult.params,
+        isExact: !route.path.includes('*'),
       };
     }
   }
 
-  return null;
+  return bestResult;
 }
 
 /**

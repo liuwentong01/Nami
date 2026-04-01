@@ -99,14 +99,22 @@ export function createBaseConfig(options: BaseConfigOptions): Configuration {
     },
 
     // 缓存配置（加速二次构建）
-    cache: isDev
-      ? {
-          type: 'filesystem' as const,
-          cacheDirectory: path.resolve(projectRoot, 'node_modules/.cache/webpack'),
-          buildDependencies: {
-            config: [__filename],
-          },
-        }
-      : false,
+    // 开发和生产模式均启用文件系统缓存，大幅提升二次构建速度
+    cache: {
+      type: 'filesystem' as const,
+      cacheDirectory: path.resolve(
+        projectRoot,
+        'node_modules/.cache/webpack',
+        isDev ? 'dev' : 'prod',
+      ),
+      buildDependencies: {
+        config: [__filename],
+      },
+      // 生产模式使用内容哈希验证缓存有效性
+      ...(isDev ? {} : {
+        version: `${config.appName}-prod`,
+        compression: 'gzip' as const,
+      }),
+    },
   };
 }

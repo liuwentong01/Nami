@@ -108,32 +108,84 @@ export function createHMRMiddleware(
     }
 
     /**
-     * 检查是否是 HMR SSE 请求
-     * webpack-hot-middleware 只处理 /__webpack_hmr 路径的请求
+     * Express → Koa 适配器（无竞态版本）
+     *
+     * HMR 中间件的特殊之处：SSE 连接建立后，响应不会 finish，
+     * 但 headers 已经发送。因此除了 finish/close 事件外，
+     * 还需要通过 res.writeHead 拦截来检测 SSE 响应的开始。
+     *
+     * 三种互斥信号：
+     * 1. next() 被调用 → 非 HMR 请求，继续 Koa 管线
+     * 2. res 写入响应头（headersSent） → SSE 连接已建立
+     * 3. 超时兜底 → 防止 Promise 永远挂起
      */
-    const handled = await new Promise<boolean>((resolve) => {
-      /**
-       * 将请求传递给 webpack-hot-middleware
-       *
-       * 如果中间件处理了请求（如 SSE 连接），不会调用 next()。
-       * 如果不是 HMR 请求，会调用 next()，我们将 resolve(false) 并继续 Koa 管线。
-       */
-      (hotMiddleware as any)(ctx.req, ctx.res, () => {
-        resolve(false);
-      });
+    const ADAPTER_TIMEOUT_MS = 30_000;
+    const handled = await new Promise<boolean>((resolve, reject) => {
+      let resolved = false;
+
+      /** 统一的清理 + resolve 入口，保证只执行一次 */
+      const settle = (value: boolean) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timeoutHandle);
+        ctx.res.removeListener('finish', onResponse);
+        ctx.res.removeListener('close', onResponse);
+        // 恢复原始 writeHead（如果已被拦截）
+        if (originalWriteHead) {
+          ctx.res.writeHead = originalWriteHead;
+        }
+        resolve(value);
+      };
+
+      // 信号 1：中间件完成响应（普通 HTTP 请求场景）
+      const onResponse = () => settle(true);
+      ctx.res.once('finish', onResponse);
+      ctx.res.once('close', onResponse);
 
       /**
-       * 如果 webpack-hot-middleware 处理了请求（SSE 连接），
-       * 它会直接写入 res，此时我们不需要继续 Koa 管线。
+       * 拦截 writeHead 以检测 SSE 连接建立
        *
-       * 通过检查 res.headersSent 来判断中间件是否已处理。
+       * HMR 的 SSE 连接会调用 writeHead 设置响应头后持续保持连接，
+       * 不会触发 finish 事件。通过拦截 writeHead 来及时检测。
        */
-      // 给一个短暂的延迟让中间件有机会处理
-      setImmediate(() => {
-        if (ctx.res.headersSent) {
-          resolve(true);
+      const originalWriteHead = ctx.res.writeHead;
+      ctx.res.writeHead = function interceptedWriteHead(...args: any[]) {
+        const result = originalWriteHead.apply(this, args as any);
+        // 响应头已发送，说明中间件接管了此请求
+        settle(true);
+        return result;
+      } as typeof ctx.res.writeHead;
+
+      // 信号 2：超时兜底，防止 Promise 永远挂起
+      const timeoutHandle = setTimeout(() => {
+        if (!resolved) {
+          logger.warn('HMR 中间件适配器超时，跳过该请求', {
+            path: ctx.path,
+            timeoutMs: ADAPTER_TIMEOUT_MS,
+          });
+          settle(false);
         }
-      });
+      }, ADAPTER_TIMEOUT_MS);
+
+      // 调用 Express 中间件
+      try {
+        (hotMiddleware as any)(ctx.req, ctx.res, () => {
+          // 信号 3：HMR 中间件调用了 next()，说明不是 HMR 请求
+          settle(false);
+        });
+      } catch (err) {
+        // 同步异常：清理资源后向上抛出
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeoutHandle);
+          ctx.res.removeListener('finish', onResponse);
+          ctx.res.removeListener('close', onResponse);
+          if (originalWriteHead) {
+            ctx.res.writeHead = originalWriteHead;
+          }
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      }
     });
 
     if (!handled) {

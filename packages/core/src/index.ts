@@ -18,6 +18,8 @@ export { CSRRenderer } from './renderer/csr-renderer';
 export { SSRRenderer } from './renderer/ssr-renderer';
 export { SSGRenderer } from './renderer/ssg-renderer';
 export { ISRRenderer } from './renderer/isr-renderer';
+export type { ModuleLoaderLike } from './renderer/types';
+export { StreamingSSRRenderer } from './renderer/streaming-ssr-renderer';
 
 // 插件系统
 export { PluginManager } from './plugin/plugin-manager';
@@ -47,9 +49,14 @@ export { DocumentTemplate } from './html/document';
 export { HeadManager } from './html/head-manager';
 export { ScriptInjector } from './html/script-injector';
 
+// 模块加载器
+export { ModuleLoader } from './module';
+export type { ModuleLoaderOptions } from './module';
+
 // 路由
 export { RouteManager } from './router/route-manager';
 export { RouteMatcher } from './router/route-matcher';
+export { PathMatcher } from './router/path-matcher';
 export { lazyRoute } from './router/lazy-route';
 
 // 重新导出 @nami/shared 中常用的类型（便于业务方只引用 @nami/core）

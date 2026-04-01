@@ -106,11 +106,15 @@ export class SSGRenderer extends BaseRenderer {
   /** 静态文件输出目录（dist/static/） */
   private readonly staticDir: string;
 
+  /** 模块加载器（用于解析数据预取函数） */
+  private readonly moduleLoader?: import('./types').ModuleLoaderLike;
+
   constructor(options: SSGRendererOptions) {
     super(options);
     this.appElementFactory = options.appElementFactory;
     this.fileReader = options.staticFileReader ?? this.createDefaultFileReader();
     this.staticDir = path.join(options.config.outDir, 'static');
+    this.moduleLoader = options.moduleLoader;
 
     this.logger.debug('SSG 渲染器已初始化', {
       staticDir: this.staticDir,
@@ -489,10 +493,23 @@ export class SSGRenderer extends BaseRenderer {
       return [];
     }
 
-    // 解析并执行 getStaticPaths
-    // 注意：实际实现需从 server bundle 加载
-    // 当前返回空列表作为占位
-    this.logger.debug('解析 getStaticPaths', {
+    // 通过 ModuleLoader 从 server bundle 加载 getStaticPaths
+    if (this.moduleLoader && route.getStaticPaths) {
+      const getStaticPathsFn = await this.moduleLoader.getExportedFunction<
+        () => Promise<GetStaticPathsResult>
+      >(route.component, route.getStaticPaths);
+
+      if (getStaticPathsFn) {
+        const result = await getStaticPathsFn();
+        this.logger.debug('getStaticPaths 返回路径列表', {
+          path: route.path,
+          pathCount: result.paths.length,
+        });
+        return result.paths;
+      }
+    }
+
+    this.logger.warn('getStaticPaths 函数未找到或 ModuleLoader 未配置', {
       component: route.component,
       functionName: route.getStaticPaths,
     });
@@ -629,8 +646,16 @@ export class SSGRenderer extends BaseRenderer {
     functionName: string,
   ): Promise<((ctx: GetStaticPropsContext) => Promise<GetStaticPropsResult>) | null> {
     try {
-      // 占位实现 — 实际应从 server bundle 中加载
       this.logger.debug('解析 getStaticProps', {
+        componentPath,
+        functionName,
+      });
+
+      if (this.moduleLoader) {
+        return await this.moduleLoader.getExportedFunction(componentPath, functionName);
+      }
+
+      this.logger.warn('ModuleLoader 未配置，无法解析 getStaticProps', {
         componentPath,
         functionName,
       });

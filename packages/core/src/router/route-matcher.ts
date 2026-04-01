@@ -198,4 +198,13 @@ export class RouteMatcher {
   private escapeRegExp(str: string): string {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
+
+  /**
+   * 清除编译缓存
+   *
+   * 用于测试或动态路由变更场景。
+   */
+  clearCache(): void {
+    patternCache.clear();
+  }
 }

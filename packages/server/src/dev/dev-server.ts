@@ -206,6 +206,44 @@ export async function createDevServer(
   app.use(healthCheckMiddleware());
   app.use(errorIsolationMiddleware());
 
+  // ===== 开发模式渲染中间件 =====
+  // 在 dev 模式下，对于未被 webpack-dev-middleware 处理的页面请求，
+  // 返回一个 CSR HTML shell，让客户端路由接管
+  app.use(async (ctx: Koa.Context, next: Koa.Next) => {
+    // 只处理 GET/HEAD 的 HTML 请求
+    if (ctx.method !== 'GET' && ctx.method !== 'HEAD') {
+      await next();
+      return;
+    }
+
+    // 跳过静态资源和 API 请求
+    const skipPaths = ['/static/', '/__webpack_hmr', '/favicon.ico', '/api/'];
+    if (skipPaths.some(p => ctx.path.startsWith(p)) || ctx.path.includes('.')) {
+      await next();
+      return;
+    }
+
+    const publicPath = clientWebpackConfig.output?.publicPath as string || '/';
+    const title = config.title || config.appName || 'Nami App';
+
+    ctx.type = 'html';
+    ctx.body = [
+      '<!DOCTYPE html>',
+      '<html lang="zh-CN">',
+      '<head>',
+      '  <meta charset="utf-8">',
+      '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
+      `  <title>${title} — Dev</title>`,
+      '  <meta name="renderer" content="csr-dev">',
+      '</head>',
+      '<body>',
+      '  <div id="nami-root"></div>',
+      `  <script defer src="${publicPath}main.js"></script>`,
+      '</body>',
+      '</html>',
+    ].join('\n');
+  });
+
   // ===== 监听首次编译完成 =====
   let isReady = false;
 

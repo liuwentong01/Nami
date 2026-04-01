@@ -60,11 +60,13 @@ export type {
   PluginManagerLike,
   ISRManagerLike,
   StaticFileReader,
+  ModuleLoaderLike,
 } from './types';
 
 export type { SSRRendererOptions } from './ssr-renderer';
 export type { SSGRendererOptions, StaticGenerationResult } from './ssg-renderer';
 export type { ISRRendererOptions } from './isr-renderer';
+export type { StreamingSSRRendererOptions, StreamingRenderResult } from './streaming-ssr-renderer';
 
 // ==================== 导出渲染器类 ====================
 
@@ -73,6 +75,7 @@ export { CSRRenderer } from './csr-renderer';
 export { SSRRenderer } from './ssr-renderer';
 export { SSGRenderer } from './ssg-renderer';
 export { ISRRenderer } from './isr-renderer';
+export { StreamingSSRRenderer } from './streaming-ssr-renderer';
 
 // ==================== 渲染器工厂 ====================
 
@@ -116,7 +119,7 @@ export class RendererFactory {
    * @throws {RenderError} 渲染模式无效或必要参数缺失时抛出
    */
   static create(options: CreateRendererOptions): BaseRenderer {
-    const { mode, config, pluginManager, appElementFactory } = options;
+    const { mode, config, pluginManager, appElementFactory, moduleLoader } = options;
 
     switch (mode) {
       // ==================== CSR ====================
@@ -144,6 +147,7 @@ export class RendererFactory {
           config,
           pluginManager,
           appElementFactory,
+          moduleLoader,
         });
       }
 
@@ -153,6 +157,7 @@ export class RendererFactory {
           config,
           pluginManager,
           appElementFactory,
+          moduleLoader,
         });
       }
 
@@ -189,6 +194,7 @@ export class RendererFactory {
           config,
           pluginManager,
           appElementFactory,
+          moduleLoader,
           isrManager: (options as Record<string, unknown>)['isrManager'] as import('./types').ISRManagerLike,
         });
       }

@@ -20,6 +20,8 @@ import type {
   ISRCacheResult,
 } from '@nami/shared';
 
+import type { ModuleLoader } from '../module/module-loader';
+
 // ==================== 渲染器配置 ====================
 
 /**
@@ -50,6 +52,15 @@ export interface RendererOptions {
    * 如果不传则跳过插件钩子调用（适用于单元测试或纯静态场景）。
    */
   pluginManager?: PluginManagerLike;
+
+  /**
+   * 模块加载器
+   *
+   * 用于从 server bundle 中加载页面组件模块，
+   * 提取 getServerSideProps / getStaticProps / getStaticPaths 等导出函数。
+   * SSR/SSG/ISR 渲染器需要此选项来解析数据预取函数。
+   */
+  moduleLoader?: ModuleLoaderLike;
 }
 
 /**
@@ -79,6 +90,15 @@ export interface CreateRendererOptions extends RendererOptions {
    * @returns React 元素（JSX 树的根节点）
    */
   appElementFactory?: AppElementFactory;
+
+  /**
+   * 模块加载器实例
+   *
+   * 用于从编译后的 server bundle 中加载组件模块，
+   * 获取 getServerSideProps / getStaticProps / getStaticPaths 等数据预取函数。
+   * 可选，不传时渲染器会尝试直接 require 组件路径作为降级方案。
+   */
+  moduleLoader?: ModuleLoader;
 }
 
 // ==================== 辅助类型 ====================
@@ -153,6 +173,26 @@ export interface ISRManagerLike {
    * @param renderFn - 重新渲染的函数
    */
   scheduleRevalidation(key: string, renderFn: () => Promise<string>): void;
+}
+
+/**
+ * 模块加载器的最小接口
+ *
+ * 渲染器只需要加载模块和提取导出函数的能力。
+ */
+export interface ModuleLoaderLike {
+  /**
+   * 从模块中提取指定的导出函数
+   */
+  getExportedFunction<T extends (...args: any[]) => any>(
+    componentPath: string,
+    functionName: string,
+  ): Promise<T | null>;
+
+  /**
+   * 加载指定组件路径的模块
+   */
+  loadModule(componentPath: string): Promise<Record<string, unknown>>;
 }
 
 /**
