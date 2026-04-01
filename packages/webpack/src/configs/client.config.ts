@@ -60,6 +60,12 @@ function ensureGeneratedRouteModules(projectRoot: string, config: NamiConfig): s
     ' * 这里使用静态 import 工厂而不是表达式 import，',
     ' * 避免 webpack 对 `import(`${componentPath}`)` 发出 Critical dependency 警告。',
     ' */',
+    'export interface GeneratedRouteDefinition {',
+    '  path: string;',
+    '  component: string;',
+    '  exact?: boolean;',
+    '}',
+    '',
     'export const generatedComponentLoaders = {',
     ...uniqueComponentPaths.map((componentPath) => {
       const sourceFilePath = path.resolve(
@@ -77,6 +83,12 @@ function ensureGeneratedRouteModules(projectRoot: string, config: NamiConfig): s
     }),
     '} as Record<string, () => Promise<unknown>>;',
     '',
+    'export const generatedRouteDefinitions: GeneratedRouteDefinition[] = [',
+    ...config.routes.map((route) => (
+      `  { path: ${JSON.stringify(route.path)}, component: ${JSON.stringify(route.component)}, exact: ${route.exact === false ? 'false' : 'true'} },`
+    )),
+    '];',
+    '',
   ].join('\n');
 
   fs.mkdirSync(generatedDir, { recursive: true });
@@ -90,10 +102,20 @@ function ensureGeneratedCoreClientShim(projectRoot: string): string {
   const generatedFile = path.join(generatedDir, 'generated-core-client-shim.ts');
   const corePackageRoot = path.dirname(require.resolve('@nami/core/package.json'));
   const pluginManagerEntry = path.join(corePackageRoot, 'dist/plugin/plugin-manager');
+  const dataContextEntry = path.join(corePackageRoot, 'dist/data/data-context');
+  const pathMatcherEntry = path.join(corePackageRoot, 'dist/router/path-matcher');
   const relativeImportPath = path.relative(generatedDir, pluginManagerEntry);
+  const relativeDataContextPath = path.relative(generatedDir, dataContextEntry);
+  const relativePathMatcherPath = path.relative(generatedDir, pathMatcherEntry);
   const normalizedImportPath = toPosixImportPath(relativeImportPath.startsWith('.')
     ? relativeImportPath
     : `./${relativeImportPath}`);
+  const normalizedDataContextPath = toPosixImportPath(relativeDataContextPath.startsWith('.')
+    ? relativeDataContextPath
+    : `./${relativeDataContextPath}`);
+  const normalizedPathMatcherPath = toPosixImportPath(relativePathMatcherPath.startsWith('.')
+    ? relativePathMatcherPath
+    : `./${relativePathMatcherPath}`);
 
   const fileContent = [
     '/**',
@@ -104,6 +126,8 @@ function ensureGeneratedCoreClientShim(projectRoot: string): string {
     ' * 从而触发表达式 require 的 webpack 警告。',
     ' */',
     `export { PluginManager } from ${JSON.stringify(normalizedImportPath)};`,
+    `export { NamiDataProvider } from ${JSON.stringify(normalizedDataContextPath)};`,
+    `export { matchPath } from ${JSON.stringify(normalizedPathMatcherPath)};`,
     '',
   ].join('\n');
 

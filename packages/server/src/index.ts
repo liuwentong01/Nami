@@ -57,6 +57,8 @@ export {
   healthCheckMiddleware,
   // 静态资源服务
   staticServeMiddleware,
+  // 路由数据预取
+  dataPrefetchMiddleware,
   // 错误隔离
   errorIsolationMiddleware,
   // 核心渲染
@@ -73,6 +75,7 @@ export type {
   RequestContextOptions,
   HealthCheckOptions,
   StaticServeOptions,
+  DataPrefetchMiddlewareOptions,
   ErrorIsolationOptions,
   RenderMiddlewareOptions,
   ISRCacheMiddlewareOptions,

@@ -46,6 +46,7 @@
 
 import { createLogger } from '@nami/shared';
 import type { CacheEntry, CacheStore } from '@nami/shared';
+import type { ISRRenderPayload } from './isr-manager';
 
 /** 模块级日志实例 */
 const logger = createLogger('@nami/server:revalidation-queue');
@@ -58,7 +59,7 @@ interface RevalidationJob {
   key: string;
 
   /** 渲染函数 — 执行实际的 SSR 渲染并返回 HTML */
-  renderFn: () => Promise<string>;
+  renderFn: () => Promise<ISRRenderPayload | string>;
 
   /** 重验证间隔（秒）— 渲染成功后的新缓存 TTL */
   revalidateSeconds: number;
@@ -166,7 +167,7 @@ export class RevalidationQueue {
    */
   enqueue(
     key: string,
-    renderFn: () => Promise<string>,
+    renderFn: () => Promise<ISRRenderPayload | string>,
     revalidateSeconds: number,
     tags?: string[],
   ): void {
@@ -283,7 +284,7 @@ export class RevalidationQueue {
        * 超时计时器注册到 activeTimers 中，确保 close() 时能清理
        */
       let timeoutHandle: ReturnType<typeof setTimeout>;
-      const html = await Promise.race([
+      const payload = await Promise.race([
         job.renderFn(),
         new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(
@@ -296,6 +297,9 @@ export class RevalidationQueue {
       // 渲染完成后清理超时计时器
       clearTimeout(timeoutHandle!);
       this.activeTimers.delete(timeoutHandle!);
+      const normalized = typeof payload === 'string'
+        ? { html: payload, tags: job.tags ?? [] }
+        : { html: payload.html, tags: payload.tags ?? job.tags ?? [] };
 
       const duration = Date.now() - startTime;
 
@@ -303,10 +307,10 @@ export class RevalidationQueue {
        * 重验证成功 → 更新缓存
        */
       const cacheEntry: CacheEntry = {
-        content: html,
+        content: normalized.html,
         createdAt: Date.now(),
         revalidateAfter: job.revalidateSeconds,
-        tags: job.tags ?? [],
+        tags: normalized.tags,
       };
 
       await this.cacheStore.set(job.key, cacheEntry, job.revalidateSeconds);
@@ -320,7 +324,7 @@ export class RevalidationQueue {
       // 执行成功回调
       if (this.onRevalidated) {
         try {
-          await this.onRevalidated(job.key, html);
+          await this.onRevalidated(job.key, normalized.html);
         } catch (callbackError) {
           logger.warn('重验证成功回调执行失败', {
             key: job.key,

@@ -59,7 +59,7 @@ export async function generateProject(
       template,
       plugins,
       author,
-      isSSR: template === 'ssr' || template === 'full',
+      isSSR: template === 'ssr' || template === 'ssg' || template === 'full',
       isSSG: template === 'ssg' || template === 'full',
       isCSR: template === 'csr' || template === 'full',
       hasPluginCache: plugins.includes('@nami/plugin-cache'),

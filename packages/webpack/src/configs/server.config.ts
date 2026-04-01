@@ -12,6 +12,7 @@
 import type { Configuration } from 'webpack';
 import type { NamiConfig } from '@nami/shared';
 import path from 'path';
+import fs from 'fs';
 import webpack from 'webpack';
 import nodeExternals from 'webpack-node-externals';
 import { createBaseConfig } from './base.config';
@@ -54,6 +55,10 @@ export function createServerConfig(options: ServerConfigOptions): Configuration 
   });
 
   const outputDir = path.resolve(projectRoot, config.outDir, 'server');
+  const entryServerBasePath = path.resolve(projectRoot, config.srcDir, 'entry-server');
+  const entryServerPath = ['.tsx', '.ts', '.jsx', '.js']
+    .map((ext) => `${entryServerBasePath}${ext}`)
+    .find((candidate) => fs.existsSync(candidate));
   const routeEntries = Object.fromEntries(
     Array.from(
       new Set(
@@ -80,9 +85,9 @@ export function createServerConfig(options: ServerConfigOptions): Configuration 
     // 入口
     entry: {
       // `entry-server` 负责承载应用级服务端入口（例如 renderToHTML）。
-      // 页面模块则作为独立 entry 输出，供 ModuleLoader 在运行时解析
-      // getServerSideProps / getStaticProps / getStaticPaths。
-      'entry-server': path.resolve(projectRoot, config.srcDir, 'entry-server'),
+      // 对纯 SSG 项目，这个入口可能尚未提供，因此这里按存在性条件注入，
+      // 避免为了生成页面模块而把整个 server 构建直接判定为失败。
+      ...(entryServerPath ? { 'entry-server': entryServerPath } : {}),
       ...routeEntries,
     },
 

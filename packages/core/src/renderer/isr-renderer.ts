@@ -364,6 +364,7 @@ export class ISRRenderer extends BaseRenderer {
         cacheControl: {
           revalidate,
           staleWhileRevalidate: revalidate * 2,
+          tags: this.extractCacheTags(context),
         },
       },
     );

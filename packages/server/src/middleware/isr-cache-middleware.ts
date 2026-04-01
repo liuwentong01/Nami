@@ -43,7 +43,11 @@ import type {
   RouteMatchResult,
   Logger,
 } from '@nami/shared';
-import { RenderMode, createLogger } from '@nami/shared';
+import {
+  NAMI_ISR_REVALIDATE_HEADER,
+  RenderMode,
+  createLogger,
+} from '@nami/shared';
 import type { ISRManager } from '../isr/isr-manager';
 import { matchConfiguredRoute } from './route-match';
 
@@ -146,6 +150,12 @@ export function isrCacheMiddleware(
       return;
     }
 
+    // 内部后台重验证请求需要绕过 ISR 缓存层，避免 stale 命中再次把自己重新排队。
+    if (ctx.get(NAMI_ISR_REVALIDATE_HEADER) === '1') {
+      await next();
+      return;
+    }
+
     const requestLogger = (ctx.state.logger as Logger) || moduleLogger;
     const requestId = (ctx.state.requestId as string) || 'unknown';
 
@@ -182,9 +192,15 @@ export function isrCacheMiddleware(
            * 渲染完成后，ctx.body 中包含渲染产出的 HTML。
            */
           await next();
-          return typeof ctx.body === 'string' ? ctx.body : String(ctx.body || '');
+          return {
+            html: typeof ctx.body === 'string' ? ctx.body : String(ctx.body || ''),
+            tags: Array.isArray(ctx.state.namiCacheTags)
+              ? (ctx.state.namiCacheTags as string[])
+              : undefined,
+          };
         },
         revalidateSeconds,
+        async () => await revalidateByInternalRequest(ctx),
       );
 
       /**
@@ -256,5 +272,31 @@ export function isrCacheMiddleware(
       await next();
       ctx.set('X-Nami-Cache', 'BYPASS');
     }
+  };
+}
+
+export async function revalidateByInternalRequest(
+  ctx: Koa.Context,
+): Promise<{ html: string; tags?: string[] }> {
+  const host = ctx.host || ctx.get('host');
+  const url = `${ctx.protocol}://${host}${ctx.path}${ctx.querystring ? `?${ctx.querystring}` : ''}`;
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      [NAMI_ISR_REVALIDATE_HEADER]: '1',
+      'X-Requested-With': 'nami-isr-revalidate',
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`后台重验证请求失败: ${response.status} ${response.statusText}`);
+  }
+
+  const tagsHeader = response.headers.get('x-nami-cache-tags');
+  return {
+    html: await response.text(),
+    tags: tagsHeader
+      ? tagsHeader.split(',').map((tag) => tag.trim()).filter(Boolean)
+      : undefined,
   };
 }

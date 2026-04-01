@@ -73,6 +73,11 @@ export interface ISRManagerOptions {
   revalidationTimeout?: number;
 }
 
+export interface ISRRenderPayload {
+  html: string;
+  tags?: string[];
+}
+
 /**
  * ISR 管理器
  *
@@ -142,8 +147,9 @@ export class ISRManager {
    */
   async getOrRevalidate(
     key: string,
-    renderFn: () => Promise<string>,
+    renderFn: () => Promise<ISRRenderPayload | string>,
     revalidateSeconds: number,
+    backgroundRevalidateFn?: () => Promise<ISRRenderPayload | string>,
   ): Promise<ISRCacheResult> {
     const effectiveRevalidate = revalidateSeconds || this.config.defaultRevalidate;
 
@@ -192,7 +198,7 @@ export class ISRManager {
           // 后台触发重验证（非阻塞）
           this.revalidationQueue.enqueue(
             key,
-            renderFn,
+            backgroundRevalidateFn ?? renderFn,
             effectiveRevalidate,
             cachedEntry.tags,
           );
@@ -225,7 +231,8 @@ export class ISRManager {
     logger.info('ISR 缓存未命中，执行同步渲染', { key });
 
     try {
-      const html = await renderFn();
+      const payload = await renderFn();
+      const { html, tags } = normalizeRenderPayload(payload);
 
       // 生成 ETag（用于条件请求）
       const etag = generateETag(html);
@@ -235,7 +242,7 @@ export class ISRManager {
         content: html,
         createdAt: Date.now(),
         revalidateAfter: effectiveRevalidate,
-        tags: [],
+        tags: tags ?? [],
         etag,
       };
 
@@ -398,4 +405,15 @@ export class ISRManager {
       }
     }
   }
+}
+
+function normalizeRenderPayload(payload: ISRRenderPayload | string): ISRRenderPayload {
+  if (typeof payload === 'string') {
+    return { html: payload };
+  }
+
+  return {
+    html: payload.html,
+    tags: payload.tags,
+  };
 }

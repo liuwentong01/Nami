@@ -26,9 +26,14 @@
 
 import webpack from 'webpack';
 import type { Configuration, Stats } from 'webpack';
-import type { NamiConfig, NamiRoute } from '@nami/shared';
-import { RenderMode, createLogger, NAMI_MANIFEST_FILENAME } from '@nami/shared';
-import { ModuleLoader } from '@nami/core';
+import type { NamiConfig, NamiRoute, NamiPlugin } from '@nami/shared';
+import {
+  NEEDS_SERVER_BUNDLE,
+  RenderMode,
+  createLogger,
+  NAMI_MANIFEST_FILENAME,
+} from '@nami/shared';
+import { ModuleLoader, PluginLoader, PluginManager } from '@nami/core';
 import path from 'path';
 import fs from 'fs';
 import { createClientConfig } from './configs/client.config';
@@ -67,12 +72,24 @@ export interface BuildResult {
   stats: Record<string, Stats | null>;
 }
 
+export interface BuildOptions {
+  /** 是否生成 bundle 分析报告 */
+  analyze?: boolean;
+  /** 是否启用压缩，默认跟随各端构建配置 */
+  minimize?: boolean;
+  /** 构建前是否清空输出目录，默认 true */
+  clean?: boolean;
+  /** 仅对这些路由执行 SSG/ISR 预生成 */
+  ssgRoutes?: string[];
+}
+
 /**
  * Nami 构建编排器
  */
 export class NamiBuilder {
   private config: NamiConfig;
   private projectRoot: string;
+  private pluginManager?: PluginManager;
 
   constructor(config: NamiConfig, projectRoot: string) {
     this.config = config;
@@ -100,7 +117,10 @@ export class NamiBuilder {
    * @param mode - 构建模式
    * @returns 构建结果
    */
-  async build(mode: 'development' | 'production' = 'production'): Promise<BuildResult> {
+  async build(
+    mode: 'development' | 'production' = 'production',
+    options: BuildOptions = {},
+  ): Promise<BuildResult> {
     const startTime = Date.now();
     const isDev = mode === 'development';
     const errors: string[] = [];
@@ -109,13 +129,18 @@ export class NamiBuilder {
 
     logger.info(`开始构建 [${this.config.appName}]，模式: ${mode}`);
 
-    // 构建前清理产物目录
-    this.clean();
+    if (options.clean !== false) {
+      this.clean();
+    }
 
     try {
+      await this.prepareBuildContext(isDev);
+
       // 1. 分析路由，确定构建任务
-      const tasks = this.determineBuildTasks(isDev);
+      const tasks = await this.determineBuildTasks(isDev, options);
       logger.info(`需要执行 ${tasks.length} 个构建任务`);
+
+      await this.pluginManager?.callHook('buildStart');
 
       // 2. 并行执行 Client 和 Server 构建
       const compileTasks = tasks.filter((t) => t.type !== 'ssg');
@@ -148,6 +173,8 @@ export class NamiBuilder {
       // 4. 生成框架清单文件
       await this.generateManifest();
 
+      await this.pluginManager?.callHook('buildEnd');
+
       const duration = Date.now() - startTime;
       logger.info(`构建完成，耗时 ${duration}ms`);
 
@@ -156,6 +183,11 @@ export class NamiBuilder {
       const err = error as Error;
       logger.error(`构建失败: ${err.message}`);
       errors.push(err.message);
+      try {
+        await this.pluginManager?.callHook('buildEnd');
+      } catch {
+        // 构建收尾钩子失败不应覆盖主错误
+      }
       return {
         success: false,
         duration: Date.now() - startTime,
@@ -164,6 +196,29 @@ export class NamiBuilder {
         stats,
       };
     }
+  }
+
+  async createWebpackConfig(
+    target: 'client' | 'server',
+    mode: 'development' | 'production' = 'production',
+    options: BuildOptions = {},
+  ): Promise<Configuration> {
+    const isDev = mode === 'development';
+    await this.prepareBuildContext(isDev);
+
+    const rawConfig = target === 'server'
+      ? createServerConfig({
+          config: this.config,
+          projectRoot: this.projectRoot,
+          isDev,
+        })
+      : createClientConfig({
+          config: this.config,
+          projectRoot: this.projectRoot,
+          isDev,
+        });
+
+    return await this.applyWebpackConfigEnhancers(rawConfig, target, isDev, options);
   }
 
   /**
@@ -177,46 +232,97 @@ export class NamiBuilder {
    * @param isDev - 是否为开发模式（开发模式跳过 SSG）
    * @returns 构建任务列表
    */
-  private determineBuildTasks(isDev: boolean): BuildTask[] {
+  private async determineBuildTasks(
+    isDev: boolean,
+    options: BuildOptions = {},
+  ): Promise<BuildTask[]> {
     const tasks: BuildTask[] = [];
     const routes = this.config.routes;
 
     // 客户端 Bundle 始终需要
-    const clientConfig = this.enhanceConfig(
+    const clientConfig = await this.applyWebpackConfigEnhancers(
       createClientConfig({
         config: this.config,
         projectRoot: this.projectRoot,
         isDev,
       }),
       'client',
+      isDev,
+      options,
     );
     tasks.push({ type: 'client', config: clientConfig });
 
     // 检查是否需要服务端 Bundle
-    const hasSSR = routes.some(
-      (route: NamiRoute) => route.renderMode === RenderMode.SSR || route.renderMode === RenderMode.ISR,
+    const needsServerBundle = routes.some(
+      (route: NamiRoute) => NEEDS_SERVER_BUNDLE.includes(route.renderMode),
     );
-    if (hasSSR) {
-      const serverConfig = this.enhanceConfig(
+    if (needsServerBundle) {
+      const serverConfig = await this.applyWebpackConfigEnhancers(
         createServerConfig({
           config: this.config,
           projectRoot: this.projectRoot,
           isDev,
         }),
         'server',
+        isDev,
+        options,
       );
       tasks.push({ type: 'server', config: serverConfig });
     }
 
     // 检查是否需要 SSG
-    const ssgRoutes = routes.filter(
+    let ssgRoutes = routes.filter(
       (route: NamiRoute) => route.renderMode === RenderMode.SSG || route.renderMode === RenderMode.ISR,
     );
+    if (options.ssgRoutes && options.ssgRoutes.length > 0) {
+      const ssgRouteSet = new Set(options.ssgRoutes);
+      ssgRoutes = ssgRoutes.filter((route) => ssgRouteSet.has(route.path));
+    }
     if (ssgRoutes.length > 0 && !isDev) {
       tasks.push({ type: 'ssg', config: {}, routes: ssgRoutes });
     }
 
     return tasks;
+  }
+
+  /**
+   * 初始化构建期插件上下文
+   *
+   * 构建链路需要显式执行 build 阶段插件钩子：
+   * - modifyRoutes：先产出最终路由表，再驱动 client/server/ssg 三条任务链
+   * - modifyWebpackConfig：在每份 webpack 配置创建后继续做 waterfall 修改
+   */
+  private async prepareBuildContext(isDev: boolean): Promise<void> {
+    const resolvedPlugins: NamiPlugin[] = [];
+    this.pluginManager = new PluginManager(this.config, logger);
+
+    for (const pluginEntry of this.config.plugins) {
+      if (typeof pluginEntry === 'string') {
+        resolvedPlugins.push(await PluginLoader.load(pluginEntry));
+      } else {
+        resolvedPlugins.push(pluginEntry);
+      }
+    }
+
+    await this.pluginManager.registerPlugins(resolvedPlugins);
+
+    const modifiedRoutes = await this.pluginManager.runWaterfallHook(
+      'modifyRoutes',
+      [...this.config.routes],
+    );
+
+    // Builder 是单次使用对象，这里直接更新内部 config，
+    // 让后续任务划分、生成模块映射和 manifest 都基于同一份最终路由表。
+    this.config = {
+      ...this.config,
+      routes: modifiedRoutes,
+    };
+
+    logger.debug('构建上下文初始化完成', {
+      isDev,
+      routeCount: this.config.routes.length,
+      pluginCount: resolvedPlugins.length,
+    });
   }
 
   /**
@@ -253,6 +359,67 @@ export class NamiBuilder {
     }
 
     return { ...config, plugins };
+  }
+
+  private async applyWebpackConfigEnhancers(
+    rawConfig: Configuration,
+    name: 'client' | 'server',
+    isDev: boolean,
+    options: BuildOptions,
+  ): Promise<Configuration> {
+    let config = this.enhanceConfig(rawConfig, name);
+
+    if (name === 'client' && typeof options.minimize === 'boolean') {
+      config = {
+        ...config,
+        optimization: {
+          ...(config.optimization || {}),
+          minimize: options.minimize,
+        },
+      };
+    }
+
+    const customModifier = name === 'client'
+      ? this.config.webpack.client
+      : this.config.webpack.server;
+    if (customModifier) {
+      config = customModifier(config);
+    }
+
+    if (this.pluginManager) {
+      config = await this.pluginManager.runWaterfallHook(
+        'modifyWebpackConfig',
+        config,
+        { isServer: name === 'server', isDev },
+      );
+    }
+
+    if (options.analyze) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { BundleAnalyzerPlugin } = require('webpack-bundle-analyzer') as {
+        BundleAnalyzerPlugin: new (options: {
+          analyzerMode: string;
+          reportFilename: string;
+          openAnalyzer: boolean;
+          logLevel: string;
+        }) => webpack.WebpackPluginInstance;
+      };
+
+      config = {
+        ...config,
+        plugins: [
+          ...(config.plugins || []),
+          new BundleAnalyzerPlugin({
+            analyzerMode: 'static',
+            reportFilename: `${name}-bundle-report.html`,
+            openAnalyzer: false,
+            logLevel: 'silent',
+          }),
+        ],
+      };
+    }
+
+    return config;
   }
 
   /**
@@ -351,21 +518,34 @@ export class NamiBuilder {
   private async generateStaticPages(routes: NamiRoute[]): Promise<void> {
     logger.info(`开始静态页面生成，共 ${routes.length} 个路由...`);
 
-    const serverBundlePath = path.resolve(this.projectRoot, this.config.outDir, 'server', 'entry-server.js');
+    const primaryServerBundlePath = path.resolve(
+      this.projectRoot,
+      this.config.outDir,
+      'server',
+      'entry-server.js',
+    );
     const staticOutputDir = path.resolve(this.projectRoot, this.config.outDir, 'static');
 
     // 确保输出目录存在
     fs.mkdirSync(staticOutputDir, { recursive: true });
 
-    // 加载 Server Bundle
+    const moduleManifest = this.buildModuleManifest();
+    const fallbackServerBundlePath = Object.values(moduleManifest)[0]
+      ? path.resolve(this.projectRoot, this.config.outDir, 'server', Object.values(moduleManifest)[0]!)
+      : primaryServerBundlePath;
+    const serverBundlePath = fs.existsSync(primaryServerBundlePath)
+      ? primaryServerBundlePath
+      : fallbackServerBundlePath;
+
     if (!fs.existsSync(serverBundlePath)) {
       logger.warn('Server Bundle 不存在，跳过 SSG 生成');
       return;
     }
 
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const serverBundle = require(serverBundlePath);
-    const moduleManifest = this.buildModuleManifest();
+    const serverBundle = fs.existsSync(primaryServerBundlePath)
+      ? require(primaryServerBundlePath)
+      : {};
     const moduleLoader = new ModuleLoader({
       serverBundlePath,
       moduleManifest,
@@ -454,11 +634,21 @@ export class NamiBuilder {
             // 策略 1：server bundle 导出了统一的 renderToHTML 入口函数
             // 这是推荐的方式，entry-server.ts 中导出 renderToHTML(path, props) => html
             html = await serverBundle.renderToHTML(actualPath, props);
-          } else if (typeof pageModule.default === 'function' || typeof pageModule.render === 'function') {
+          } else if (typeof pageModule.render === 'function') {
             // 策略 2：页面模块自身导出了 render 函数或 default 组件渲染函数
             // 适用于每个页面模块自包含渲染逻辑的场景
-            const renderFn = (pageModule.render || pageModule.default) as Function;
-            html = await renderFn({ path: actualPath, props });
+            html = await (pageModule.render as Function)({ path: actualPath, props });
+          } else if (typeof pageModule.default === 'function') {
+            // 策略 2.5：将页面默认导出的 React 组件直接渲染为 HTML 片段。
+            // 这让纯 SSG 项目即便暂未提供 entry-server，也能得到真实的首屏 HTML，
+            // 而不是退回到仅有挂载容器的 CSR Shell。
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const React = require('react');
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const { renderToString } = require('react-dom/server') as {
+              renderToString: (element: unknown) => string;
+            };
+            html = renderToString(React.createElement(pageModule.default, props));
           } else {
             // 策略 3：兜底 — 生成最小化的 HTML Shell
             // 仅包含数据注入（window.__NAMI_DATA__）和客户端 JS 引用，

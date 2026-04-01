@@ -49,6 +49,7 @@ import { CSRRenderer } from './csr-renderer';
 import { SSRRenderer } from './ssr-renderer';
 import { SSGRenderer } from './ssg-renderer';
 import { ISRRenderer } from './isr-renderer';
+import { StreamingSSRRenderer } from './streaming-ssr-renderer';
 import type { CreateRendererOptions } from './types';
 
 // ==================== 导出类型 ====================
@@ -120,7 +121,15 @@ export class RendererFactory {
    * @throws {RenderError} 渲染模式无效或必要参数缺失时抛出
    */
   static create(options: CreateRendererOptions): BaseRenderer {
-    const { mode, config, pluginManager, appElementFactory, htmlRenderer, moduleLoader } = options;
+    const {
+      mode,
+      config,
+      pluginManager,
+      appElementFactory,
+      htmlRenderer,
+      moduleLoader,
+      preferStreaming,
+    } = options;
 
     switch (mode) {
       // ==================== CSR ====================
@@ -144,6 +153,15 @@ export class RendererFactory {
               hint: '请提供 React 元素工厂，或提供兼容 entry-server 的 HTML 渲染入口',
             },
           );
+        }
+
+        if (preferStreaming && appElementFactory) {
+          return new StreamingSSRRenderer({
+            config,
+            pluginManager,
+            appElementFactory,
+            moduleLoader,
+          });
         }
 
         return new SSRRenderer({

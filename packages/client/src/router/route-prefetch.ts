@@ -22,7 +22,9 @@
  * @module
  */
 
-import { createLogger } from '@nami/shared';
+import { NAMI_DATA_API_PREFIX, createLogger } from '@nami/shared';
+import { matchPath } from '@nami/core-client-shim';
+import { generatedComponentLoaders, generatedRouteDefinitions } from '@nami/generated-route-modules';
 
 // ==================== 类型定义 ====================
 
@@ -44,7 +46,7 @@ export interface PrefetchOptions {
 
   /**
    * 数据预取 API 的 URL 前缀
-   * @default '/_nami/data'
+   * @default NAMI_DATA_API_PREFIX
    */
   dataApiPrefix?: string;
 
@@ -99,7 +101,7 @@ const DATA_CACHE_TTL = 5 * 60 * 1000;
  * // 同时预取 JS chunk 和数据
  * await prefetchRoute('/user/123', {
  *   prefetchData: true,
- *   dataApiPrefix: '/_nami/data',
+ *   dataApiPrefix: NAMI_DATA_API_PREFIX,
  * });
  *
  * // 编程式场景：页面加载完成后预取可能访问的页面
@@ -116,7 +118,7 @@ export async function prefetchRoute(
   const {
     prefetchChunk = true,
     prefetchData = false,
-    dataApiPrefix = '/_nami/data',
+    dataApiPrefix = NAMI_DATA_API_PREFIX,
     timeout = 5000,
   } = options;
 
@@ -198,13 +200,8 @@ export function clearPrefetchCache(): void {
  * 预取路由的 JS chunk
  *
  * 实现方式：
- * 动态创建 <link rel="prefetch" as="script" href="..."> 标签，
- * 浏览器会以低优先级在空闲时间下载指定的 JS 文件。
- *
- * 路径到 chunk URL 的映射：
- * Nami 框架在构建阶段会生成 asset-manifest.json，
- * 其中包含路由路径到 chunk 文件名的对应关系。
- * 此处通过 window.__NAMI_MANIFEST__ 访问该映射。
+ * 直接调用构建阶段生成的静态 import 工厂，让 webpack 负责提前拉取目标 chunk。
+ * 这样既不会依赖额外的 window manifest 注入链路，也能复用框架已有的动态路由表。
  *
  * @param path - 路由路径
  */
@@ -215,44 +212,22 @@ async function prefetchChunkForRoute(path: string): Promise<void> {
     return;
   }
 
-  // 尝试从资源清单中获取 chunk URL
-  const chunkUrl = resolveChunkUrl(path);
-  if (!chunkUrl) {
-    logger.debug('未找到路由对应的 chunk URL', { path });
+  const componentPath = resolveRouteComponent(path);
+  if (!componentPath) {
+    logger.debug('未找到路由对应的组件映射，跳过 JS 预取', { path });
+    return;
+  }
+
+  const loadComponent = generatedComponentLoaders[componentPath];
+  if (!loadComponent) {
+    logger.debug('未找到路由组件加载器，跳过 JS 预取', { path, componentPath });
     return;
   }
 
   try {
-    /**
-     * 创建 <link rel="prefetch"> 标签
-     *
-     * rel="prefetch" 告诉浏览器这是未来可能需要的资源，
-     * 浏览器会在空闲时间以低优先级下载。
-     * as="script" 告诉浏览器这是一个 JavaScript 文件。
-     */
-    const link = document.createElement('link');
-    link.rel = 'prefetch';
-    link.as = 'script';
-    link.href = chunkUrl;
-
-    // 使用 crossOrigin 属性确保跨域 chunk 可以被正确缓存
-    link.crossOrigin = 'anonymous';
-
-    /**
-     * 监听加载完成/失败事件
-     */
-    await new Promise<void>((resolve, reject) => {
-      link.onload = () => {
-        prefetchedChunks.add(path);
-        logger.debug('JS chunk 预取成功', { path, chunkUrl });
-        resolve();
-      };
-      link.onerror = () => {
-        logger.warn('JS chunk 预取失败', { path, chunkUrl });
-        reject(new Error(`JS chunk 预取失败: ${chunkUrl}`));
-      };
-      document.head.appendChild(link);
-    });
+    await loadComponent();
+    prefetchedChunks.add(path);
+    logger.debug('JS chunk 预取成功', { path, componentPath });
   } catch (error) {
     // 预取失败不影响后续正常加载
     const message = error instanceof Error ? error.message : String(error);
@@ -307,28 +282,18 @@ async function prefetchDataForRoute(
 }
 
 /**
- * 解析路由路径对应的 chunk URL
+ * 解析目标路径命中的路由组件
  *
- * 从框架生成的资源清单中查找路由路径对应的 JS chunk 文件 URL。
- * 资源清单在构建阶段生成，通过 window.__NAMI_MANIFEST__ 注入到页面。
- *
- * @param path - 路由路径
- * @returns chunk 文件 URL，未找到时返回 null
+ * 这里使用构建阶段生成的路由定义 + 与服务端一致的 path matcher，
+ * 既支持静态路由，也支持动态路由（如 `/posts/:id`）的组件预取。
  */
-function resolveChunkUrl(path: string): string | null {
-  // 声明 window 上的自定义属性类型
-  const win = window as unknown as {
-    __NAMI_MANIFEST__?: {
-      routes?: Record<string, { chunk?: string }>;
-    };
-  };
-
-  const manifest = win.__NAMI_MANIFEST__;
-  if (!manifest?.routes) {
-    logger.debug('资源清单不可用，无法解析 chunk URL');
-    return null;
+function resolveRouteComponent(path: string): string | null {
+  for (const route of generatedRouteDefinitions) {
+    const result = matchPath(route.path, path, { exact: route.exact !== false });
+    if (result) {
+      return route.component;
+    }
   }
 
-  const routeInfo = manifest.routes[path];
-  return routeInfo?.chunk ?? null;
+  return null;
 }

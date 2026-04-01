@@ -32,6 +32,12 @@ export const DEFAULT_CONTAINER_ID = 'nami-root';
 /** 服务端注入数据的全局变量名 */
 export const NAMI_DATA_VARIABLE = '__NAMI_DATA__';
 
+/** 客户端路由数据预取接口前缀 */
+export const NAMI_DATA_API_PREFIX = '/_nami/data';
+
+/** ISR 内部后台重验证请求头 */
+export const NAMI_ISR_REVALIDATE_HEADER = 'x-nami-isr-revalidate';
+
 /** 资源清单文件名 */
 export const ASSET_MANIFEST_FILENAME = 'asset-manifest.json';
 

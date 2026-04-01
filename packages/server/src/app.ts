@@ -51,6 +51,7 @@ import { securityMiddleware } from './middleware/security';
 import { requestContextMiddleware } from './middleware/request-context';
 import { healthCheckMiddleware } from './middleware/health-check';
 import { staticServeMiddleware } from './middleware/static-serve';
+import { dataPrefetchMiddleware } from './middleware/data-prefetch-middleware';
 import { errorIsolationMiddleware } from './middleware/error-isolation';
 import { isrCacheMiddleware } from './middleware/isr-cache-middleware';
 import { renderMiddleware } from './middleware/render-middleware';
@@ -248,6 +249,17 @@ export async function createNamiServer(
    */
   app.use(staticServeMiddleware());
   appLogger.debug('中间件已注册: staticServe');
+
+  /**
+   * 中间件 5.1: 路由数据预取接口
+   * 为客户端 route prefetch 提供与页面级数据函数对齐的 JSON 入口
+   */
+  app.use(dataPrefetchMiddleware({
+    config,
+    moduleLoader: options.moduleLoader,
+    runtimeProvider: options.runtimeProvider,
+  }));
+  appLogger.debug('中间件已注册: dataPrefetch');
 
   /**
    * 中间件 5.5: 用户自定义中间件

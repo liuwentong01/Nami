@@ -312,6 +312,8 @@ export function renderMiddleware(
         htmlRenderer: runtime?.htmlRenderer ?? htmlRenderer,
         moduleLoader: runtime?.moduleLoader ?? moduleLoader,
         isrManager,
+        preferStreaming:
+          renderMode === RenderMode.SSR && matchResult.route.meta?.streaming === true,
       });
     } catch (error) {
       requestLogger.error('创建渲染器失败，降级处理', {
@@ -332,7 +334,17 @@ export function renderMiddleware(
       // 插件钩子统一由具体 renderer 内部触发。
       // 这里不再额外执行 onBeforeRender / onAfterRender / onRenderError，
       // 避免中间件层和渲染器层双重触发同一生命周期。
-      const result: RenderResult = await renderer.render(renderContext);
+      const streamingRenderer = renderer as BaseRenderer & {
+        renderToStream?: (context: RenderContext) => Promise<RenderResult>;
+      };
+      const result: RenderResult = (
+        renderMode === RenderMode.SSR
+          && matchResult.route.meta?.streaming === true
+          && ctx.method !== 'HEAD'
+          && typeof streamingRenderer.renderToStream === 'function'
+      )
+        ? await streamingRenderer.renderToStream!(renderContext)
+        : await renderer.render(renderContext);
 
       // ===== 5. 设置响应 =====
       setResponse(ctx, result, requestLogger);
@@ -412,7 +424,7 @@ function setResponse(
    * 则设置对应的 Cache-Control 头部。
    */
   if (result.cacheControl) {
-    const { revalidate, staleWhileRevalidate } = result.cacheControl;
+    const { revalidate, staleWhileRevalidate, tags } = result.cacheControl;
     let cacheValue = `s-maxage=${revalidate}`;
 
     if (staleWhileRevalidate) {
@@ -422,9 +434,18 @@ function setResponse(
     // 将最终缓存语义挂到请求上下文上，供外层中间件在响应收尾阶段兜底回写。
     // 这样即使后续链路里有历史逻辑覆盖了 Cache-Control，ISR/SSG 仍能保持一致的协议表达。
     ctx.state.namiCacheControl = cacheValue;
+    ctx.state.namiCacheTags = tags;
+    if (tags && tags.length > 0) {
+      ctx.set('X-Nami-Cache-Tags', tags.join(','));
+    }
     ctx.set('Cache-Control', cacheValue);
   }
 
   // 设置响应体
+  if ('isStreaming' in result && result.isStreaming && 'stream' in result && result.stream) {
+    ctx.body = result.stream;
+    return;
+  }
+
   ctx.body = result.html;
 }

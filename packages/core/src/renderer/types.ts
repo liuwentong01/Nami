@@ -72,6 +72,14 @@ export interface CreateRendererOptions extends RendererOptions {
   mode: RenderMode;
 
   /**
+   * 是否优先使用 Streaming SSR
+   *
+   * 仅在 mode 为 SSR 时生效，用于让 server 中间件按路由或请求级策略
+   * 切换到 React 18 的流式渲染实现，同时保持 RenderMode 枚举不变。
+   */
+  preferStreaming?: boolean;
+
+  /**
    * ISR 缓存存储实例
    * 仅在 mode 为 ISR 时需要提供。
    * 如果不传，ISRRenderer 将使用内存缓存作为后备。

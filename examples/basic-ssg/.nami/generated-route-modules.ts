@@ -12,12 +12,12 @@ export interface GeneratedRouteDefinition {
 
 export const generatedComponentLoaders = {
   "./pages/home": () => import(/* webpackChunkName: "route-pages-home" */ "../src/pages/home"),
-  "./pages/posts": () => import(/* webpackChunkName: "route-pages-posts" */ "../src/pages/posts"),
-  "./pages/post-detail": () => import(/* webpackChunkName: "route-pages-post-detail" */ "../src/pages/post-detail"),
+  "./pages/blog": () => import(/* webpackChunkName: "route-pages-blog" */ "../src/pages/blog"),
+  "./pages/blog-post": () => import(/* webpackChunkName: "route-pages-blog-post" */ "../src/pages/blog-post"),
 } as Record<string, () => Promise<unknown>>;
 
 export const generatedRouteDefinitions: GeneratedRouteDefinition[] = [
   { path: "/", component: "./pages/home", exact: true },
-  { path: "/posts", component: "./pages/posts", exact: true },
-  { path: "/posts/:id", component: "./pages/post-detail", exact: true },
+  { path: "/blog", component: "./pages/blog", exact: true },
+  { path: "/blog/:slug", component: "./pages/blog-post", exact: true },
 ];

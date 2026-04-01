@@ -39,7 +39,10 @@ export function registerBuildCommand(program: Command): void {
 
         // 创建构建器并执行构建
         const builder = new NamiBuilder(config, process.cwd());
-        const result = await builder.build('production');
+        const result = await builder.build('production', {
+          analyze: !!options.analyze,
+          minimize: options.minimize,
+        });
 
         spinner.stop();
 

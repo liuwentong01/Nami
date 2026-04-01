@@ -33,6 +33,7 @@
 import React from 'react';
 import type { NamiRoute, NamiConfig } from '@nami/shared';
 import { createLogger } from '@nami/shared';
+import { NamiDataProvider } from '@nami/core-client-shim';
 import { ClientErrorBoundary } from './error/client-error-boundary';
 import { NamiRouter } from './router/nami-router';
 import type { ComponentResolver } from './router/nami-router';
@@ -161,30 +162,36 @@ export const NamiApp: React.FC<NamiAppProps> = ({
         onError?.(error, errorInfo);
       }}
     >
-      {/* 默认 Head 配置 — 可被页面级 NamiHead 覆盖 */}
-      <NamiHead
-        defaultTitle={config.title || config.appName}
-        meta={
-          config.description
-            ? [
-                {
-                  key: 'description',
-                  name: 'description',
-                  content: config.description,
-                },
-              ]
-            : undefined
-        }
-      />
+      {/**
+       * 把首屏注水数据固定到 React Context 中，避免 hydration 完成后清理
+       * window.__NAMI_DATA__ 导致延迟挂载子树读不到 SSR/SSG 初始数据。
+       */}
+      <NamiDataProvider initialData={initialData ?? {}}>
+        {/* 默认 Head 配置 — 可被页面级 NamiHead 覆盖 */}
+        <NamiHead
+          defaultTitle={config.title || config.appName}
+          meta={
+            config.description
+              ? [
+                  {
+                    key: 'description',
+                    name: 'description',
+                    content: config.description,
+                  },
+                ]
+              : undefined
+          }
+        />
 
-      {/* 路由系统 */}
-      <NamiRouter
-        routes={routes}
-        config={config}
-        componentResolver={componentResolver}
-        onRouteChange={onRouteChange}
-        loadingFallback={loadingFallback}
-      />
+        {/* 路由系统 */}
+        <NamiRouter
+          routes={routes}
+          config={config}
+          componentResolver={componentResolver}
+          onRouteChange={onRouteChange}
+          loadingFallback={loadingFallback}
+        />
+      </NamiDataProvider>
     </ClientErrorBoundary>
   );
 };

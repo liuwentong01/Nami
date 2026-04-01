@@ -7,27 +7,34 @@
   "bin": {
     "nami": "./bin/nami.js"
   },
-  "files": ["dist", "bin"],
+  "files": [
+    "dist",
+    "bin"
+  ],
   "scripts": {
     "build": "tsc --build",
     "dev": "tsc --build --watch",
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
-    "@nami/shared": "workspace:*",
     "@nami/core": "workspace:*",
-    "@nami/webpack": "workspace:*",
     "@nami/server": "workspace:*",
-    "commander": "^12.0.0",
+    "@nami/shared": "workspace:*",
+    "@nami/webpack": "workspace:*",
     "chalk": "^4.1.2",
-    "ora": "^5.4.1",
+    "commander": "^12.0.0",
     "detect-port": "^1.5.0",
-    "esbuild": "^0.20.0"
+    "esbuild": "^0.20.0",
+    "ora": "^5.4.1",
+    "webpack-bundle-analyzer": "^5.3.0"
   },
   "devDependencies": {
     "@types/detect-port": "^1.3.0"
   },
-  "keywords": ["nami", "cli"],
+  "keywords": [
+    "nami",
+    "cli"
+  ],
   "license": "MIT",
   "publishConfig": {
     "access": "public"

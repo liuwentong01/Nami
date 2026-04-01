@@ -34,6 +34,10 @@ export type { HealthCheckOptions } from './health-check';
 export { staticServeMiddleware } from './static-serve';
 export type { StaticServeOptions } from './static-serve';
 
+// ===== 路由数据预取 =====
+export { dataPrefetchMiddleware } from './data-prefetch-middleware';
+export type { DataPrefetchMiddlewareOptions } from './data-prefetch-middleware';
+
 // ===== 错误隔离 =====
 export { errorIsolationMiddleware } from './error-isolation';
 export type { ErrorIsolationOptions } from './error-isolation';

@@ -15,6 +15,13 @@ export function matchConfiguredRoute(
   requestPath: string,
   routes: NamiRoute[],
 ): RouteMatchResult | null {
+  return matchRouteList(requestPath, routes);
+}
+
+function matchRouteList(
+  requestPath: string,
+  routes: NamiRoute[],
+): RouteMatchResult | null {
   const sortedRoutes = rankRoutes(routes as unknown as RankableRoute[]) as unknown as NamiRoute[];
 
   for (const route of sortedRoutes) {
@@ -25,8 +32,19 @@ export function matchConfiguredRoute(
       return {
         route,
         params: result.params,
-        isExact: !route.path.includes('*'),
+        isExact: exact,
       };
+    }
+  }
+
+  for (const route of sortedRoutes) {
+    if (!route.children || route.children.length === 0) {
+      continue;
+    }
+
+    const childMatch = matchRouteList(requestPath, route.children);
+    if (childMatch) {
+      return childMatch;
     }
   }
 

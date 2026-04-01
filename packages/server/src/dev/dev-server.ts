@@ -278,12 +278,18 @@ export async function createDevServer(
   const { timingMiddleware } = await import('../middleware/timing');
   const { requestContextMiddleware } = await import('../middleware/request-context');
   const { healthCheckMiddleware } = await import('../middleware/health-check');
+  const { dataPrefetchMiddleware } = await import('../middleware/data-prefetch-middleware');
   const { errorIsolationMiddleware } = await import('../middleware/error-isolation');
 
   // 基础中间件（开发环境简化版）
   app.use(timingMiddleware());
   app.use(requestContextMiddleware());
   app.use(healthCheckMiddleware());
+  app.use(dataPrefetchMiddleware({
+    config,
+    moduleLoader: options.moduleLoader,
+    runtimeProvider: options.runtimeProvider,
+  }));
   app.use(errorIsolationMiddleware());
 
   // ===== 开发模式渲染中间件 =====
