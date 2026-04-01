@@ -8,9 +8,31 @@
 import type { Configuration, RuleSetRule } from 'webpack';
 import type { NamiConfig } from '@nami/shared';
 import path from 'path';
+import crypto from 'crypto';
 import { createTypeScriptRule } from '../rules/typescript';
 import { createAssetRules } from '../rules/assets';
 import { createSvgRules } from '../rules/svg';
+
+/**
+ * 根据 NamiConfig 生成内容哈希
+ *
+ * 用于生产模式的缓存版本标识。当配置变更时，哈希值变化，
+ * Webpack 会自动丢弃旧的缓存文件，确保构建结果的正确性。
+ *
+ * @param config - Nami 框架配置
+ * @returns 8 位十六进制哈希字符串
+ */
+function createContentHash(config: NamiConfig): string {
+  const content = JSON.stringify({
+    appName: config.appName,
+    srcDir: config.srcDir,
+    outputDir: config.outputDir,
+    publicPath: config.publicPath,
+    defaultRenderMode: config.defaultRenderMode,
+    routes: config.routes?.map((r) => r.path),
+  });
+  return crypto.createHash('md5').update(content).digest('hex').slice(0, 8);
+}
 
 /**
  * 基础配置选项
@@ -107,7 +129,7 @@ export function createBaseConfig(options: BaseConfigOptions): Configuration {
      * dev/prod 使用独立的缓存目录，避免模式切换导致缓存失效。
      *
      * 生产模式额外配置：
-     * - version: 基于 appName 的缓存版本标识，appName 变更时自动失效旧缓存
+     * - version: 基于配置内容哈希的缓存版本标识，配置变更时自动失效旧缓存
      * - compression: gzip 压缩缓存文件，减少磁盘占用（生产缓存通常较大）
      */
     cache: {
@@ -121,8 +143,9 @@ export function createBaseConfig(options: BaseConfigOptions): Configuration {
         // 当本配置文件自身变更时，自动失效缓存
         config: [__filename],
       },
+      // 开发模式用固定版本标识；生产模式用配置内容哈希，配置变更时自动失效
+      version: isDev ? 'dev' : createContentHash(config),
       ...(isDev ? {} : {
-        version: `${config.appName}-prod`,
         compression: 'gzip' as const,
       }),
     },

@@ -56,7 +56,20 @@ export type { ModuleLoaderOptions } from './module';
 // 路由
 export { RouteManager } from './router/route-manager';
 export { RouteMatcher } from './router/route-matcher';
-export { PathMatcher } from './router/path-matcher';
+export type { MatchResult, MatchResultWithScore } from './router/route-matcher';
+export {
+  compilePath,
+  matchPath,
+  rankRoutes,
+  getPatternScore,
+  clearPathMatcherCache,
+} from './router/path-matcher';
+export type {
+  PathMatchResult,
+  CompileOptions,
+  CompiledMatcher,
+  RankableRoute,
+} from './router/path-matcher';
 export { lazyRoute } from './router/lazy-route';
 
 // 重新导出 @nami/shared 中常用的类型（便于业务方只引用 @nami/core）

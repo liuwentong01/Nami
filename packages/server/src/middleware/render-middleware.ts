@@ -47,7 +47,7 @@ import {
   createLogger,
   createTimer,
 } from '@nami/shared';
-import { RendererFactory, PathMatcher } from '@nami/core';
+import { RendererFactory, matchPath, rankRoutes } from '@nami/core';
 import type { BaseRenderer, PluginManagerLike, AppElementFactory } from '@nami/core';
 import { PluginManager } from '@nami/core';
 import { DegradationManager } from '@nami/core';
@@ -87,14 +87,12 @@ export interface RenderMiddlewareOptions {
 /** 模块级日志实例 */
 const moduleLogger: Logger = createLogger('@nami/server:render');
 
-/** 路由匹配器单例（全局复用） */
-const pathMatcher = new PathMatcher();
-
 /**
- * 内置路由匹配器（使用 PathMatcher）
+ * 内置路由匹配器（使用 @nami/core 的 matchPath + rankRoutes）
  *
  * 支持动态参数、正则约束、可选参数、通配符。
- * 使用优先级评分算法，自动选择最佳匹配。
+ * 先按优先级排序路由，再依次匹配，第一个命中即返回。
+ * 由于 rankRoutes 内部有编译缓存，排序的性能开销很低。
  *
  * @param requestPath - 请求路径
  * @param routes - 路由配置列表
@@ -104,23 +102,23 @@ function defaultMatchRoute(
   requestPath: string,
   routes: NamiRoute[],
 ): RouteMatchResult | null {
-  let bestResult: RouteMatchResult | null = null;
-  let bestScore = -1;
+  // 按优先级排序（最具体的路由排在最前面）
+  const sortedRoutes = rankRoutes(routes);
 
-  for (const route of routes) {
-    const matchResult = pathMatcher.match(route.path, requestPath);
+  for (const route of sortedRoutes) {
+    const exact = route.exact !== false;
+    const result = matchPath(route.path, requestPath, { exact });
 
-    if (matchResult.matched && matchResult.score > bestScore) {
-      bestScore = matchResult.score;
-      bestResult = {
+    if (result) {
+      return {
         route,
-        params: matchResult.params,
+        params: result.params,
         isExact: !route.path.includes('*'),
       };
     }
   }
 
-  return bestResult;
+  return null;
 }
 
 /**

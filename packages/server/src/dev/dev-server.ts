@@ -38,6 +38,8 @@ import type Koa from 'koa';
 import type { NamiConfig, Logger } from '@nami/shared';
 import { createLogger } from '@nami/shared';
 import type { Configuration as WebpackConfiguration, Compiler } from 'webpack';
+import type { PluginManager } from '@nami/core';
+import type { DegradationManager } from '@nami/core';
 
 /**
  * 开发服务器配置选项
@@ -56,6 +58,19 @@ export interface DevServerOptions {
    * 自定义日志实例
    */
   logger?: Logger;
+
+  /**
+   * 插件管理器实例（可选）
+   * 提供后将使用完整的 renderMiddleware 进行 SSR 渲染；
+   * 不提供则回退到简单的 CSR HTML shell。
+   */
+  pluginManager?: PluginManager;
+
+  /**
+   * 降级管理器实例（可选）
+   * 配合 pluginManager 使用，提供渲染降级能力。
+   */
+  degradationManager?: DegradationManager;
 
   /**
    * 开发服务器就绪回调
@@ -207,42 +222,63 @@ export async function createDevServer(
   app.use(errorIsolationMiddleware());
 
   // ===== 开发模式渲染中间件 =====
-  // 在 dev 模式下，对于未被 webpack-dev-middleware 处理的页面请求，
-  // 返回一个 CSR HTML shell，让客户端路由接管
-  app.use(async (ctx: Koa.Context, next: Koa.Next) => {
-    // 只处理 GET/HEAD 的 HTML 请求
-    if (ctx.method !== 'GET' && ctx.method !== 'HEAD') {
-      await next();
-      return;
-    }
+  if (options.pluginManager && options.degradationManager) {
+    /**
+     * 提供了 pluginManager 和 degradationManager 时，
+     * 使用完整的 renderMiddleware 进行 SSR 渲染（与生产模式一致的渲染管线）。
+     * 开发环境不启用 ISR 缓存，每次都重新渲染。
+     */
+    const { renderMiddleware } = await import('../middleware/render-middleware');
 
-    // 跳过静态资源和 API 请求
-    const skipPaths = ['/static/', '/__webpack_hmr', '/favicon.ico', '/api/'];
-    if (skipPaths.some(p => ctx.path.startsWith(p)) || ctx.path.includes('.')) {
-      await next();
-      return;
-    }
+    app.use(renderMiddleware({
+      config,
+      pluginManager: options.pluginManager,
+      degradationManager: options.degradationManager,
+    }));
 
-    const publicPath = clientWebpackConfig.output?.publicPath as string || '/';
-    const title = config.title || config.appName || 'Nami App';
+    logger.info('已注册 SSR 渲染中间件（开发模式）');
+  } else {
+    /**
+     * 未提供 pluginManager / degradationManager 时，
+     * 回退到简单的 CSR HTML shell，让客户端路由接管渲染。
+     */
+    app.use(async (ctx: Koa.Context, next: Koa.Next) => {
+      // 只处理 GET/HEAD 的 HTML 请求
+      if (ctx.method !== 'GET' && ctx.method !== 'HEAD') {
+        await next();
+        return;
+      }
 
-    ctx.type = 'html';
-    ctx.body = [
-      '<!DOCTYPE html>',
-      '<html lang="zh-CN">',
-      '<head>',
-      '  <meta charset="utf-8">',
-      '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
-      `  <title>${title} — Dev</title>`,
-      '  <meta name="renderer" content="csr-dev">',
-      '</head>',
-      '<body>',
-      '  <div id="nami-root"></div>',
-      `  <script defer src="${publicPath}main.js"></script>`,
-      '</body>',
-      '</html>',
-    ].join('\n');
-  });
+      // 跳过静态资源和 API 请求
+      const skipPaths = ['/static/', '/__webpack_hmr', '/favicon.ico', '/api/'];
+      if (skipPaths.some(p => ctx.path.startsWith(p)) || ctx.path.includes('.')) {
+        await next();
+        return;
+      }
+
+      const publicPath = clientWebpackConfig.output?.publicPath as string || '/';
+      const title = config.title || config.appName || 'Nami App';
+
+      ctx.type = 'html';
+      ctx.body = [
+        '<!DOCTYPE html>',
+        '<html lang="zh-CN">',
+        '<head>',
+        '  <meta charset="utf-8">',
+        '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
+        `  <title>${title} — Dev</title>`,
+        '  <meta name="renderer" content="csr-dev">',
+        '</head>',
+        '<body>',
+        '  <div id="nami-root"></div>',
+        `  <script defer src="${publicPath}main.js"></script>`,
+        '</body>',
+        '</html>',
+      ].join('\n');
+    });
+
+    logger.info('已注册 CSR HTML shell 中间件（开发模式，未提供 pluginManager）');
+  }
 
   // ===== 监听首次编译完成 =====
   let isReady = false;

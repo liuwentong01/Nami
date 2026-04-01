@@ -14,6 +14,7 @@
     "build:cli": "pnpm --filter @nami/cli run build",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "lint": "eslint 'packages/*/src/**/*.{ts,tsx}'",
     "lint:fix": "eslint 'packages/*/src/**/*.{ts,tsx}' --fix",
     "format": "prettier --write 'packages/*/src/**/*.{ts,tsx}'",
