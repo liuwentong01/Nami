@@ -167,6 +167,14 @@ export class NamiBuilder {
 
   /**
    * 分析路由配置，确定需要哪些构建任务
+   *
+   * 根据路由表中各路由的 renderMode 决定需要哪些构建产物：
+   * - Client Bundle：始终需要（CSR 渲染和 Hydration 都依赖它）
+   * - Server Bundle：仅当存在 SSR 或 ISR 路由时需要（服务端渲染用）
+   * - SSG 生成：仅当存在 SSG 或 ISR 路由且为生产模式时执行
+   *
+   * @param isDev - 是否为开发模式（开发模式跳过 SSG）
+   * @returns 构建任务列表
    */
   private determineBuildTasks(isDev: boolean): BuildTask[] {
     const tasks: BuildTask[] = [];
@@ -212,6 +220,16 @@ export class NamiBuilder {
 
   /**
    * 增强 Webpack 配置：添加框架内置插件
+   *
+   * 在原始 Webpack 配置的基础上注入 Nami 框架内置的 Webpack 插件：
+   * - 所有构建：添加进度条插件（显示构建进度）
+   * - 客户端构建额外添加：
+   *   - NamiManifestPlugin：生成资源清单，供服务端渲染时引用正确的 JS/CSS 路径
+   *   - NamiHtmlInjectPlugin：为 CSR 路由生成 HTML 模板（仅当存在 CSR 路由时）
+   *
+   * @param config - 原始 Webpack 配置
+   * @param name - 构建任务名称（'client' | 'server'）
+   * @returns 增强后的 Webpack 配置
    */
   private enhanceConfig(config: Configuration, name: string): Configuration {
     const plugins = [...(config.plugins || [])];
@@ -238,6 +256,12 @@ export class NamiBuilder {
 
   /**
    * 并行执行多个 Webpack 编译任务
+   *
+   * Client 和 Server 构建互相独立，可并行执行以缩短总构建时间。
+   * 每个任务独立创建 Webpack Compiler 实例，编译完成后收集错误和警告。
+   *
+   * @param tasks - 待执行的构建任务列表
+   * @returns 各任务的编译结果（按 task.type 为键）
    */
   private async runParallelCompilation(
     tasks: BuildTask[],
@@ -263,6 +287,12 @@ export class NamiBuilder {
 
   /**
    * 执行单个 Webpack 编译
+   *
+   * 封装 webpack compiler.run() 为 Promise，统一错误和警告的收集格式。
+   * 编译完成后主动调用 compiler.close() 释放文件 watcher 等系统资源。
+   *
+   * @param config - Webpack 配置
+   * @returns 包含 stats、错误列表和警告列表的结果对象
    */
   private runCompilation(
     config: Configuration,
@@ -279,6 +309,8 @@ export class NamiBuilder {
         }
 
         if (stats) {
+          // 从 Webpack Stats 中提取错误和警告
+          // Webpack 5 的 stats.toJson() 返回的 errors/warnings 可能是字符串或对象
           const info = stats.toJson({ errors: true, warnings: true });
           if (info.errors) {
             errors.push(...info.errors.map((e) => (typeof e === 'string' ? e : e.message)));
@@ -299,8 +331,17 @@ export class NamiBuilder {
   /**
    * 执行 SSG 静态页面生成
    *
-   * 加载 Server Bundle，遍历 SSG 路由，
-   * 对每个路由执行 getStaticProps + renderToString。
+   * 在 Client/Server Webpack 编译完成后执行，从 server bundle 中加载页面模块，
+   * 遍历所有 SSG/ISR 路由执行数据预取和 HTML 渲染，将结果写入 dist/static/ 目录。
+   *
+   * 渲染策略（按优先级）：
+   * 1. serverBundle.renderToHTML() — server bundle 导出的统一渲染入口（推荐）
+   * 2. pageModule.render() / pageModule.default() — 页面级渲染函数
+   * 3. 兜底 HTML Shell — 仅包含数据注入和客户端 JS 引用，由客户端完成渲染
+   *
+   * 对于动态路由（路径含 :param），需要 getStaticPaths 提供预生成的参数列表。
+   *
+   * @param routes - 需要静态生成的路由列表
    */
   private async generateStaticPages(routes: NamiRoute[]): Promise<void> {
     logger.info(`开始静态页面生成，共 ${routes.length} 个路由...`);
@@ -393,19 +434,27 @@ export class NamiBuilder {
             actualPath = actualPath.replace(`:${key}`, value);
           }
 
-          // 渲染 HTML — 支持多种 server bundle 导出格式
+          /**
+           * 渲染 HTML — 支持三种 server bundle 导出格式
+           *
+           * 不同的项目结构会产生不同的 server bundle 导出格式，
+           * 框架按优先级依次尝试以下三种渲染策略：
+           */
           let html: string | null = null;
 
           if (typeof serverBundle.renderToHTML === 'function') {
-            // 方式 1：统一的 renderToHTML 入口
+            // 策略 1：server bundle 导出了统一的 renderToHTML 入口函数
+            // 这是推荐的方式，entry-server.ts 中导出 renderToHTML(path, props) => html
             html = await serverBundle.renderToHTML(actualPath, props);
           } else if (typeof pageModule.default === 'function' || typeof pageModule.render === 'function') {
-            // 方式 2：页面模块导出 render 函数或 default 组件
+            // 策略 2：页面模块自身导出了 render 函数或 default 组件渲染函数
+            // 适用于每个页面模块自包含渲染逻辑的场景
             const renderFn = (pageModule.render || pageModule.default) as Function;
             html = await renderFn({ path: actualPath, props });
           } else {
-            // 方式 3：使用框架的 SSGRenderer 生成 HTML
-            // 构造最小化的 HTML 壳（此场景下 SSG 渲染由上层 SSGRenderer 负责）
+            // 策略 3：兜底 — 生成最小化的 HTML Shell
+            // 仅包含数据注入（window.__NAMI_DATA__）和客户端 JS 引用，
+            // 实际渲染由客户端 JS 接管（等同于带预取数据的 CSR）
             const title = (route.meta?.title as string) || this.config.title || this.config.appName;
             const publicPath = this.config.assets.publicPath;
             html = [

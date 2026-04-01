@@ -98,8 +98,18 @@ export function createBaseConfig(options: BaseConfigOptions): Configuration {
       level: isDev ? 'warn' : 'info',
     },
 
-    // 缓存配置（加速二次构建）
-    // 开发和生产模式均启用文件系统缓存，大幅提升二次构建速度
+    /**
+     * 缓存配置 — 加速二次构建
+     *
+     * 开发和生产模式均启用 Webpack 5 文件系统缓存（持久化到磁盘），
+     * 二次构建速度可提升 60-80%。
+     *
+     * dev/prod 使用独立的缓存目录，避免模式切换导致缓存失效。
+     *
+     * 生产模式额外配置：
+     * - version: 基于 appName 的缓存版本标识，appName 变更时自动失效旧缓存
+     * - compression: gzip 压缩缓存文件，减少磁盘占用（生产缓存通常较大）
+     */
     cache: {
       type: 'filesystem' as const,
       cacheDirectory: path.resolve(
@@ -108,9 +118,9 @@ export function createBaseConfig(options: BaseConfigOptions): Configuration {
         isDev ? 'dev' : 'prod',
       ),
       buildDependencies: {
+        // 当本配置文件自身变更时，自动失效缓存
         config: [__filename],
       },
-      // 生产模式使用内容哈希验证缓存有效性
       ...(isDev ? {} : {
         version: `${config.appName}-prod`,
         compression: 'gzip' as const,

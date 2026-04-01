@@ -17,14 +17,18 @@ Nami 是一个面向大规模前端团队的企业级框架，提供从开发、
 ### 核心特性
 
 - **四种渲染模式** — BaseRenderer 统一抽象，RendererFactory 工厂模式，路由级渲染模式配置
+- **流式 SSR** — 基于 React 18 `renderToPipeableStream`，Suspense 支持、更快的 TTFB、选择性 Hydration
 - **插件系统** — waterfall / parallel / bail 三种钩子执行模式，覆盖构建、服务端、客户端全生命周期
 - **ISR 引擎** — stale-while-revalidate 语义，可插拔缓存后端（Memory / FileSystem / Redis），后台重验证队列
 - **多级降级** — 正常渲染 → 重试 → CSR 降级 → 骨架屏 → 静态 HTML → 503，逐级自动兜底
+- **模块加载器** — ModuleLoader 桥接路由配置与 server bundle，自动解析 getServerSideProps / getStaticProps / getStaticPaths
+- **智能路由匹配** — PathMatcher 支持优先级评分（静态 > 约束参数 > 动态参数 > 通配符）、正则约束、可选参数
 - **Koa 中间件管线** — timing → security → requestContext → healthCheck → staticServe → [plugins] → errorIsolation → isrCache → render
 - **集群模式** — Master/Worker 进程管理，崩溃自动重启，优雅停机
-- **构建系统** — Client / Server / SSG / Dev 四套 Webpack 配置，自定义 Loader 与 Plugin
+- **构建系统** — Client / Server / SSG / Dev 四套 Webpack 配置，持久化文件系统缓存，自定义 Loader 与 Plugin
 - **CLI 工具** — `nami dev` / `build` / `start` / `generate` / `analyze` / `info` 一站式命令
 - **脚手架** — `create-nami-app` 交互式项目初始化
+- **测试体系** — Vitest 单元测试，覆盖渲染器、路由匹配、插件系统等核心模块
 
 ---
 
@@ -38,12 +42,14 @@ Nami 是一个面向大规模前端团队的企业级框架，提供从开发、
 │    @nami/server      │          @nami/client            │
 │  Koa 中间件管线       │  Hydration · Router · Data Hook  │
 │  ISR 引擎 · 集群      │  Head 管理 · 性能采集             │
+│  PathMatcher 路由     │  Streaming SSR 支持              │
 ├──────────────────────┴──────────────────────────────────┤
 │                      @nami/core                         │
-│  渲染器抽象 · 插件系统 · 数据预取 · 配置 · 错误处理 · HTML │
+│  渲染器：CSR / SSR / StreamingSSR / SSG / ISR            │
+│  ModuleLoader · 插件系统 · 数据预取 · 配置 · 错误处理      │
 ├─────────────────────────────────────────────────────────┤
 │                    @nami/webpack                        │
-│  构建配置 · 自定义 Loader · 自定义 Plugin · 代码分割       │
+│  构建配置 · FS 缓存 · 自定义 Loader · Plugin · 代码分割   │
 ├─────────────────────────────────────────────────────────┤
 │                    @nami/shared                         │
 │           类型定义 · 常量 · 工具函数（零依赖）              │
@@ -58,13 +64,14 @@ Nami 是一个面向大规模前端团队的企业级框架，提供从开发、
 packages/
 ├── shared/                 # @nami/shared — 共享类型与工具（零依赖基础层）
 ├── core/                   # @nami/core — 核心运行时
-│   ├── renderer/           #   渲染器：Base / CSR / SSR / SSG / ISR
+│   ├── renderer/           #   渲染器：Base / CSR / SSR / SSG / ISR / StreamingSSR
+│   ├── module/             #   模块加载器：ModuleLoader（server bundle → 页面导出函数）
 │   ├── plugin/             #   插件系统：HookRegistry / PluginManager / PluginAPI
 │   ├── data/               #   数据层：PrefetchManager / DataContext / Serializer
 │   ├── config/             #   配置：ConfigLoader / ConfigValidator
 │   ├── error/              #   错误：ErrorHandler / ErrorBoundary / Degradation
 │   ├── html/               #   HTML：DocumentTemplate / HeadManager / ScriptInjector
-│   └── router/             #   路由：RouteManager / RouteMatcher / lazyRoute
+│   └── router/             #   路由：RouteManager / RouteMatcher / PathMatcher / lazyRoute
 ├── server/                 # @nami/server — Koa SSR 服务
 │   ├── middleware/         #   9 层中间件管线
 │   ├── isr/                #   ISR 引擎 + 缓存存储
@@ -156,6 +163,7 @@ export default defineConfig({
 |------|------|---------|
 | **CSR** | 客户端渲染，服务端返回空 HTML Shell | 后台管理、SPA 应用 |
 | **SSR** | 服务端渲染，每次请求实时生成 HTML | SEO 要求高、首屏性能敏感的页面 |
+| **Streaming SSR** | 流式 SSR，基于 React 18 `renderToPipeableStream` | 大型页面、Suspense 密集页面、TTFB 敏感场景 |
 | **SSG** | 构建时生成静态 HTML | 文档、博客等内容型站点 |
 | **ISR** | 增量静态再生，后台自动重新生成过期页面 | 电商商品页、新闻列表等频繁更新的内容 |
 
@@ -169,6 +177,62 @@ routes: [
   { path: '/api/data', component: './pages/api',     renderMode: RenderMode.SSR  },
 ]
 ```
+
+### Streaming SSR
+
+Nami 支持 React 18 的流式 SSR，通过 `renderToPipeableStream` 实现边渲染边传输：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 传统 SSR（renderToString）                                    │
+│                                                             │
+│ 服务端：[========= 渲染完成 =========]                         │
+│ 客户端：                              [收到完整 HTML]          │
+│                                                             │
+│ Streaming SSR（renderToPipeableStream）                       │
+│                                                             │
+│ 服务端：[== shell ==][=== 内容流 ===][== Suspense 补丁 ==]     │
+│ 客户端：            [shell]  [...内容]   [...Suspense 内容]    │
+│         ↑ 更快的 TTFB                                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+优势：
+- **更快的 TTFB** — HTML `<head>` 和页面 Shell 立即发送，无需等待完整渲染
+- **Suspense 支持** — `<Suspense>` 边界内容异步加载，先发送 fallback，数据就绪后发送补丁
+- **选择性 Hydration** — 客户端可优先 hydrate 用户正在交互的部分
+- **降级链** — Streaming SSR 失败 → 普通 SSR → CSR，三级自动兜底
+
+---
+
+## 模块加载器
+
+ModuleLoader 是连接路由配置与 server bundle 的桥梁，负责从编译产物中解析页面级导出函数：
+
+```typescript
+import { ModuleLoader } from '@nami/core';
+
+const loader = new ModuleLoader({
+  serverBundlePath: 'dist/server/entry-server.js',
+});
+
+// 从 server bundle 中提取页面的 getServerSideProps 函数
+const gssp = await loader.getExportedFunction(
+  './pages/home',           // 组件路径
+  'getServerSideProps',     // 导出函数名
+);
+
+if (gssp) {
+  const result = await gssp({ params: {}, query: {} });
+  console.log(result.props); // 页面数据
+}
+```
+
+模块查找策略（按优先级）：
+1. 通过 moduleManifest 映射查找
+2. 直接以组件路径为 key 查找
+3. 标准化路径后查找（去前缀、加 pages/ 前缀等）
+4. 兜底返回 bundle 自身（单模块场景）
 
 ---
 
@@ -254,6 +318,37 @@ const myPlugin: NamiPlugin = {
     });
   },
 };
+```
+
+---
+
+## 路由匹配
+
+Nami 内置两级路由匹配器：
+
+### RouteMatcher（基础匹配器）
+
+支持静态路径、动态参数 `:param`、可选参数 `:param?`、通配符 `*`。
+
+### PathMatcher（高级匹配器）
+
+在基础匹配能力之上增加：
+
+- **优先级评分** — 自动选择最佳匹配，避免路由顺序依赖
+- **正则约束** — `/user/:id(\\d+)` 限制参数必须为数字
+- **多值通配符** — `/docs/:path+` 匹配一个或多个路径段
+
+```
+优先级评分算法：
+  静态段（/about）     → 3 分
+  带约束参数（:id(\\d+)）→ 2 分
+  普通参数（:id）       → 1 分
+  通配符（*）           → 0 分
+  精确匹配加分         → +1 分
+
+示例：请求 /user/profile
+  /user/:id     → 得分 4（静态 3 + 参数 1）
+  /user/profile → 得分 7（静态 3 + 静态 3 + 精确 1） ← 胜出
 ```
 
 ---
@@ -357,10 +452,11 @@ pnpm dev
 
 | 层次 | 技术 |
 |------|------|
-| UI 框架 | React 18（hydrateRoot / createRoot） |
+| UI 框架 | React 18（hydrateRoot / createRoot / renderToPipeableStream） |
 | 服务端框架 | Koa 3 |
-| 构建工具 | Webpack 5 |
+| 构建工具 | Webpack 5（持久化文件系统缓存） |
 | 语言 | TypeScript 5（strict 模式） |
+| 测试框架 | Vitest |
 | 包管理 | pnpm workspace（Monorepo） |
 | 版本管理 | Changesets |
 | 代码规范 | ESLint + Prettier |
@@ -371,8 +467,33 @@ pnpm dev
 
 - **12** 个包（packages）
 - **4** 个示例项目
-- **186** 个 TypeScript 源文件
-- **42,000+** 行代码
+- **197** 个 TypeScript 源文件
+- **44,000+** 行代码（含测试）
+
+---
+
+## 测试
+
+Nami 使用 [Vitest](https://vitest.dev/) 作为测试框架，测试覆盖核心运行时模块：
+
+```bash
+# 运行所有测试
+pnpm test
+
+# 监听模式（开发时使用）
+pnpm test:watch
+
+# 生成覆盖率报告
+pnpm test:coverage
+```
+
+测试模块覆盖：
+
+| 模块 | 测试文件 | 覆盖内容 |
+|------|---------|---------|
+| RendererFactory | `core/tests/renderer-factory.test.ts` | 渲染器创建、降级链、模式判断 |
+| RouteMatcher | `core/tests/route-matcher.test.ts` | 静态/动态/可选/通配符路径匹配 |
+| CSRRenderer | `core/src/renderer/__tests__/csr-renderer.test.ts` | CSR 渲染流程 |
 
 ---
 
