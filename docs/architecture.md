@@ -245,7 +245,7 @@ NamiBuilder.build('production')
     ├── 8. SSG 路由 → generateStaticPages()
     │      ├── require('dist/server/entry-server.js')
     │      ├── 对每个静态路径调用 renderToString
-    │      └── 写入 dist/client/xxx.html
+    │      └── 写入 dist/static/xxx/index.html
     │
     └── 9. 写入 nami-manifest.json (路由→渲染模式映射)
 ```
@@ -262,15 +262,233 @@ dist/
 │   │   │   └── runtime.[hash].js
 │   │   └── css/
 │   │       └── main.[hash].css
-│   ├── asset-manifest.json    # 文件名 → URL 映射
-│   └── *.html                 # SSG 生成的静态页面
+│   └── asset-manifest.json    # 文件名 → URL 映射
 │
 ├── server/                    # 服务端产物
 │   ├── entry-server.js        # 服务端入口（含 createAppElement / renderToHTML）
 │   └── [page-chunks].js       # 页面级 server 代码
 │
+├── static/                    # SSG / ISR 预生成 HTML
+│   ├── index.html
+│   └── xxx/index.html
+│
 └── nami-manifest.json         # 路由→渲染模式 映射表
 ```
+
+### 一个完整但不过载的构建示例
+
+假设我们有一个“内容 + 商品”混合站点，路由配置如下：
+
+```typescript
+routes: [
+  {
+    path: '/',
+    component: './pages/home',
+    renderMode: RenderMode.CSR,
+  },
+  {
+    path: '/products',
+    component: './pages/products',
+    renderMode: RenderMode.SSR,
+    getServerSideProps: 'getServerSideProps',
+  },
+  {
+    path: '/docs',
+    component: './pages/docs',
+    renderMode: RenderMode.SSG,
+    getStaticProps: 'getStaticProps',
+  },
+  {
+    path: '/products/:id',
+    component: './pages/product-detail',
+    renderMode: RenderMode.ISR,
+    getStaticProps: 'getStaticProps',
+    getStaticPaths: 'getStaticPaths',
+    revalidate: 30,
+    fallback: 'blocking',
+  },
+];
+```
+
+这个例子不算太大，但已经覆盖了构建阶段最关键的四类情况：
+
+- `CSR`：只需要客户端 Bundle
+- `SSR`：需要客户端 Bundle + Server Bundle
+- `SSG`：需要客户端 Bundle + Server Bundle + 预生成 HTML
+- `ISR`：需要客户端 Bundle + Server Bundle + 首批静态 HTML + 运行时重验证
+
+因此执行一次 `nami build` 后，Builder 会拆出三类任务：
+
+1. **client 构建**：因为所有页面最终都要依赖浏览器端 JS 做路由切换、Hydration 或交互。
+2. **server 构建**：因为存在 `/products`（SSR）和 `/products/:id`（ISR），服务端需要可执行的页面模块。
+3. **静态页面生成**：因为存在 `/docs`（SSG）和 `/products/:id`（ISR），构建完成后还要继续生成首批 HTML。
+
+你可以把这次构建想成下面这组更具体的产物：
+
+```text
+.nami/
+├── generated-route-modules.ts
+└── generated-core-client-shim.ts
+
+dist/
+├── client/
+│   ├── static/js/
+│   │   ├── runtime.a1b2c3d4.js
+│   │   ├── vendor.e5f6g7h8.js
+│   │   ├── main.i9j0k1l2.js
+│   │   ├── route-pages-home.m3n4o5p6.chunk.js
+│   │   ├── route-pages-products.q7r8s9t0.chunk.js
+│   │   ├── route-pages-docs.u1v2w3x4.chunk.js
+│   │   └── route-pages-product-detail.y5z6a7b8.chunk.js
+│   ├── static/css/
+│   │   └── main.c9d0e1f2.css
+│   └── asset-manifest.json
+│
+├── server/
+│   ├── entry-server.js
+│   ├── pages/home.js
+│   ├── pages/products.js
+│   ├── pages/docs.js
+│   └── pages/product-detail.js
+│
+├── static/
+│   ├── docs/index.html
+│   ├── products/1001/index.html
+│   └── products/1002/index.html
+│
+└── nami-manifest.json
+```
+
+其中几个最值得关注的文件是：
+
+#### 1) `.nami/generated-route-modules.ts`
+
+这是构建阶段自动生成的“路由到组件模块”的静态映射，目的是让客户端按需加载页面模块，而不是写动态表达式 `import(componentPath)`：
+
+```typescript
+export const generatedComponentLoaders = {
+  "./pages/home": () => import(/* webpackChunkName: "route-pages-home" */ "../src/pages/home"),
+  "./pages/products": () => import(/* webpackChunkName: "route-pages-products" */ "../src/pages/products"),
+  "./pages/docs": () => import(/* webpackChunkName: "route-pages-docs" */ "../src/pages/docs"),
+  "./pages/product-detail": () => import(/* webpackChunkName: "route-pages-product-detail" */ "../src/pages/product-detail"),
+};
+```
+
+它的结果就是：客户端产物里会出现页面级 chunk，例如 `route-pages-products.*.chunk.js`。
+
+#### 2) `.nami/generated-core-client-shim.ts`
+
+这是给 client bundle 用的精简入口。它不会把整个 `@nami/core` 都打进浏览器，只保留客户端运行真正需要的几个能力：
+
+```typescript
+export { PluginManager } from "../../../packages/core/dist/plugin/plugin-manager";
+export { NamiDataProvider } from "../../../packages/core/dist/data/data-context";
+export { matchPath } from "../../../packages/core/dist/router/path-matcher";
+```
+
+这一步的作用是：避免把服务端专属能力（例如配置加载、模块加载器）误打进浏览器 Bundle。
+
+#### 3) `dist/client/asset-manifest.json`
+
+它记录“逻辑资源名”到“真实带 hash 文件名”的映射。渲染器在服务端输出 HTML 时 TODO，不会硬编码 `main.js`，而是先查这个清单：
+
+```json
+{
+  "files": {
+    "main.js": "/static/js/main.i9j0k1l2.js",
+    "main.css": "/static/css/main.c9d0e1f2.css",
+    "vendor.js": "/static/js/vendor.e5f6g7h8.js",
+    "runtime.js": "/static/js/runtime.a1b2c3d4.js"
+  },
+  "entrypoints": [
+    "/static/js/runtime.a1b2c3d4.js",
+    "/static/js/vendor.e5f6g7h8.js",
+    "/static/css/main.c9d0e1f2.css",
+    "/static/js/main.i9j0k1l2.js"
+  ]
+}
+```
+
+这样上线后即便文件名带 content hash，服务端仍能注入正确的 `<script>` / `<link>`。
+
+#### 4) `dist/server/`
+
+这一层是给 Node.js 运行时用的，不会发给浏览器：
+
+- `entry-server.js`：服务端统一入口，承载 `renderToHTML()` 等能力
+- `pages/*.js`：页面级 server 模块，供 `ModuleLoader` 加载 `getServerSideProps`、`getStaticProps`、`getStaticPaths`
+
+这也是为什么 SSR / ISR 路由必须有 server bundle：因为数据预取函数和服务端渲染逻辑都在这里执行。
+
+#### 5) `dist/static/`
+
+这是构建结束后额外生成出来的 HTML：
+
+- `/docs/index.html`：来自 SSG 路由 `/docs`
+- `/products/1001/index.html`、`/products/1002/index.html`：来自 ISR 路由 `/products/:id` 的首批预生成路径
+
+如果 `getStaticPaths()` 返回的是：
+
+```typescript
+return {
+  paths: [
+    { params: { id: '1001' } },
+    { params: { id: '1002' } },
+  ],
+};
+```
+
+那么构建阶段就只会先生成这两个商品详情页。后续像 `/products/1003` 这种未预生成页面，则在运行时按 `fallback: 'blocking'` 策略补生成。
+
+#### 6) `nami-manifest.json`
+
+这是框架总清单，记录“路由应该怎么处理”：
+
+```json
+{
+  "appName": "nami-mixed-demo",
+  "routes": [
+    { "path": "/", "component": "./pages/home", "renderMode": "csr" },
+    {
+      "path": "/products",
+      "component": "./pages/products",
+      "renderMode": "ssr",
+      "getServerSideProps": "getServerSideProps"
+    },
+    {
+      "path": "/docs",
+      "component": "./pages/docs",
+      "renderMode": "ssg",
+      "getStaticProps": "getStaticProps"
+    },
+    {
+      "path": "/products/:id",
+      "component": "./pages/product-detail",
+      "renderMode": "isr",
+      "getStaticProps": "getStaticProps",
+      "getStaticPaths": "getStaticPaths",
+      "revalidate": 30,
+      "fallback": "blocking"
+    }
+  ],
+  "moduleManifest": {
+    "./pages/home": "pages/home.js",
+    "./pages/products": "pages/products.js",
+    "./pages/docs": "pages/docs.js",
+    "./pages/product-detail": "pages/product-detail.js"
+  }
+}
+```
+
+服务端运行时会根据它知道：
+
+- 请求 `/products` 时，应走 SSR，并去 server bundle 中找 `getServerSideProps`
+- 请求 `/docs` 时，应优先使用预生成 HTML
+- 请求 `/products/1001` 时，应按 ISR 策略读取缓存、判断是否过期、必要时触发重验证
+
+如果只记一个结论，可以记这句：
+
+> `nami build` 不是简单地产出一个前端包，而是同时产出“浏览器资源 + Node 运行时代码 + 预生成 HTML + 框架清单”，让 CSR、SSR、SSG、ISR 能共存于同一个项目里。
 
 ## 5. 集群架构
 
@@ -337,9 +555,9 @@ renderToString(<App data={data} />)       hydrateRoot(<App data={data} />)
 
 > **为什么需要 XSS 安全序列化？** 因为数据会被嵌入到 `<script>` 标签中。如果数据中包含 `</script>` 字符串，会导致 HTML 解析器提前关闭 script 标签，可能被利用执行恶意代码。`generateDataScript()` 会转义这些危险字符。
 
-### 服务端代码剥离
+### 服务端代码剥离 TODO重点
 
-Webpack 的 `data-fetch-loader` 在客户端构建时将 `getServerSideProps`、`getStaticProps`、`getStaticPaths` 替换为空实现，防止敏感服务端逻辑进入浏览器 Bundle。
+Webpack 的 `data-fetch-loader` 在客户端构建时将 `getServerSideProps`、`getStaticProps`、`getStaticPaths` 替换为空实现，防止敏感服务端逻辑进入浏览器 Bundle。 
 
 ### 客户端 Bundle 瘦身
 
@@ -365,3 +583,50 @@ Webpack 的 `data-fetch-loader` 在客户端构建时将 `getServerSideProps`、
 - 想深入各渲染模式的原理？→ [五种渲染模式](./rendering-modes.md)
 - 想了解中间件管线细节？→ [服务器与中间件](./server-and-middleware.md)
 - 想了解构建系统？→ [构建系统](./webpack-build.md)
+
+## 附录：路由编译缓存说明
+
+### 为什么需要它？
+
+路由匹配并不是简单的字符串比较。像 `/users/:id`、`/users/*` 这样的模式，在真正参与匹配前需要先被“编译”为可执行规则，包括：
+
+- 用于匹配请求路径的 `RegExp`
+- 用于提取参数的 `paramNames`
+- 用于路由优先级排序的 `score`
+
+如果每次请求都重新把同一条路由模式从字符串解析成正则和元数据，会产生重复的 CPU 开销。尤其是在服务端一次请求会经过 ISR 缓存中间件、数据预取中间件、渲染中间件等多个阶段时，重复编译会更明显。
+
+因此 Nami 在 `path-matcher.ts` 中引入了编译缓存：同一个 `pattern + options` 只在首次使用时编译一次，后续直接复用。
+
+### 运行在哪个阶段？
+
+这里的“编译缓存”不是 Webpack、Vite、TypeScript 那种构建期缓存，而是**运行时缓存**：
+
+- 服务启动时，`ruleCache` 只是一个空的内存 `Map`
+- 第一次执行 `rankRoutes()` 或 `matchPath()` 时，才会按需调用 `compilePattern()`
+- 首次遇到某个路由模式时，现编译、现写入缓存
+- 后续同一进程内再次使用该模式时，直接命中缓存
+
+这意味着它优化的是**应用运行阶段的路由匹配性能**，而不是构建速度；进程重启后缓存会自然丢失，不会持久化到磁盘。
+
+### 作用是什么？
+
+编译缓存的核心作用有三个：
+
+1. 避免重复创建正则对象。把 `/users/:id` 反复翻译成 `RegExp` 是纯重复劳动，缓存后只做一次。
+2. 让“路由排序”和“路径匹配”共享同一份编译结果。`score`、`regexp`、`paramNames` 都来自同一个 `CompiledRule`，不会各算各的。
+3. 降低多次匹配的整体成本。服务端多个中间件共用 `matchConfiguredRoute()` 时，虽然每次请求仍然要真正执行匹配，但不需要反复解析路由模式。
+
+可以把它理解为：
+
+- **没有编译缓存**：每次都先“翻译规则”，再“执行匹配”
+- **有编译缓存**：第一次“翻译规则并记住”，后面直接“执行匹配”
+
+### 和排序缓存是什么关系？
+
+`path-matcher` 中的 `ruleCache` 缓存的是**单条路由规则的编译结果**；`RouteManager` 中的 `rankedRoutesCache` 缓存的是**整套路由排序后的列表**。两者是互补关系：
+
+- 编译缓存：减少单条路由模式的解析成本
+- 排序缓存：减少整套路由重复排序的成本
+
+所以文档第 2.3 节里提到的“优先级排序 + 编译缓存”，本质上是在一起解决两个问题：既保证“谁该先匹配”，也避免为了得出这个结果而重复做无意义计算。
