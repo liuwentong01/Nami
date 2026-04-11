@@ -271,17 +271,47 @@ args → Plugin A (返回 null) → Plugin B (返回 result) → 停止，返回
 
 ## 5. 插件间数据传递：context.extra
 
-`RenderContext.extra` 是一个 `Record<string, unknown>` 对象，是插件间以及插件与中间件之间的数据通道。
+`RenderContext.extra` 是一个 `Record<string, unknown>` 对象，是插件间以及插件与中间件之间的数据通道。同一个请求内，渲染器、各个插件钩子、`render-middleware` 拿到的是同一个 `RenderContext`，因此前面的写入可以被后面的阶段读取。
 
+```mermaid
+sequenceDiagram
+    participant MW as render-middleware
+    participant R as Renderer
+    participant A as CachePlugin
+    participant B as TimingPlugin
+    participant E as ErrorBoundary/Skeleton
+
+    MW->>R: render(renderContext)
+    R->>A: onBeforeRender(context)
+    A->>A: context.extra.__cache_hit = true/false
+    A->>A: context.extra.__cache_content = html
+    R->>B: onBeforeRender(context)
+    B->>B: context.extra.__timing_start = Date.now()
+
+    R->>R: 执行实际渲染
+
+    R->>B: onAfterRender(context, result)
+    B->>B: 读取 __timing_start
+    B->>B: context.extra.__custom_headers = {...}
+
+    alt 渲染异常
+        R->>E: onRenderError(context, error)
+        E->>E: context.extra.__retry_attempted = true
+        E->>E: context.extra.__skeleton_fallback = html
+    end
+
+    R-->>MW: result + 同一个 context.extra
+    MW->>MW: applyPluginExtras(context.extra)
+    MW->>MW: 读取 __cache_hit / __custom_headers
+    MW->>MW: 读取 __skeleton_fallback / __retry_attempted
+    MW-->>MW: 映射到 HTML、Header、降级响应
 ```
-Plugin A                    Plugin B                   render-middleware
-(onBeforeRender)           (onAfterRender)             (applyPluginExtras)
-    │                          │                            │
-    ├── extra.__cache_hit      │                            ├── 读取 __cache_hit
-    ├── extra.__cache_content  │                            ├── 读取 __custom_headers
-    │                          ├── extra.__custom_headers   ├── 读取 __skeleton_fallback
-    │                          │                            └── 映射到 HTTP 响应
-```
+
+可以把它理解成一次请求里的“共享小黑板”：
+
+- 插件在不同生命周期把数据写到 `context.extra`
+- 后续插件或中间件从 `context.extra` 读取约定字段
+- `render-middleware` 最终把这些字段映射为 HTTP 响应行为
 
 ### 约定的 extra 键名
 
