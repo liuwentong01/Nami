@@ -124,22 +124,22 @@ async function initNamiClient() {
   markNamiEvent('client-init-start');
 
   // 阶段 2: 初始化插件系统
-  const pluginManager = new PluginManager();
-  for (const plugin of config.plugins) {
-    pluginManager.registerPlugin(plugin);
-  }
+  const pluginManager = new PluginManager(config);
+  const pluginInstances = plugins.filter((p) => typeof p !== 'string');
+  await pluginManager.registerPlugins(pluginInstances);
 
   // 阶段 3: 执行 onClientInit 钩子
   await pluginManager.runParallelHook('onClientInit');
 
   // 阶段 4: 读取服务端注入的数据
-  const serverData = readServerData(); // 从 window.__NAMI_DATA__
+  const serverData = readServerData();
+  const renderMode = serverData.renderMode || config.defaultRenderMode;
 
   // 阶段 5: 构建应用元素
   let appElement = <NamiApp
-    data={serverData}
-    componentResolver={generatedComponentLoaders}
-    onRouteChange={(from, to) => pluginManager.callHook('onRouteChange', { from, to })}
+    initialData={serverData.props}
+    componentResolver={componentResolver}
+    onRouteChange={({ from, to }) => pluginManager.runParallelHook('onRouteChange', { from, to, params: {} })}
   />;
 
   // 阶段 6: 执行 wrapApp 钩子（Waterfall）
@@ -147,42 +147,91 @@ async function initNamiClient() {
 
   // 阶段 7: 挂载到 DOM
   const container = document.getElementById('nami-root');
-  if (serverData.renderMode !== 'csr' && container.childNodes.length > 0) {
-    hydrateRoot(container, appElement, { onRecoverableError });
+  if (renderMode !== 'csr' && container.childNodes.length > 0) {
+    hydrateApp(container, appElement, {
+      onRecoverableError,
+      onHydrated: () => {
+        cleanupServerData();
+        pluginManager.runParallelHook('onHydrated');
+      },
+    });
   } else {
-    createRoot(container).render(appElement);
+    renderApp(container, appElement);
+    pluginManager.runParallelHook('onHydrated');
   }
 
-  // 阶段 8: 等待 Hydration 完成后执行 onHydrated 钩子
-  requestIdleCallback(() => {
-    pluginManager.runParallelHook('onHydrated');
-    cleanupServerData(); // 清理 window.__NAMI_DATA__
-    markNamiEvent('client-init-end');
-  });
-
-  // 阶段 9: 注册 Service Worker
-  if (config.serviceWorker) {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register(config.serviceWorker.path);
+  // 阶段 8: 启动性能监控
+  if (config.monitor?.enabled && config.monitor.webVitals !== false) {
+    collectWebVitals(() => {}, {
+      sampleRate: config.monitor.sampleRate,
+      reportUrl: config.monitor.reportUrl,
     });
   }
+
+  // 阶段 9: 注册 Service Worker
+  if (serviceWorkerUrl) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register(serviceWorkerUrl);
+    }, { once: true });
+  }
+
+  markNamiEvent('client-init-end');
 }
 ```
+
+### 客户端到底会加载哪些插件？
+
+会加载，但要分清"**哪些插件实例会被注册**"和"**哪些客户端钩子会真正生效**"这两层。
+
+当前 `initNamiClient()` 的真实行为是：
+- 接收外部传入的 `plugins`
+- **只注册已经解析完成的插件对象**
+- 如果数组里还是字符串插件名，客户端会发出 warning，并**忽略这些字符串插件**
+
+也就是说，客户端不会在浏览器里再执行一遍 `PluginLoader` 去解析 `"@nami/plugin-xxx"` 这种字符串；  
+它只吃构建期或启动代码里已经准备好的插件实例。
+
+这些插件实例里，真正和客户端运行时相关的，主要是会注册以下钩子：
+- `onClientInit`：客户端启动前初始化浏览器侧能力
+- `wrapApp`：给根应用包一层 Provider / Boundary / Suspense
+- `onHydrated`：Hydration 完成后做收尾或监控
+- `onRouteChange`：路由切换时埋点、统计
+- `onError`：客户端错误上报
+
+结合当前仓库，可以看到一些真实例子：
+- `@nami/plugin-request`：在 `onClientInit` 里初始化客户端请求适配器
+- `@nami/plugin-monitor`：在 `onHydrated` 里开始采集 Web Vitals
+- `@nami/plugin-skeleton`：通过 `wrapApp` 给应用包 `Suspense`
+- `@nami/plugin-error-boundary`：通过 `wrapApp` 注入全局错误边界
+
+所以更准确的说法是：
+- **会加载插件**
+- 但加载的是**已经解析好的客户端可用插件实例**
+- 真正起作用的是这些插件注册的**客户端钩子**
 
 ### requestIdleCallback 的用途
 
 ```typescript
-requestIdleCallback(() => {
-  // 在浏览器空闲时执行
-  pluginManager.runParallelHook('onHydrated');
+hydrateApp(container, appElement, {
+  onHydrated: () => {
+    cleanupServerData();
+    pluginManager.runParallelHook('onHydrated');
+  },
 });
 ```
 
 **为什么不立即执行 onHydrated？**
 
-`hydrateRoot()` 是同步调用，但实际的 Hydration（附着事件、reconcile 组件树）是异步的。如果立即执行 `onHydrated`，React 可能还没完成 Hydration。
+当前代码里，`requestIdleCallback` 不在 `entry-client.tsx` 里直接调用，而是封装在 `hydrateApp()` 内部。  
+原因还是一样：`hydrateRoot()` 虽然是同步调用，但实际的 Hydration 过程是异步推进的。如果立刻执行 `onHydrated`，React 可能还没真正完成事件绑定和树对接。
 
-`requestIdleCallback` 等待浏览器空闲帧，此时 Hydration 大概率已完成。没有 `requestIdleCallback` 的浏览器使用 `setTimeout(fn, 1)` 作为 fallback。
+所以 `hydrateApp()` 的做法是：
+- 优先用 `requestIdleCallback`
+- 不支持时退化成 `setTimeout(..., 0)`
+
+这意味着：
+- **SSR/SSG/ISR**：`onHydrated` 会在浏览器空闲时触发
+- **纯 CSR**：不会等 `requestIdleCallback`，而是在 `renderApp()` 之后直接触发 `onHydrated`，主要是为了保持插件接口一致
 
 ### 数据清理
 
@@ -194,15 +243,21 @@ function cleanupServerData() {
     window.__NAMI_DATA__ = undefined;
   }
 
-  // 移除 script 标签（释放 DOM 内存）
-  const scriptTag = document.querySelector('script[data-nami-data]');
-  if (scriptTag) scriptTag.remove();
+  // 移除注入数据的 script 标签
+  const scripts = document.querySelectorAll('script');
+  for (const script of scripts) {
+    if (script.textContent?.includes('__NAMI_DATA__')) {
+      script.remove();
+      break;
+    }
+  }
 }
 ```
 
 **源码参考：**
 - `packages/client/src/hydration/hydrate.ts`
-- `packages/client/src/data/hydrate-data.ts` — cleanupServerData()
+- `packages/client/src/entry-client.tsx`
+- `packages/client/src/data/data-hydrator.ts` — cleanupServerData()
 
 ---
 
@@ -569,27 +624,62 @@ HTML 解析器会在第一个 `</script>` 处关闭 script 标签，后面的 `<
 
 ### generateDataScript 的安全处理
 
+这里不能用 `&lt;` / `&gt;` 这种 **HTML 实体（HTML entity）**，而要用 `\u003C` / `\u003E` 这种 **Unicode 转义序列（Unicode escape sequence）**。
+
+原因是两者所处的上下文不同：
+- `&lt;` / `&gt;`：适合 **HTML 文本节点或属性值** 场景，例如 `<title>`、`<meta content="...">`
+- `\u003C` / `\u003E`：适合 **`<script>` 标签里的 JavaScript/JSON 源码** 场景
+
+`generateDataScript()` 注入的是：
+
+```html
+<script>window.__NAMI_DATA__=...</script>
+```
+
+这里 `<script>` 里的内容会被当作 **JavaScript 源码** 解析，而不是普通 HTML 文本。  
+如果你把 `<` 变成 `&lt;`，浏览器不会把它还原成 `<` 再交给 JS，而是会把 `&lt;` 当作 4 个普通字符写进字符串里，导致最终数据变了：
+
+```javascript
+// 你想得到的数据
+"<script>"
+
+// 如果用 HTML 实体，最终会变成
+"&lt;script&gt;"
+```
+
+而 `\u003C` 是 JavaScript / JSON 标准里定义好的 Unicode 转义写法，不是 Nami 自己发明的。  
+JS 解析器在执行脚本时会把：
+
+```javascript
+"\u003C"
+```
+
+还原成真正的 `<` 字符，所以既能避开 HTML 解析阶段对 `</script>` 的识别，又不会改变最终数据值。
+
 ```typescript
+const UNSAFE_CHARS = {
+  '<': '\\u003C',
+  '>': '\\u003E',
+  '/': '\\u002F',
+  '\u2028': '\\u2028',
+  '\u2029': '\\u2029',
+};
+
+function safeStringify(data: unknown): string {
+  return JSON.stringify(data).replace(/[<>/\u2028\u2029]/g, (char) => UNSAFE_CHARS[char] || char);
+}
+
 function generateDataScript(data: Record<string, unknown>): string {
-  const jsonStr = JSON.stringify(data);
-
-  // 关键：转义 HTML 敏感字符
-  const safeJsonStr = jsonStr
-    .replace(/</g, '\\u003c')     // < → \u003c
-    .replace(/>/g, '\\u003e')     // > → \u003e
-    .replace(/\//g, '\\u002f')    // / → \u002f（防止 </script>）
-    .replace(/\u2028/g, '\\u2028') // Line Separator
-    .replace(/\u2029/g, '\\u2029'); // Paragraph Separator
-
-  return `<script data-nami-data>window.__NAMI_DATA__=${safeJsonStr}</script>`;
+  const serialized = safeStringify(data);
+  return `<script>window.__NAMI_DATA__=${serialized}</script>`;
 }
 ```
 
 ### 转义后的效果
 
 ```html
-<script data-nami-data>
-  window.__NAMI_DATA__ = {"title":"\u003c\u002fscript\u003e\u003cscript\u003ealert('xss')\u003c\u002fscript\u003e"}
+<script>
+  window.__NAMI_DATA__ = {"title":"\u003C\u002Fscript\u003E\u003Cscript\u003Ealert('xss')\u003C\u002Fscript\u003E"}
 </script>
 ```
 
@@ -609,5 +699,6 @@ window.__NAMI_DATA__ = {"content":"line1\u2028line2"} // OK
 ```
 
 **源码参考：**
-- `packages/core/src/renderer/ssr-renderer.ts` — generateDataScript()
-- `packages/client/src/head/nami-head.tsx` — escapeHtml()（属性值转义）
+- `packages/shared/src/utils/serialize.ts` — `safeStringify()` / `generateDataScript()`
+- `packages/core/src/data/serializer.ts`
+- `packages/client/src/head/nami-head.tsx` — `escapeHtml()`（HTML 属性值转义，对比脚本上下文）
