@@ -53,17 +53,37 @@
 
 **答案：**
 
-**问题：循环依赖**
+**先澄清一个容易误解的点：**
 
-`@nami/server` 依赖 `@nami/core`（使用渲染器、插件管理器等核心能力）。如果 `@nami/core` 也依赖 `@nami/server`（使用 ISR 管理器、模块加载器），就会形成循环依赖：
+不是 `@nami/core` 想依赖 `@nami/server`，而是 `core` 中的渲染器在执行 `SSR / ISR` 时，确实需要一些运行时能力，例如：
+
+- 加载页面模块
+- 获取 `getServerSideProps / getStaticProps`
+- 在 ISR 场景下查询缓存、触发重验证
+
+但是 `core` 只需要这些能力的"最小协议"，不应该依赖它们的具体实现类，更不应该反向依赖整个 `@nami/server` 包。
+
+**问题 1：如果直接依赖具体实现，会形成循环依赖**
+
+`@nami/server` 依赖 `@nami/core`（使用渲染器、插件管理器等核心能力）。如果 `@nami/core` 再去 import `@nami/server` 里的具体实现，就会形成循环依赖：
 
 ```
 @nami/core → @nami/server → @nami/core → ...（无限循环）
 ```
 
-**解决方案：依赖倒置原则（Dependency Inversion Principle）**
+**问题 2：包分层会变乱**
 
-在 `@nami/core` 中定义最小化接口，由 `@nami/server` 提供实现，运行时通过依赖注入传入：
+如果把这些能力全部理解成 `server` 专属实现，那么：
+
+- `core` 的渲染器就必须知道 `server` 里的具体类
+- 以后测试、构建工具、CLI 如果也要复用这些能力，也会被迫依赖 `server`
+- `core` 作为"渲染引擎层"会失去独立性
+
+例如当前仓库里，`ModuleLoader` 的具体实现实际上放在 `core`，因为它不仅服务于运行时渲染，也被构建链路复用。说明关键不是"类一定放在哪个包"，而是**渲染器依赖的是抽象能力，而不是具体位置**。
+
+**解决方案：依赖倒置 + 依赖注入**
+
+在 `@nami/core` 中定义最小化接口，因为 `core` 才是这些能力的**使用方**。接口应该由使用方定义自己需要的最小契约，再由上层或其他模块提供实现：
 
 ```typescript
 // packages/core/src/renderer/types.ts — core 定义接口
@@ -86,6 +106,12 @@ interface PluginManagerLike {
 }
 ```
 
+为什么接口要定义在 `core`，而不是定义在 `server`？
+
+- 因为 `core` 是消费者，应该由消费者声明"我最低需要什么能力"
+- 如果接口定义在 `server`，那 `core` 为了引用接口类型，仍然要依赖 `@nami/server`，循环依赖问题并没有消失
+- 接口放在 `core`，可以保证契约最小化，不把 `server` 的实现细节泄漏到渲染器层
+
 ```typescript
 // packages/server/src/isr/isr-manager.ts — server 实现接口
 class ISRManager implements ISRManagerLike {
@@ -98,19 +124,38 @@ class ISRManager implements ISRManagerLike {
 const renderer = RendererFactory.create({
   mode: 'isr',
   isrManager: new ISRManager(config),      // server 的实现注入 core
-  moduleLoader: new ModuleLoader(config),   // server 的实现注入 core
-  pluginManager: new PluginManager(),       // core 自己的实现
+  moduleLoader: new ModuleLoader(config),   // 提供“模块加载”能力
+  pluginManager: new PluginManager(),       // 提供“插件钩子”能力
 });
 ```
 
-**这样做的好处：**
-1. core 只依赖抽象（接口），不依赖具体实现
-2. 可以方便地提供 Mock 实现用于测试
-3. 新增缓存后端不需要修改 core 代码
+**为什么不干脆都在 `server` 中实现？**
+
+可以实现，但代价是 `core` 不再是稳定的核心渲染层，很多通用能力也会被错误地下沉到 `server`。更合理的边界是：
+
+- `core` 负责渲染流程编排：什么时候预取数据、什么时候执行渲染、什么时候触发插件
+- `server` 负责提供运行时基础设施：HTTP 中间件、ISR 缓存、服务启动等
+
+因此，`core` 需要的是"能力抽象"，不是 `server` 这个包本身。
+
+**这样设计的好处：**
+1. `core` 只依赖抽象接口，不依赖具体实现，包依赖方向更稳定
+2. 接口由使用方定义，契约天然更小、更聚焦
+3. 上层可以注入真实实现、Mock 实现、测试替身，便于测试
+4. 底层实现可以替换，例如 ISR 缓存从内存切到 Redis，`core` 不需要修改
+5. 一些能力可以被多个场景复用，不会被错误地绑死在 `server` 包里
+
+**当前仓库里的实际情况：**
+
+- `ISRManager` 的具体实现主要在 `@nami/server`
+- `ModuleLoader` 的具体实现当前在 `@nami/core`，因为构建链路和运行时都会复用它
+
+所以这道题真正想表达的不是"所有实现都必须在 server"，而是：**渲染器应依赖抽象能力，而不是依赖某个具体包的实现细节**。
 
 **源码参考：**
 - `packages/core/src/renderer/types.ts` — ISRManagerLike, ModuleLoaderLike, PluginManagerLike
 - `packages/server/src/isr/isr-manager.ts` — ISRManager 实现
+- `packages/core/src/module/module-loader.ts` — ModuleLoader 当前实现
 
 ---
 

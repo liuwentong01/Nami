@@ -285,6 +285,21 @@ export class MyAnalyticsPlugin implements NamiPlugin {
 }
 ```
 
+**补充说明：`setup(api)` 里的 `api` 是什么？**
+
+这里的 `api` 不是全局变量，而是框架在注册当前插件时传入的 `PluginAPI` 实例。流程是：
+
+1. `PluginManager.registerPlugin(plugin)` 被调用
+2. 框架为当前插件创建一个专属的 `PluginAPIImpl`
+3. 执行 `plugin.setup(api)`，把这个实例作为参数传给插件
+4. 插件通过 `api.onBeforeRender()`、`api.onAfterRender()`、`api.wrapApp()` 等方法注册钩子
+
+之所以不是全局单例，而是"每个插件一个独立 api 实例"，是为了：
+
+- 准确记录钩子和中间件是由哪个插件注册的
+- 提供带插件名前缀的日志实例
+- 在插件卸载或框架关闭时精确清理当前插件的资源
+
 ### 步骤 2：注册插件
 
 ```typescript

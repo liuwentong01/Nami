@@ -277,19 +277,24 @@ routes: [
 
 **答案：**
 
-客户端路由切换（SPA 导航）时，不会刷新整个页面。新页面的数据通过 **dataPrefetch API** 获取：
+客户端路由切换（SPA 导航）时，不会刷新整个页面。但**当前实现不会在路由切换时自动请求页面数据**：
 
 ```
-用户点击 Link → 客户端路由切换 → 发送数据请求 → 渲染新页面
+用户点击 Link / 调用 router.push()
+→ react-router-dom 执行客户端导航
+→ 加载目标页面组件（JS chunk）
+→ 渲染新页面
 ```
+
+`dataPrefetch API` 是框架提供的**可选数据预取能力**，只有显式调用时才会发起请求，不是每次 SPA 切换都会自动触发。
 
 ### dataPrefetch 中间件
 
-服务端拦截 `GET /__nami_data__/*` 路径的请求：
+当客户端显式请求 `GET /_nami/data/*` 时，服务端会由 `dataPrefetchMiddleware` 拦截：
 
 ```typescript
-// packages/server/src/middleware/data-prefetch.ts
-// 请求: GET /__nami_data__/products/123
+// packages/server/src/middleware/data-prefetch-middleware.ts
+// 请求: GET /_nami/data/products/123
 
 1. 从 URL 提取真实路径: /products/123
 2. matchConfiguredRoute('/products/123', routes) → 匹配路由
@@ -297,19 +302,25 @@ routes: [
    - SSR 路由 → getServerSideProps(context)
    - ISR/SSG 路由 → getStaticProps(context)
 4. 执行函数获取数据
-5. 返回 JSON: { props: { product: {...} } }
+5. 返回 JSON: props 对象本身（不是 { props: ... } 包装结构）
 ```
 
 ### 客户端的请求流程
 
 ```typescript
-// 客户端路由切换触发
-async function fetchPageData(path: string) {
-  const response = await fetch(`/__nami_data__${path}`);
+// 显式启用数据预取时才会触发
+async function prefetchData(path: string) {
+  const response = await fetch(`/_nami/data${path}`);
   const data = await response.json();
-  return data.props;
+  return data;
 }
 ```
+
+### 当前代码里的实际行为
+
+1. `useRouter().push()` / `replace()` 只调用 `navigate(...)`，不会自动请求 `/_nami/data/*`
+2. `NamiLink` 内部虽然会调用 `prefetchRoute(path)`，但默认只预取 JS chunk
+3. 只有 `prefetchRoute(path, { prefetchData: true })` 时，才会真正请求 `/_nami/data/*`
 
 **为什么不直接在客户端调用 API？**
 
@@ -318,5 +329,7 @@ async function fetchPageData(path: string) {
 3. **简化开发**：开发者不需要维护两套数据获取逻辑
 
 **源码参考：**
-- `packages/server/src/middleware/data-prefetch.ts` — dataPrefetch 中间件
-- `packages/client/src/data/use-client-fetch.ts` — 客户端数据获取
+- `packages/server/src/middleware/data-prefetch-middleware.ts` — 服务端数据预取中间件
+- `packages/client/src/router/use-router.ts` — 客户端导航只做 `navigate(...)`
+- `packages/client/src/router/link.tsx` — `NamiLink` 默认调用 `prefetchRoute(path)`
+- `packages/client/src/router/route-prefetch.ts` — `prefetchData` 默认关闭，显式开启才请求 `/_nami/data/*`
