@@ -401,7 +401,7 @@ runtimeChunk: 'single' // Webpack 运行时单独分离
 Webpack 的运行时（模块加载器）在每次构建后都会变化（包含模块 ID 映射）。单独分离确保它不污染业务代码 chunk 的 hash。
 
 **源码参考：**
-- `packages/webpack/src/config/client.config.ts` — splitChunks 配置
+- `packages/webpack/src/configs/client.config.ts` — splitChunks 配置
 
 ---
 
@@ -484,7 +484,7 @@ resolveAssets() {
 ### 配置
 
 ```typescript
-// packages/webpack/src/config/base.config.ts
+// packages/webpack/src/configs/base.config.ts
 cache: {
   type: 'filesystem',
   cacheDirectory: path.join(cacheDir, isDev ? 'dev' : 'prod'),
@@ -540,8 +540,7 @@ cacheDirectory: path.join(cacheDir, isDev ? 'dev' : 'prod')
 MD5 生成固定长度的字符串（32 字符），适合作为 `version` 字段。直接比较配置对象需要深度比较，且可能包含函数等不可序列化的值。
 
 **源码参考：**
-- `packages/webpack/src/config/base.config.ts` — cache 配置
-- `packages/webpack/src/utils/hash.ts` — createContentHash()
+- `packages/webpack/src/configs/base.config.ts` — cache 配置与 createContentHash()
 
 ---
 

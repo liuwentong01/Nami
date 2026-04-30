@@ -47,7 +47,7 @@ app.use(async (ctx, next) => {
      │                                         │
  ⑥ staticServe ──── 匹配静态文件? → 短路返回     │
      │                                         │
- ⑦ dataPrefetch ─── /__nami_data__/*? → JSON    │
+ ⑦ dataPrefetch ─── /_nami/data/*? → JSON        │
      │                                         │
  ⑧ [用户中间件] ── config.server.middlewares     │
      │                                         │
@@ -146,17 +146,24 @@ POST /_health → 405
 
 ### ⑦ dataPrefetch — 数据预取 API
 
-拦截 `GET /__nami_data__/*` 路径：
+拦截 `GET /_nami/data/*` 路径。这个路径来自 `@nami/shared` 的 `NAMI_DATA_API_PREFIX = '/_nami/data'`，不要和首屏注水使用的 `window.__NAMI_DATA__` 混淆：
+
 1. 匹配路由配置
 2. 根据路由的 `renderMode` 找到对应的数据预取函数（GSSP/GSP）
 3. 通过 `ModuleLoader` 从 server bundle 加载函数
-4. 执行并返回 JSON 结果
+4. 执行并返回 JSON 结果：
+   - `getServerSideProps` 返回 `notFound` 时响应 `404 { notFound: true }`
+   - `getServerSideProps` 返回 `redirect` 时响应 `307/308` 或自定义 `statusCode`
+   - `getStaticProps` 返回 `redirect` 时响应 `307/308`
+   - 没有对应数据函数时响应 `404`，路由存在但无需数据时响应 `204`
 
-客户端路由切换时通过此 API 获取目标页面数据。
+客户端只有显式开启 `prefetchData` 时才会请求此 API；普通 `navigate` / `push` 不会自动拉取数据。
 
 ### ⑧⑨ 用户 / 插件中间件
 
 用户通过 `config.server.middlewares` 添加的中间件在插件中间件之前执行。插件通过 `api.addServerMiddleware()` 注册的中间件按插件的 `enforce` 顺序排列。
+
+这两类中间件位于 `errorIsolation` 上游，因此 `errorIsolation` 只保护 ISR 缓存层和核心渲染层。用户/插件中间件如果需要把业务异常转换为特定状态码，应在自身内部处理。
 
 ### ⑩ errorIsolation — 错误隔离
 

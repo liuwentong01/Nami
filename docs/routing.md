@@ -51,17 +51,21 @@ export default defineConfig({
 interface NamiRoute {
   path: string;                      // URL 路径模式
   component: string;                 // 组件文件路径（相对 srcDir）
-  renderMode?: RenderMode;           // 渲染模式（默认取 defaultRenderMode）
+  renderMode: RenderMode;            // 合并后的路由必有值；用户配置可省略并继承 defaultRenderMode
   getServerSideProps?: string;       // SSR 数据预取函数名
   getStaticProps?: string;           // SSG/ISR 数据预取函数名
   getStaticPaths?: string;           // SSG/ISR 路径声明函数名
   revalidate?: number;               // ISR 重验证间隔（秒）
+  fallback?: false | true | 'blocking'; // ISR/SSG 动态路径兜底策略
   skeleton?: string;                 // 骨架屏组件文件路径（如 './components/ProductSkeleton'）
   errorBoundary?: string;            // 自定义错误边界组件文件路径
   children?: NamiRoute[];            // 嵌套子路由
   meta?: Record<string, unknown>;    // 路由元信息（title, description, cacheTags 等）
+  exact?: boolean;                   // 是否精确匹配，默认 true
 }
 ```
+
+注意：`packages/shared` 中的 `NamiRoute.renderMode` 在框架合并后的配置形态里是必填字段；用户写 `nami.config.ts` 时可以省略某条路由的 `renderMode`，运行时会使用 `defaultRenderMode` 兜底。
 
 ## 2. 路由匹配算法
 
@@ -160,10 +164,15 @@ function matchConfiguredRoute(requestPath: string, routes: NamiRoute[]): RouteMa
 
 ```typescript
 // 构建时生成 .nami/generated-route-modules.ts
-export const routeComponentLoaders = {
+export const generatedComponentLoaders = {
   './pages/home': () => import('./pages/home'),
   './pages/about': () => import('./pages/about'),
 };
+
+export const generatedRouteDefinitions = [
+  { path: '/', component: './pages/home', exact: true },
+  { path: '/about', component: './pages/about', exact: true },
+];
 ```
 
 `NamiRouter` 根据 `nami.config.ts` 中的路由配置和上述映射，自动渲染对应组件。每个路由组件被 `React.lazy` + `Suspense` 包裹。
@@ -174,15 +183,15 @@ export const routeComponentLoaders = {
 import { NamiLink } from '@nami/client';
 
 // hover 时预加载目标路由的 JS chunk
-<NamiLink to="/about" prefetch>关于</NamiLink>
+<NamiLink to="/about" prefetchOnHover>关于</NamiLink>
 
 // IntersectionObserver 进入视口时预加载
-<NamiLink to="/products" prefetch="viewport">商品</NamiLink>
+<NamiLink to="/products" prefetchOnVisible>商品</NamiLink>
 ```
 
 预加载分两步：
 1. **组件预加载**：触发 `import('./pages/xxx')` 下载 JS chunk
-2. **数据预加载**（可选）：`fetch(/__nami_data__/xxx)` 预取数据
+2. **数据预加载**（可选）：`prefetchRoute(path, { prefetchData: true })` 才会请求 `/_nami/data${path}` 预取数据；默认只预取 JS chunk
 
 ### useRouter Hook
 
@@ -191,12 +200,16 @@ import { useRouter } from '@nami/client';
 
 function MyComponent() {
   const {
-    pathname,     // 当前路径
-    search,       // 查询字符串
-    params,       // 路由参数
-    query,        // 查询参数对象
-    navigate,     // 编程式导航
-    location,     // location 对象
+    path,       // 当前路径
+    fullPath,   // 完整 URL（含 query/hash）
+    params,     // 路由参数
+    query,      // 查询参数对象
+    hash,       // hash
+    push,       // 添加历史记录导航
+    replace,    // 替换当前历史记录
+    back,
+    forward,
+    go,
   } = useRouter();
 }
 ```
@@ -262,12 +275,17 @@ export async function getServerSideProps(ctx) {
   return {
     props: { /* 组件 props */ },
     // 或
-    redirect: { destination: '/login', permanent: false },
+    redirect: { destination: '/login', permanent: false, statusCode: 307 },
     // 或
     notFound: true,
+    // 或
+    headers: { 'X-Custom': 'value' },
+    cache: { maxAge: 60, staleWhileRevalidate: 300 },
   };
 }
 ```
+
+`getServerSideProps` 返回 `redirect` 时，服务端数据 API 会使用 `statusCode`，未指定时按 `permanent` 映射为 `308` 或 `307`；返回 `notFound` 会得到 404。`headers` 与 `cache` 主要服务 HTML 响应链路，数据 API 返回的是 JSON 语义。
 
 ### getStaticProps（SSG / ISR）
 
@@ -275,9 +293,11 @@ export async function getServerSideProps(ctx) {
 
 ```typescript
 export async function getStaticProps(ctx) {
-  // ctx 包含: params, path
+  // ctx 包含: params, locale, preview, previewData
   return {
     props: { /* 组件 props */ },
+    revalidate: 60,
+    // 或 redirect / notFound
   };
 }
 ```
@@ -304,11 +324,11 @@ export async function getStaticPaths() {
 服务端的 `dataPrefetchMiddleware` 同时暴露了 JSON API：
 
 ```
-GET /__nami_data__/products/123
-→ { "props": { "product": { ... } } }
+GET /_nami/data/products/123
+→ { "product": { ... } }
 ```
 
-客户端可通过此 API 在路由切换时获取数据，无需重新加载页面。
+客户端可通过此 API 在路由切换前预取目标页面数据，无需重新加载页面。它与 HTML 中的 `window.__NAMI_DATA__` 是两条链路：前者是 HTTP JSON 接口，后者是首屏渲染后的数据注水全局变量。
 
 ## 7. 路由变化监听
 
@@ -336,7 +356,7 @@ routes: [
 
 ### 服务端和客户端路由一致性
 
-Nami 使用同一份路由配置（`nami.config.ts`）驱动服务端和客户端路由匹配。服务端通过 `matchConfiguredRoute()` 统一匹配，客户端通过构建生成的 `routeDefinitions` 映射到 React Router。
+Nami 使用同一份路由配置（`nami.config.ts`）驱动服务端和客户端路由匹配。服务端通过 `matchConfiguredRoute()` 统一匹配，客户端通过构建生成的 `generatedRouteDefinitions` 映射到 React Router。
 
 **如果你遇到服务端渲染的页面和客户端 Hydration 后的页面不一致**，最常见的原因是路由配置中 `component` 路径写错，导致服务端匹配了正确的组件但客户端加载了错误的组件。
 

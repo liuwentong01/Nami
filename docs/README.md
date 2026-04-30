@@ -46,10 +46,10 @@
    └────┬─────┘ └──────────┘ │ shutdown → timing →   │
         │                    │ security → context →   │
         ▼                    │ health → static →      │
-   ┌──────────┐              │ plugin → errorIso →    │
-   │ dist/    │              │ ISR cache → render     │
-   │ client/  │              └───────────┬───────────┘
-   │ server/  │                          │
+   ┌──────────┐              │ dataPrefetch → user →  │
+   │ dist/    │              │ plugin → errorIso →    │
+   │ client/  │              │ ISR cache → render     │
+   │ server/  │              └───────────┬───────────┘
    └──────────┘                          ▼
                               ┌────────────────────┐
                               │   @nami/core        │
@@ -87,7 +87,7 @@
 | `@nami/server` | Koa 服务器、中间件管线、ISR、集群 |
 | `@nami/client` | 客户端入口、Hydration、路由、数据读取 |
 | `@nami/webpack` | Webpack 构建配置、Loader、Plugin |
-| `@nami/cli` | 命令行工具（dev / build / start / generate） |
+| `@nami/cli` | 命令行工具（dev / build / start / generate / analyze / info） |
 | `create-nami-app` | 项目脚手架 |
 | `plugin-*` | 官方插件（cache / monitor / request / skeleton / error-boundary） |
 

@@ -126,7 +126,7 @@ routes: [
 
 ```typescript
 // .nami/generated-route-modules.ts（构建时自动生成）
-export const routeComponentLoaders = {
+export const generatedComponentLoaders = {
   './pages/home': () => import(/* webpackChunkName: "page-home" */ '../src/pages/home'),
   './pages/about': () => import(/* webpackChunkName: "page-about" */ '../src/pages/about'),
   './pages/product': () => import(/* webpackChunkName: "page-product" */ '../src/pages/product'),
@@ -146,7 +146,7 @@ function getLazyComponent(componentKey: string): React.LazyExoticComponent {
     return lazyComponentCache.get(componentKey);
   }
 
-  const loader = routeComponentLoaders[componentKey];
+  const loader = generatedComponentLoaders[componentKey];
   const LazyComponent = React.lazy(loader);
   lazyComponentCache.set(componentKey, LazyComponent);
   return LazyComponent;
@@ -183,7 +183,7 @@ dist/client/static/js/
 ```
 
 **源码参考：**
-- `packages/webpack/src/config/client.config.ts` — 生成 generated-route-modules.ts
+- `packages/webpack/src/configs/client.config.ts` — 生成 generated-route-modules.ts
 - `packages/client/src/router/nami-router.tsx` — React.lazy + Suspense
 
 ---
@@ -221,7 +221,7 @@ getRankedRoutes(): NamiRoute[] {
 ```
 
 **源码参考：**
-- `packages/server/src/utils/route-match.ts` — matchConfiguredRoute()
+- `packages/server/src/middleware/route-match.ts` — matchConfiguredRoute()
 - `packages/server/src/middleware/render-middleware.ts` — 使用 matchConfiguredRoute
 - `packages/server/src/middleware/isr-cache-middleware.ts` — 使用 matchConfiguredRoute
 
@@ -319,7 +319,7 @@ async function prefetchData(path: string) {
 ### 当前代码里的实际行为
 
 1. `useRouter().push()` / `replace()` 只调用 `navigate(...)`，不会自动请求 `/_nami/data/*`
-2. `NamiLink` 内部虽然会调用 `prefetchRoute(path)`，但默认只预取 JS chunk
+2. `NamiLink` 只有配置 `prefetchOnHover` 或 `prefetchOnVisible` 时才会调用 `prefetchRoute(path)`，且默认只预取 JS chunk
 3. 只有 `prefetchRoute(path, { prefetchData: true })` 时，才会真正请求 `/_nami/data/*`
 
 **为什么不直接在客户端调用 API？**
@@ -331,5 +331,5 @@ async function prefetchData(path: string) {
 **源码参考：**
 - `packages/server/src/middleware/data-prefetch-middleware.ts` — 服务端数据预取中间件
 - `packages/client/src/router/use-router.ts` — 客户端导航只做 `navigate(...)`
-- `packages/client/src/router/link.tsx` — `NamiLink` 默认调用 `prefetchRoute(path)`
+- `packages/client/src/router/link.tsx` — `NamiLink` 在 hover / 视口策略触发时调用 `prefetchRoute(path)`
 - `packages/client/src/router/route-prefetch.ts` — `prefetchData` 默认关闭，显式开启才请求 `/_nami/data/*`

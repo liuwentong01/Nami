@@ -301,10 +301,10 @@ function createCacheStore(config): CacheStore {
 ```
 
 **源码参考：**
-- `packages/server/src/isr/stores/memory-store.ts`
-- `packages/server/src/isr/stores/filesystem-store.ts`
-- `packages/server/src/isr/stores/redis-store.ts`
-- `packages/server/src/isr/stores/cache-store.ts` — 工厂
+- `packages/server/src/isr/memory-store.ts`
+- `packages/server/src/isr/filesystem-store.ts`
+- `packages/server/src/isr/redis-store.ts`
+- `packages/server/src/isr/cache-store.ts` — 工厂
 
 ---
 
@@ -389,8 +389,8 @@ ISRRenderer 从路由的 `meta.cacheTags` 或 `context.extra.cacheTags` 中提�
 
 **源码参考：**
 - `packages/server/src/isr/isr-manager.ts` — invalidateByTag()
-- `packages/server/src/isr/stores/memory-store.ts` — tagIndex
-- `packages/server/src/isr/stores/redis-store.ts` — SADD/SMEMBERS
+- `packages/server/src/isr/memory-store.ts` — tagIndex
+- `packages/server/src/isr/redis-store.ts` — SADD/SMEMBERS
 
 ---
 
@@ -564,7 +564,7 @@ keyToFilename(key: string): string {
 3. 防止路径穿越攻击（`../../etc/passwd`）
 
 **源码参考：**
-- `packages/server/src/isr/stores/filesystem-store.ts` — set(), keyToFilename()
+- `packages/server/src/isr/filesystem-store.ts` — set(), keyToFilename()
 
 ---
 

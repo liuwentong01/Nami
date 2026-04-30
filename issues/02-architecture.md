@@ -55,10 +55,10 @@
 
 **先澄清一个容易误解的点：**
 
-不是 `@nami/core` 想依赖 `@nami/server`，而是 `core` 中的渲染器在执行 `SSR / ISR` 时，确实需要一些运行时能力，例如：
+不是 `@nami/core` 想依赖 `@nami/server`，而是 `core` 中的渲染器在执行 `SSR / SSG / ISR` 时，确实需要一些运行时能力，例如：
 
 - 加载页面模块
-- 获取 `getServerSideProps / getStaticProps`
+- 获取 `getServerSideProps / getStaticProps / getStaticPaths`
 - 在 ISR 场景下查询缓存、触发重验证
 
 但是 `core` 只需要这些能力的"最小协议"，不应该依赖它们的具体实现类，更不应该反向依赖整个 `@nami/server` 包。
@@ -377,7 +377,7 @@ Webpack 别名 `@nami/core-client-shim` 映射到此文件，客户端 `import f
 
 **源码参考：**
 - `packages/webpack/src/loaders/data-fetch-loader.ts`
-- `packages/webpack/src/config/client.config.ts` — 生成 core-client-shim
+- `packages/webpack/src/configs/client.config.ts` — 生成 core-client-shim
 - `packages/core/src/renderer/ssr-renderer.ts` — generateDataScript()
 
 ---
@@ -489,5 +489,5 @@ interface RenderResult {
 - 渲染器只负责"建议"，中间件决定最终响应——职责分离
 
 **源码参考：**
-- `packages/shared/src/types/render.ts` — RenderContext, RenderResult
+- `packages/shared/src/types/context.ts` — RenderContext, RenderResult
 - `packages/server/src/middleware/render-middleware.ts` — createRenderContext()

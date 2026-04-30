@@ -19,7 +19,7 @@ packages/
 ├── server/        Koa 服务 — 中间件、ISR、集群、优雅停机
 ├── client/        浏览器端 — Hydration、路由、数据、Head
 ├── webpack/       构建系统 — 配置工厂、Loader、Plugin
-├── cli/           命令行 — dev / build / start / generate / analyze
+├── cli/           命令行 — dev / build / start / generate / analyze / info
 ├── create-nami-app/ 脚手架
 ├── plugin-cache/     缓存插件
 ├── plugin-monitor/   监控插件
@@ -107,7 +107,7 @@ PluginManager.runWaterfallHook()  .runParallelHook()  .runBailHook()
 三种钩子模式：
 - **Waterfall**：`modifyWebpackConfig`、`modifyRoutes`、`wrapApp` — 前一个的输出是下一个的输入
 - **Parallel**：`onBeforeRender`、`onAfterRender` 等 — 全部并发执行（`Promise.allSettled`）
-- **Bail**：未来扩展用 — 第一个返回非空值即为最终结果
+- **Bail**：核心调度器已实现 `runBailHook()`，第一个返回非 `null` 且非 `undefined` 的值即为最终结果；当前 `HOOK_DEFINITIONS` 中还没有正式暴露的 Bail 生命周期钩子
 
 **错误隔离**：单个插件的钩子失败不会中断整个钩子链，仅记录日志并异步触发 `onError` 钩子。
 
@@ -159,7 +159,7 @@ RouteManager
     │           │                                               │
     │  ⑥  staticServe  ─ 匹配 dist/client 静态文件? → 短路返回    │
     │           │                                               │
-    │  ⑦  dataPrefetch  ─ path 以 /__nami_data/ 开头? → JSON 返回│
+    │  ⑦  dataPrefetch  ─ path 以 /_nami/data 开头? → JSON 返回  │
     │           │                                               │
     │  ⑧  [用户中间件]  ─ config.server.middlewares              │
     │           │                                               │
@@ -226,8 +226,8 @@ NamiBuilder.build('production')
     │
     ├── 3. 分析路由 → 决定构建任务
     │      CSR 路由 → client 构建
-    │      SSR/ISR 路由 → client + server 构建
-    │      SSG 路由 → client + server + ssg 构建
+    │      SSR 路由 → client + server 构建
+    │      SSG/ISR 路由 → client + server + ssg 构建
     │
     ├── 4. 生成代码
     │      .nami/generated-route-modules.ts  (路由→组件映射)
@@ -390,7 +390,7 @@ export { matchPath } from "../../../packages/core/dist/router/path-matcher";
 
 #### 3) `dist/client/asset-manifest.json`
 
-它记录“逻辑资源名”到“真实带 hash 文件名”的映射。渲染器在服务端输出 HTML 时 TODO，不会硬编码 `main.js`，而是先查这个清单：
+它记录“逻辑资源名”到“真实带 hash 文件名”的映射。渲染器在服务端输出 HTML 时不会硬编码 `main.js`，而是通过 `resolveAssets()` 和 `ScriptInjector` 优先查这个清单：
 
 ```json
 {
@@ -418,7 +418,7 @@ export { matchPath } from "../../../packages/core/dist/router/path-matcher";
 - `entry-server.js`：服务端统一入口，承载 `renderToHTML()` 等能力
 - `pages/*.js`：页面级 server 模块，供 `ModuleLoader` 加载 `getServerSideProps`、`getStaticProps`、`getStaticPaths`
 
-这也是为什么 SSR / ISR 路由必须有 server bundle：因为数据预取函数和服务端渲染逻辑都在这里执行。
+这也是为什么 SSR / SSG / ISR 路由都需要 server bundle：SSR / ISR 在运行时执行服务端渲染或重验证，SSG 在构建阶段也要通过 server bundle 执行页面模块和数据预取函数。
 
 #### 5) `dist/static/`
 
@@ -555,7 +555,7 @@ renderToString(<App data={data} />)       hydrateRoot(<App data={data} />)
 
 > **为什么需要 XSS 安全序列化？** 因为数据会被嵌入到 `<script>` 标签中。如果数据中包含 `</script>` 字符串，会导致 HTML 解析器提前关闭 script 标签，可能被利用执行恶意代码。`generateDataScript()` 会转义这些危险字符。
 
-### 服务端代码剥离 TODO重点
+### 服务端代码剥离
 
 Webpack 的 `data-fetch-loader` 在客户端构建时将 `getServerSideProps`、`getStaticProps`、`getStaticPaths` 替换为空实现，防止敏感服务端逻辑进入浏览器 Bundle。 
 

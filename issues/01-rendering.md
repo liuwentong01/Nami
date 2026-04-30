@@ -416,7 +416,7 @@ getServerSideProps()
 
 客户端读取：
 ```typescript
-// packages/client/src/data/hydrate-data.ts
+// packages/client/src/data/data-hydrator.ts
 function readServerData() {
   if (typeof window !== 'undefined' && window.__NAMI_DATA__) {
     cachedData = { ...window.__NAMI_DATA__ }; // 缓存到内部变量
@@ -440,7 +440,7 @@ function readServerData() {
 
 **源码参考：**
 - `packages/core/src/renderer/ssr-renderer.ts` — generateDataScript()
-- `packages/client/src/data/hydrate-data.ts` — readServerData(), cleanupServerData()
+- `packages/client/src/data/data-hydrator.ts` — readServerData(), cleanupServerData()
 - `packages/client/src/data/use-nami-data.ts` — useNamiData Hook
 
 ---

@@ -286,32 +286,31 @@ function ProductPage() {
 // packages/client/src/data/use-nami-data.ts
 function useNamiData<T = any>(key?: string): T {
   const allData = useMemo(() => {
-    return DataHydrator.getData(); // 从内部缓存读取
-  }, []);
+    const serverData = readServerData(); // 首次读取后会在 data-hydrator 中缓存
+    return serverData.props ?? serverData;
+  }, [key]);
 
   if (key) return allData[key];
   return allData;
 }
 ```
 
-### DataHydrator 单例
+### DataHydrator 模块缓存
 
 ```typescript
-// packages/client/src/data/hydrate-data.ts
-class DataHydrator {
-  private static dataRead = false;
-  private static cachedData: Record<string, any> = {};
+// packages/client/src/data/data-hydrator.ts
+let dataRead = false;
+let cachedData: ServerInjectedData | null = null;
 
-  static getData() {
-    if (!this.dataRead) {
-      // 首次读取：从 window.__NAMI_DATA__ 提取并缓存
-      if (typeof window !== 'undefined' && window.__NAMI_DATA__) {
-        this.cachedData = { ...window.__NAMI_DATA__ };
-      }
-      this.dataRead = true;
-    }
-    return this.cachedData;
+export function readServerData(): ServerInjectedData {
+  if (dataRead && cachedData !== null) {
+    return cachedData;
   }
+
+  const rawData = hydrateData<ServerInjectedData>('__NAMI_DATA__');
+  cachedData = rawData ?? {};
+  dataRead = true;
+  return cachedData;
 }
 ```
 
@@ -337,7 +336,7 @@ class DataHydrator {
 
 **源码参考：**
 - `packages/client/src/data/use-nami-data.ts`
-- `packages/client/src/data/hydrate-data.ts`
+- `packages/client/src/data/data-hydrator.ts`
 
 ---
 
@@ -397,31 +396,28 @@ api.onRouteChange(async ({ from, to }) => {
 
 ### 客户端导航的数据预取
 
-路由切换时通过 `/__nami_data__/` API 获取新页面数据：
+路由切换本身只负责更新浏览器历史和渲染目标组件；数据预取是一个显式优化能力。只有调用 `prefetchRoute(path, { prefetchData: true })`，或由开启数据预取的链接组件触发时，客户端才会请求 `/_nami/data${path}`：
 
 ```typescript
 // 伪代码
-async function navigateToPage(path) {
-  // 1. 开始导航（显示 loading）
-  setLoading(true);
+async function prepareNavigation(path) {
+  // 1. 默认预取路由 JS chunk
+  await prefetchRoute(path);
 
-  // 2. 预取数据
-  const response = await fetch(`/__nami_data__${path}`);
-  const { props } = await response.json();
+  // 2. 需要页面数据时显式开启
+  await prefetchRoute(path, { prefetchData: true });
 
-  // 3. 更新页面
-  setData(props);
-  setLoading(false);
-
-  // 4. 触发 onRouteChange 钩子
+  // 3. 真正导航仍由 navigate / push 完成
+  router.push(path);
 }
 ```
 
-这确保了 SPA 导航和首次 SSR 加载使用同一套数据预取逻辑（`getServerSideProps`），保持一致性。
+服务端的 `dataPrefetchMiddleware` 会把 `/_nami/data/products/123` 还原成页面路径 `/products/123`，再按路由配置执行 `getServerSideProps` 或 `getStaticProps`。这条 HTTP JSON API 与首屏注水变量 `window.__NAMI_DATA__` 是两套机制。
 
 **源码参考：**
 - `packages/client/src/router/nami-router.tsx` — RouteChangeListener
-- `packages/server/src/middleware/data-prefetch.ts` — 数据预取 API
+- `packages/client/src/router/route-prefetch.ts` — `prefetchRoute()` / `prefetchDataForRoute()`
+- `packages/server/src/middleware/data-prefetch-middleware.ts` — 数据预取 API
 
 ---
 
@@ -511,7 +507,7 @@ const lazyComponentCache = new Map<string, React.LazyExoticComponent>();
 
 function getLazyComponent(key: string) {
   if (!lazyComponentCache.has(key)) {
-    lazyComponentCache.set(key, React.lazy(routeComponentLoaders[key]));
+    lazyComponentCache.set(key, React.lazy(generatedComponentLoaders[key]));
   }
   return lazyComponentCache.get(key);
 }
@@ -541,48 +537,59 @@ function getLazyComponent(key: string) {
 | **CLS** | Cumulative Layout Shift | 累计布局偏移 | < 0.1 |
 | **FCP** | First Contentful Paint | 首次内容渲染时间 | < 1.8s |
 | **TTFB** | Time to First Byte | 首字节时间 | < 800ms |
+| **INP** | Interaction to Next Paint | 交互到下一次绘制 | < 200ms |
 
 ### 采集方式
 
 ```typescript
-// 客户端初始化后（阶段 8）
-import { getLCP, getFID, getCLS, getFCP, getTTFB } from 'web-vitals';
+// packages/client/src/performance/web-vitals.ts
+collectWebVitals({
+  sampleRate: 0.1,
+  reportUrl: '/api/web-vitals',
+  onMetric(metric) {
+    console.log(metric.name, metric.value, metric.rating);
+  },
+});
 
-function collectWebVitals() {
-  getLCP(metric => reportMetric(metric));
-  getFID(metric => reportMetric(metric));
-  getCLS(metric => reportMetric(metric));
-  getFCP(metric => reportMetric(metric));
-  getTTFB(metric => reportMetric(metric));
-}
-
-function reportMetric(metric) {
-  // 通过插件系统上报
-  pluginManager.callHook('onWebVital', {
-    name: metric.name,     // 'LCP', 'FID', etc.
-    value: metric.value,   // 数值
-    rating: metric.rating, // 'good', 'needs-improvement', 'poor'
-    id: metric.id,
-  });
-}
+// 内部使用 PerformanceObserver 监听:
+// largest-contentful-paint / first-input / layout-shift / paint / event
+// TTFB 来自 Navigation Timing。
 ```
+
+`collectWebVitals()` 是客户端运行时提供的通用采集函数：配置 `reportUrl` 时会优先使用 `navigator.sendBeacon` 上报；不配置时只通过 `onMetric` 回调交给调用方处理。
 
 ### 与监控插件的集成
 
-`@nami/plugin-monitor` 监听 `onWebVital` 钩子，将指标批量上报到监控平台：
+当前 `PluginAPI` 没有 `onWebVital` 钩子。`@nami/plugin-monitor` 会在自身的 `onHydrated` 回调中启动浏览器侧 Web Vitals 采集，并把指标写入插件内部的 `BeaconReporter` 批量上报：
 
 ```typescript
-api.onWebVital(async (metric) => {
-  collector.add(metric);
+api.onHydrated(async () => {
+  if (this.options.enableWebVitals !== false) {
+    this.collectWebVitals();
+  }
 });
 
-// 定时 flush
-setInterval(() => {
-  const metrics = collector.drain();
-  if (metrics.length > 0) {
-    navigator.sendBeacon(reportUrl, JSON.stringify(metrics));
-  }
-}, 5000);
+private reportWebVital(metric) {
+  this.reporter.report('web-vitals', [{
+    name: metric.name,
+    value: metric.value,
+    rating: metric.rating,
+    timestamp: metric.timestamp,
+  }]);
+}
+```
+
+服务端渲染性能、错误和渲染模式分布则分别由 `PerformanceCollector`、`ErrorCollector`、`RenderMetricsCollector` 在 `onAfterRender` / `onRenderError` 中收集，最终统一交给 `BeaconReporter.flush()`：
+
+```typescript
+const perfMetrics = this.performanceCollector.flush();
+const errorRecords = this.errorCollector.flush();
+const renderMetrics = this.renderMetricsCollector.flush();
+
+this.reporter.report('performance', perfMetrics);
+this.reporter.report('error', errorRecords);
+this.reporter.report('render', renderMetrics);
+await this.reporter.flush();
 ```
 
 ### Nami 自定义性能标记
@@ -601,7 +608,8 @@ measureBetween('client-init-start', 'client-init-end');
 
 **源码参考：**
 - `packages/client/src/performance/web-vitals.ts`
-- `packages/plugin-monitor/src/collectors/performance-collector.ts`
+- `packages/plugin-monitor/src/monitor-plugin.ts`
+- `packages/plugin-monitor/src/collectors/performance.ts`
 
 ---
 

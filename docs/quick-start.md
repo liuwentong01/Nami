@@ -114,15 +114,33 @@ export default defineConfig({
     hash: true,                   // 开启 content hash（如 main.abc123.js）实现长期缓存
   },
 
+  // ===== 构建与客户端注入 =====
+  webpack: {
+    client: (config) => config,    // 修改浏览器端 Webpack 配置
+    server: (config) => config,    // 修改 Node 端 Webpack 配置
+  },
+  monitor: {
+    enabled: false,
+    sampleRate: 1,
+    webVitals: true,
+    renderMetrics: true,
+  },
+  env: {
+    NAMI_PUBLIC_API_BASE: '/api',  // NAMI_PUBLIC_ 前缀会被注入客户端代码
+  },
+  title: 'My Nami App',            // 默认页面标题
+  description: 'Powered by Nami',  // 默认页面描述
+  // htmlTemplate: './src/document.html',
+
   // ===== 插件 =====
   plugins: [
     // 可以是插件实例，如 new NamiCachePlugin({...})
+    // 也可以是插件包名字符串，如 '@nami/plugin-monitor'
   ],
 });
 ```
 
 > **提示**：`defineConfig` 提供 TypeScript 类型提示，你可以在 IDE 中获得所有配置项的自动补全和类型检查。
-```
 
 ## 3. 编写页面组件
 
@@ -380,16 +398,16 @@ function BlogPost({ post }) {
 import { useRouter, NamiLink } from '@nami/client';
 
 function Navigation() {
-  const { pathname, navigate, query } = useRouter();
+  const { path, replace, query } = useRouter();
 
   return (
     <nav>
-      {/* NamiLink 支持 hover 预加载 */}
-      <NamiLink to="/" prefetch>首页</NamiLink>
+      {/* NamiLink 支持 hover / 进入视口预加载 */}
+      <NamiLink to="/" prefetchOnHover>首页</NamiLink>
       <NamiLink to="/about">关于</NamiLink>
 
       {/* 编程式导航 */}
-      <button onClick={() => navigate('/dashboard', { replace: true })}>
+      <button onClick={() => replace('/dashboard')}>
         控制台
       </button>
     </nav>
@@ -410,11 +428,15 @@ export default defineConfig({
   plugins: [
     new NamiCachePlugin({
       strategy: 'lru',
-      maxSize: 100,
+      lruOptions: {
+        maxSize: 100,
+      },
     }),
     new NamiMonitorPlugin({
-      reportUrl: 'https://monitor.example.com/collect',
-      sampleRate: 0.1,
+      endpoint: 'https://monitor.example.com/collect',
+      errorCollectorOptions: {
+        sampleRate: 0.1,
+      },
     }),
   ],
 });

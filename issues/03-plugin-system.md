@@ -2,7 +2,7 @@
 
 ---
 
-## 题目 19：Nami 插件系统支持哪三种钩子执行模式？各自的使用场景是什么？⭐⭐⭐
+## 题目 19：Nami 插件系统的三种钩子调度模式是什么？当前正式生命周期使用了哪些？⭐⭐⭐
 
 **答案：**
 
@@ -53,7 +53,7 @@ args ────────├→ Plugin B ──├→ Promise.allSettled →
 
 ### 3. Bail（短路）
 
-顺序执行，第一个返回非空值的插件决定最终结果，后续插件不执行：
+顺序执行，第一个返回非 `null` 且非 `undefined` 的插件决定最终结果，后续插件不执行：
 
 ```
 args → Plugin A (返回 null) → Plugin B (返回 result) → 停止，返回 result
@@ -61,6 +61,8 @@ args → Plugin A (返回 null) → Plugin B (返回 result) → 停止，返回
 
 **使用场景：** 竞争式的钩子（目前预留扩展）
 - 自定义解析策略：第一个能处理的插件胜出
+
+当前 `PluginManager` 已实现 `runBailHook()`，但 `packages/shared/src/types/lifecycle.ts` 的 `HOOK_DEFINITIONS` 中还没有正式的 Bail 生命周期钩子；正式插件 API 主要使用 Waterfall 和 Parallel。注意 `false`、`0`、空字符串都不是空值，在 Bail 模式下会触发短路。
 
 **源码参考：**
 - `packages/core/src/plugin/plugin-manager.ts` — runWaterfallHook, runParallelHook, runBailHook
@@ -227,7 +229,7 @@ Plugin A                    Plugin B                   render-middleware
 3. 类型安全：可以在插件中做类型断言
 
 **源码参考：**
-- `packages/shared/src/types/render.ts` — RenderContext.extra
+- `packages/shared/src/types/context.ts` — RenderContext.extra
 - `packages/server/src/middleware/render-middleware.ts` — applyPluginExtras()
 
 ---
@@ -320,7 +322,7 @@ export default defineConfig({
 
 **源码参考：**
 - `packages/shared/src/types/plugin.ts` — NamiPlugin 接口
-- `packages/core/src/plugin/plugin-api.ts` — PluginAPI 可用方法
+- `packages/shared/src/types/plugin.ts` — PluginAPI 可用方法
 
 ---
 

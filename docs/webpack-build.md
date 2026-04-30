@@ -2,7 +2,7 @@
 
 Nami 使用 Webpack 5 构建客户端和服务端产物。与普通前端项目只需构建客户端代码不同，Nami 需要同时构建**两套 Bundle**：浏览器端的和 Node.js 端的。本文档讲解构建流程、配置工厂、自定义 Loader/Plugin 和优化策略。
 
-> **为什么需要两套 Bundle？** 服务端渲染（SSR）需要在 Node.js 中执行 React 组件生成 HTML。但服务端的代码和浏览器端有不同的需求：服务端不需要代码分割，不需要处理 CSS 为真实文件，但需要保留 `getServerSideProps` 等数据预取函数。客户端则需要代码分割、CSS 提取、Tree-shaking 等优化。因此两套 Bundle 各有专属的 Webpack 配置。
+> **为什么需要两套 Bundle？** SSR / SSG / ISR 都需要在 Node.js 中执行页面模块：SSR 和 ISR 用于运行时渲染或重验证，SSG 用于构建期生成静态 HTML。服务端代码和浏览器端有不同的需求：服务端不需要浏览器侧代码分割，不需要提取真实 CSS 文件，但需要保留 `getServerSideProps` / `getStaticProps` 等数据预取函数。客户端则需要代码分割、CSS 提取、Tree-shaking 等优化。因此两套 Bundle 各有专属的 Webpack 配置。
 
 ---
 
@@ -24,8 +24,9 @@ NamiBuilder.build('production')
     │      │ 路由渲染模式  │ 需要的构建目标         │
     │      ├─────────────┼──────────────────────┤
     │      │ CSR         │ client               │
-    │      │ SSR / ISR   │ client + server      │
+    │      │ SSR         │ client + server      │
     │      │ SSG         │ client + server + ssg│
+    │      │ ISR         │ client + server + ssg│
     │      └─────────────┴──────────────────────┘
     │
     ├── 4. 生成代码（.nami/ 目录）
@@ -184,7 +185,7 @@ export const __namiPageMeta = {
 };
 ```
 
-这让框架在编译期就能知道哪些页面需要服务端数据预取，用于优化构建决策。
+这让页面模块携带可读的元数据，便于调试、分析或下游工具识别页面是否声明了服务端数据函数。当前构建任务的主决策仍以 `nami.config.ts` 中的路由 `renderMode` 和数据函数字段为准。
 
 ### data-fetch-loader
 
@@ -247,28 +248,28 @@ export async function getStaticPaths() { return { paths: [], fallback: false }; 
 
 ```typescript
 // 自动生成 — 请勿手动修改
-export const routeComponentLoaders = {
+export const generatedComponentLoaders = {
   './pages/home': () => import(/* webpackChunkName: "page-home" */ '../src/pages/home'),
   './pages/about': () => import(/* webpackChunkName: "page-about" */ '../src/pages/about'),
   './pages/product': () => import(/* webpackChunkName: "page-product" */ '../src/pages/product'),
 };
 
-export const routeDefinitions = [
-  { path: '/', componentKey: './pages/home', renderMode: 'ssr' },
-  { path: '/about', componentKey: './pages/about', renderMode: 'ssg' },
-  { path: '/products/:slug', componentKey: './pages/product', renderMode: 'isr' },
+export const generatedRouteDefinitions = [
+  { path: '/', component: './pages/home', exact: true },
+  { path: '/about', component: './pages/about', exact: true },
+  { path: '/products/:slug', component: './pages/product', exact: true },
 ];
 ```
 
-**作用**：让 Webpack 的静态分析能识别动态 import，生成正确的 chunk 分割。`@nami/client` 的 `NamiRouter` 读取此映射实现按路由代码分割。
+**作用**：让 Webpack 的静态分析能识别动态 import，生成正确的 chunk 分割。`@nami/client` 的 `NamiRouter` 和路由预取工具读取此映射实现按路由代码分割。
 
 ### generated-core-client-shim.ts
 
 ```typescript
-// 只导出客户端需要的 @nami/core 模块
-export { PluginManager } from '@nami/core';
-export { NamiDataProvider } from '@nami/core';
-export { matchPath } from '@nami/core';
+// 只导出客户端需要的 @nami/core 模块，真实文件会使用相对路径指向 @nami/core/dist
+export { PluginManager } from '../node_modules/@nami/core/dist/plugin/plugin-manager';
+export { NamiDataProvider } from '../node_modules/@nami/core/dist/data/data-context';
+export { matchPath } from '../node_modules/@nami/core/dist/router/path-matcher';
 ```
 
 **作用**：避免客户端 Bundle 包含整个 `@nami/core`（含渲染器、配置加载等服务端代码），通过 Webpack 别名 `@nami/core-client-shim` 映射到此文件。

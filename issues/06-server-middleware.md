@@ -18,7 +18,7 @@
 ④ requestContext ── 生成 requestId, logger      │
 ⑤ healthCheck ──── /_health? → 短路返回        │
 ⑥ staticServe ──── 匹配静态文件? → 短路返回     │
-⑦ dataPrefetch ─── /__nami_data__/*? → JSON    │
+⑦ dataPrefetch ─── /_nami/data/*? → JSON        │
 ⑧ [用户中间件] ── config.server.middlewares     │
 ⑨ [插件中间件] ── pluginManager 收集           │
 ⑩ errorIsolation ─ try/catch 包裹下游          │
@@ -36,7 +36,7 @@
 | ④ | requestContext | 后续所有中间件可使用 `ctx.state.requestId` 和 `ctx.state.logger` |
 | ⑤ | healthCheck | K8s 探针**不需要经过**后续渲染流程，尽早短路 |
 | ⑥ | staticServe | 静态资源直接返回，**不进入渲染**（节省服务器资源） |
-| ⑦ | dataPrefetch | 数据 API 请求短路返回 JSON，不需要渲染 HTML |
+| ⑦ | dataPrefetch | `/_nami/data/*` 数据 API 请求短路返回 JSON，不需要渲染 HTML |
 | ⑧⑨ | 用户/插件 | 在 errorIsolation **之前**：自身错误由 Koa 全局 `app.on('error')` 兜底 |
 | ⑩ | errorIsolation | **保护 ISR + 渲染层**：500 不崩进程 |
 | ⑪ | isrCache | **在渲染之前**：缓存命中直接返回，跳过昂贵的渲染操作 |
@@ -65,6 +65,7 @@ async function security(ctx, next) {
 
 **源码参考：**
 - `packages/server/src/app.ts` — createNamiServer() 中的中间件注册顺序
+- `packages/shared/src/constants/defaults.ts` — `NAMI_DATA_API_PREFIX = '/_nami/data'`
 
 ---
 
@@ -195,8 +196,8 @@ cluster.on('exit', (worker, code, signal) => {
 ```
 
 **源码参考：**
-- `packages/server/src/cluster/cluster-manager.ts` — Master 进程逻辑
-- `packages/server/src/cluster/worker.ts` — Worker 就绪通知
+- `packages/server/src/cluster/master.ts` — Master 进程逻辑
+- `packages/server/src/server.ts` — Worker 在 `app.listen` 回调中发送 `worker:ready`
 
 ---
 
@@ -282,7 +283,7 @@ server:
 多出的 5 秒确保 Nami 的清理逻辑（步骤④）有足够时间执行完毕后 `process.exit(0)`，而不是被 SIGKILL 强制杀死。
 
 **源码参考：**
-- `packages/server/src/shutdown/graceful-shutdown.ts`
+- `packages/server/src/middleware/graceful-shutdown.ts`
 
 ---
 
@@ -395,7 +396,7 @@ nami start --cluster  # Nami 自己管理 Worker
 | 传统 VPS | PM2 cluster + Nami 单进程 |
 
 **源码参考：**
-- `packages/server/src/cluster/cluster-manager.ts` — Nami 集群实现
+- `packages/server/src/cluster/master.ts` — Nami 集群实现
 
 ---
 

@@ -23,6 +23,21 @@ interface NamiPlugin {
 }
 ```
 
+`nami.config.ts` 中的 `plugins` 支持两种形式：
+
+```typescript
+export default defineConfig({
+  plugins: [
+    new MyPlugin(),
+    '@nami/plugin-monitor',
+  ],
+});
+```
+
+- 插件实例会被直接验证并注册。
+- 字符串会通过 `PluginLoader.load()` 使用 `require(packageName)` 加载，并支持 ES Module 的 `default` 导出。
+- 构建阶段加载字符串插件失败会中断构建；服务端 `createNamiServer()` 加载字符串插件失败会记录错误并跳过该插件，避免单个可选插件阻断服务启动。
+
 ### enforce 执行顺序
 
 ```
@@ -176,6 +191,8 @@ api.modifyRoutes((routes) => {
 | `onRenderError` | Parallel | 渲染错误 | 错误上报 |
 | `addServerMiddleware` | — | 注入 Koa 中间件 | 自定义中间件 |
 
+`addServerMiddleware()` 注册的中间件会在 `config.server.middlewares` 之后、`errorIsolation` 之前注入 Koa 管线。也就是说，它属于渲染保护层的上游；插件中间件如果要把错误转换为特定 HTTP 响应，应在中间件内部自行捕获处理。
+
 **中间件注入示例：**
 
 ```typescript
@@ -218,6 +235,21 @@ api.wrapApp((app) => (
 |------|------|------|
 | `onError` | Parallel | 任意阶段的未捕获错误 |
 | `onDispose` | Parallel | 插件销毁（热更新或停机） |
+
+### HOOK_DEFINITIONS 对照
+
+`packages/shared/src/types/lifecycle.ts` 中的 `HOOK_DEFINITIONS` 是运行时校验和文档口径的共同来源：
+
+| 阶段 | 钩子 | 执行模式 |
+|------|------|----------|
+| build | `modifyWebpackConfig`、`modifyRoutes` | Waterfall |
+| build | `onBuildStart`、`onBuildEnd` | Parallel |
+| server | `onServerStart`、`onRequest`、`onBeforeRender`、`onAfterRender`、`onRenderError` | Parallel |
+| client | `onClientInit`、`onHydrated`、`onRouteChange` | Parallel |
+| client | `wrapApp` | Waterfall |
+| common | `onError`、`onDispose` | Parallel |
+
+渲染器和构建器内部有时会调用历史别名，如 `beforeRender`、`afterRender`、`buildStart`。`PluginManager.callHook()` 会把这些名称映射为正式的 `onBeforeRender`、`onAfterRender`、`onBuildStart` 等名称；插件作者应始终使用 `PluginAPI` 暴露的正式 `on*` 方法注册钩子。
 
 ## 4. 钩子执行模式深度解析
 
@@ -266,8 +298,10 @@ args ──────────├→ Plugin B ──├→ Promise.allSettl
 args → Plugin A (返回 null) → Plugin B (返回 result) → 停止，返回 result
 ```
 
-- 顺序执行，第一个返回非空值即为最终结果
+- 顺序执行，第一个返回非 `null` 且非 `undefined` 的值即为最终结果
 - 后续处理器不再执行
+- `false`、`0`、空字符串都不是空值，会触发短路
+- 当前核心调度器已经实现 `runBailHook()`，但 `HOOK_DEFINITIONS` 中尚无正式生命周期钩子使用 Bail；正式插件 API 目前主要使用 Waterfall 和 Parallel
 
 ## 5. 插件间数据传递：context.extra
 
@@ -830,7 +864,7 @@ setup(api) {
 
 ### 配置只读
 
-`api.getConfig()` 返回的是冻结对象（`Object.freeze`），不可直接修改。需要修改配置请使用 `modifyWebpackConfig` 或 `modifyRoutes` 钩子。
+`api.getConfig()` 返回 `Object.freeze({ ...config })` 的浅拷贝浅冻结对象。顶层字段不能直接改，但嵌套对象不是深冻结；插件仍不应该修改它们。需要参与配置变更时，请使用 `modifyWebpackConfig` 或 `modifyRoutes` 钩子。
 
 ## 9. 常见模式与注意事项
 
@@ -900,7 +934,7 @@ api.onBeforeRender(async (context) => {
 
 1. 使用 `api.getLogger()` 而非 `console.log` — 插件日志会带上插件名前缀，方便追踪
 2. 在 `onAfterRender` 中检查 `result.meta` 可以获取渲染耗时、渲染模式等信息
-3. 在开发模式下，所有插件钩子的执行耗时会打印到 debug 日志
+3. 关注 `PluginManager` 的 debug / warn 日志：重复注册会 warn 并跳过，Parallel 钩子会统计失败处理器数量，字符串插件加载失败会带上包名
 
 ---
 
