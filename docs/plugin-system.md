@@ -318,68 +318,438 @@ sequenceDiagram
 | 键名 | 写入方 | 读取方 | 说明 |
 |------|--------|--------|------|
 | `__cache_hit` | cache 插件 | render-middleware | 缓存命中标记 |
+| `__cache_key` | cache 插件 | cache 插件 / 调试日志 | 本次请求使用的缓存键 |
 | `__cache_content` | cache 插件 | render-middleware | 缓存内容 |
+| `__cache_etag` | cache 插件 | 下游中间件 / 调试 | 缓存条目的 ETag（如果 store 提供） |
+| `__cache_created_at` | cache 插件 | 下游中间件 / 调试 | 缓存条目创建时间 |
+| `__skeleton_layout` | skeleton 插件 | 渲染链路 / 调试 | 当前路由解析出的骨架屏布局 |
+| `__skeleton_enabled` | skeleton 插件 | 渲染链路 / 调试 | 当前请求可使用骨架屏 |
 | `__skeleton_fallback` | skeleton 插件 | render-middleware | 骨架屏 HTML |
+| `__skeleton_fallback_used` | skeleton 插件 | 下游中间件 / 调试 | 已生成骨架屏降级内容 |
 | `__custom_headers` | 任意插件 | render-middleware | 自定义响应头 |
 | `__retry_attempted` | error-boundary 插件 | render-middleware | 是否已重试 |
+| `__degradation_level` | error-boundary 插件 | 降级流程 / 调试 | 计算出的降级等级 |
+| `__degradation_html` | error-boundary 插件 | 降级流程 / 调试 | 降级策略生成的 HTML |
+| `__degradation_status` | error-boundary 插件 | 降级流程 / 调试 | 降级响应状态码 |
+| `__degradation_reason` | error-boundary 插件 | 降级流程 / 调试 | 降级原因 |
+| `__degradation_path` | error-boundary 插件 | 降级流程 / 调试 | 降级链路 |
 
 ## 6. 官方插件
 
+本节以 `new NamiXxxPlugin(...)` 的类导出为主，这是类型最明确的推荐写法。`@nami/plugin-cache`、`@nami/plugin-monitor`、`@nami/plugin-request` 也保留了默认导出的历史工厂函数（如 `pluginCache({...})`），这些工厂会把少量旧字段转换成新配置；如果直接使用类导出，请按下面的真实配置项传参。
+
 ### @nami/plugin-cache
 
+渲染结果缓存插件，适合给 SSR / ISR 页面做短期内存缓存，并可顺带生成 `Cache-Control` 响应头。
+
+#### 基础用法
+
 ```typescript
+import { NamiCachePlugin } from '@nami/plugin-cache';
+
 new NamiCachePlugin({
-  strategy: 'lru',     // 'lru' | 'ttl'
-  maxSize: 100,        // LRU 最大条目数
-  ttl: 300,            // TTL 缓存超时（秒）
+  strategy: 'lru',
+  lruOptions: {
+    maxSize: 500,      // LRU 最大条目数，默认 1000
+    ttl: 300,          // 单条缓存默认 TTL，单位秒；0 表示只受 LRU 淘汰影响
+  },
+  defaultTTL: 60,      // result.cacheControl.revalidate 不存在时的写入 TTL
+  cdnConfig: {
+    scope: 'public',
+    maxAge: 0,
+    sMaxAge: 60,
+    staleWhileRevalidate: 86400,
+  },
 })
 ```
 
-功能：`onBeforeRender` 读缓存 → `onAfterRender` 写缓存 + 生成 `Cache-Control`（含 CDN 策略）。
+如果使用默认工厂函数，可以继续使用历史字段：
+
+```typescript
+import pluginCache from '@nami/plugin-cache';
+
+pluginCache({
+  strategy: 'lru',
+  maxSize: 500, // 会转换为 lruOptions.maxSize
+  maxAge: 60,  // 会转换为 lruOptions.ttl
+})
+```
+
+#### 关键配置
+
+| 配置 | 说明 |
+|------|------|
+| `strategy` | 内置缓存策略，支持 `'lru'` 和 `'ttl'`，默认 `'lru'` |
+| `lruOptions` | LRU 策略配置：`maxSize`、`ttl`、`enableStats` |
+| `ttlOptions` | TTL 策略配置：`defaultTTL`、`cleanupInterval`、`maxEntries`、`enableStats` |
+| `store` | 自定义 `CacheStore`，提供后会忽略内置 `strategy`，可接 Redis 等外部存储 |
+| `keyGenerator` | 自定义缓存键，默认是 `nami:page:${context.url}` |
+| `cdnConfig` | 生成 `Cache-Control`，支持 `public/private`、`max-age`、`s-maxage`、`stale-while-revalidate` 等 |
+| `defaultTTL` | 写缓存时的默认 TTL，默认 60 秒 |
+| `enabled` | 是否启用插件，默认 `true` |
+
+#### 工作原理
+
+`NamiCachePlugin` 的 `enforce` 是 `'pre'`，会尽早执行。它在 `onBeforeRender` 中根据 `keyGenerator(context)` 查缓存，命中时向 `context.extra` 写入：
+
+- `__cache_hit: true`
+- `__cache_key`
+- `__cache_content`
+- `__cache_etag`
+- `__cache_created_at`
+
+未命中时写入 `__cache_hit: false` 和 `__cache_key`。当前服务端中间件会在渲染完成后读取 `__cache_hit` / `__cache_content`，用缓存 HTML 替换本次渲染结果，并加上 `X-Nami-Plugin-Cache: HIT`。也就是说，插件通过 `context.extra` 完成“命中标记与响应替换”，而不是在插件钩子里直接返回 HTTP 响应。
+
+`onAfterRender` 会把 HTTP 2xx 的渲染结果写入缓存；如果本次已经是缓存命中，则不会重复写。写入 TTL 的优先级是 `result.cacheControl?.revalidate` 高于插件的 `defaultTTL`。如果配置了 `cdnConfig`，插件会用 `CDNCacheManager.generateHeader()` 生成 `Cache-Control`；如果没有 `cdnConfig` 但 `RenderResult` 带有 `cacheControl`，则生成 ISR 风格的 `s-maxage + stale-while-revalidate`。
+
+#### 适用建议
+
+- `lru` 适合控制内存上限的页面 HTML 缓存，靠最近访问淘汰旧内容。
+- `ttl` 适合需要明确过期时间的缓存，会按 `cleanupInterval` 定时清理过期条目，并用 `maxEntries` 防止无限增长。
+- 如果页面与登录态、地域、设备类型有关，必须自定义 `keyGenerator`，否则不同用户可能共享同一个缓存键。
+- 内置 LRU / TTL 都是进程内内存缓存，多实例部署时缓存不共享；需要共享缓存时传入自定义 `store`。
 
 ### @nami/plugin-monitor
 
+性能、错误和渲染状态监控插件，适合把服务端渲染指标、渲染错误、客户端 Web Vitals 批量上报到监控后端。
+
+#### 基础用法
+
 ```typescript
+import { NamiMonitorPlugin } from '@nami/plugin-monitor';
+
 new NamiMonitorPlugin({
-  reportUrl: 'https://monitor.example.com/collect',
-  sampleRate: 0.1,     // 10% 采样
+  endpoint: 'https://monitor.example.com/collect',
+  performanceThresholds: {
+    totalDuration: 3000,
+    dataFetchDuration: 2000,
+    renderDuration: 1000,
+  },
+  errorCollectorOptions: {
+    sampleRate: 0.1,   // 普通错误 10% 采样；Error / Fatal 级别仍会采集
+  },
+  flushInterval: 30000,
+  enableWebVitals: true,
+  meta: {
+    appName: 'my-app',
+    appVersion: '1.0.0',
+  },
 })
 ```
 
-功能：性能采集（`PerformanceCollector`）、错误采集（`ErrorCollector`）、渲染指标（`RenderMetricsCollector`）、定时 flush 到 `BeaconReporter`。
+如果使用默认工厂函数，历史字段 `reportUrl` 和 `sampleRate` 仍可用：
+
+```typescript
+import pluginMonitor from '@nami/plugin-monitor';
+
+pluginMonitor({
+  reportUrl: '/api/monitor/report', // 会转换为 endpoint
+  sampleRate: 1.0,                  // 会转换为 errorCollectorOptions.sampleRate
+})
+```
+
+#### 关键配置
+
+| 配置 | 说明 |
+|------|------|
+| `endpoint` | 上报地址。类导出写法中这是必填项 |
+| `reporterOptions` | `BeaconReporter` 配置：`maxBatchSize`、`maxRetries`、`headers`、`timeout`、`disableInDev` 等 |
+| `performanceThresholds` | 慢渲染阈值：总耗时、数据预取耗时、React 渲染耗时 |
+| `errorCollectorOptions` | 错误缓冲区、采样率、生产环境是否收集 stack |
+| `flushInterval` | 插件从收集器刷到上报器的间隔，默认 30000ms |
+| `enableWebVitals` | 是否在客户端采集 LCP、FID、CLS、FCP、TTFB，默认 `true` |
+| `meta` | 随每次上报附带的应用元信息 |
+| `enabled` | 是否启用监控，默认 `true` |
+
+#### 工作原理
+
+插件本身是 `enforce: 'post'`，在其他插件之后采集最终结果，避免影响业务逻辑。
+
+- `onAfterRender` 读取 `RenderContext` 和 `RenderResult`，用 `PerformanceCollector` 记录 `totalDuration`、`dataFetchDuration`、`renderDuration`、`htmlAssemblyDuration`、渲染模式、是否降级、是否缓存命中。
+- 同一个 `onAfterRender` 中，`RenderMetricsCollector` 会记录渲染模式分布、降级率、缓存命中率、HTTP 2xx 成功率。
+- `onRenderError` 通过 `ErrorCollector` 记录错误类型、严重等级、错误码、URL、requestId 和上下文。
+- `onHydrated` 在浏览器里用 `PerformanceObserver` / Navigation Timing 采集 Web Vitals。
+- 定时器每隔 `flushInterval` 调用 `flushCollectors()`，把 `performance`、`error`、`render` 和 `summary` 交给 `BeaconReporter`。
+
+`BeaconReporter` 在浏览器环境优先使用 `navigator.sendBeacon`，失败或非浏览器环境会退回 `fetch POST`，并按 `maxRetries` 做指数退避重试。它默认在非生产环境禁用远端上报（`disableInDev: true`），本地调试如果要真的发请求，需要显式设置 `reporterOptions.disableInDev = false`。
+
+#### 适用建议
+
+- 监控插件的采集和上报异常都会被捕获，不会中断页面渲染。
+- 高流量页面建议设置 `errorCollectorOptions.sampleRate`，但不要只依赖采样判断错误总数；错误计数器会记录真实次数，缓冲区上报才采样。
+- 如果要在开发环境观察格式化指标，可直接使用导出的 `ConsoleReporter` 自行接入调试脚本；`NamiMonitorPlugin` 默认使用 `BeaconReporter`。
 
 ### @nami/plugin-request
 
+同构 HTTP 请求插件，负责在服务端和客户端分别初始化请求适配器，并给 `useRequest`、`useSWR`、分页 Hook 等提供全局请求能力。
+
+#### 基础用法
+
 ```typescript
+import { NamiRequestPlugin } from '@nami/plugin-request';
+
 new NamiRequestPlugin({
-  baseURL: 'https://api.example.com',
-  timeout: 5000,
-  retry: { maxRetries: 2 },
+  serverOptions: {
+    baseURL: 'https://api.example.com',
+    defaultTimeout: 5000,
+    defaultHeaders: { 'X-From': 'nami-server' },
+  },
+  clientOptions: {
+    baseURL: '/api',
+    defaultTimeout: 15000,
+    credentials: 'include',
+  },
+  retry: {
+    maxRetries: 2,
+    baseDelay: 1000,
+  },
+  timeout: {
+    defaultTimeout: 10000,
+  },
+  cache: {
+    defaultTTL: 60000,
+    maxEntries: 100,
+  },
 })
 ```
 
-功能：同构请求客户端、拦截器链（缓存→重试→超时）、`useRequest` hook、`usePagination` / `useCursorPagination`。
+如果使用默认工厂函数，历史字段 `baseURL` 和 `timeout` 会被转换：
+
+```typescript
+import pluginRequest from '@nami/plugin-request';
+
+pluginRequest({
+  baseURL: '/api', // 会同时作为 serverOptions/clientOptions.baseURL
+  timeout: 10000, // 会转换为 timeout.defaultTimeout
+})
+```
+
+#### 在组件中使用
+
+```tsx
+import { useRequest, usePagination } from '@nami/plugin-request';
+
+function ProfilePanel() {
+  const { data, loading, error, refresh } = useRequest<unknown>(
+    '/profile',
+    {
+      transformResponse: (raw) => raw,
+    },
+  );
+
+  if (loading) return <div>加载中...</div>;
+  if (error) return <div>{error.message}</div>;
+  return <button onClick={() => refresh()}>{JSON.stringify(data)}</button>;
+}
+
+function ItemList() {
+  const { data, page, totalPages, next, hasNext } = usePagination<unknown[], unknown>(
+    '/items',
+    {
+      initialPageSize: 20,
+      getList: (res) => res,
+      getTotal: (res) => res.length,
+    },
+  );
+
+  return (
+    <div>
+      {data.map((item, index) => <span key={index}>{JSON.stringify(item)}</span>)}
+      <button onClick={next} disabled={!hasNext}>{page} / {totalPages}</button>
+    </div>
+  );
+}
+```
+
+#### 关键配置
+
+| 配置 | 说明 |
+|------|------|
+| `serverOptions` | Node.js 服务端适配器配置：`baseURL`、`defaultHeaders`、`defaultTimeout` |
+| `clientOptions` | 浏览器适配器配置：`baseURL`、`defaultHeaders`、`defaultTimeout`、`credentials` |
+| `retry` | 重试拦截器配置，默认 `{ maxRetries: 3 }`；设为 `false` 禁用 |
+| `timeout` | 超时拦截器配置，默认 `{ defaultTimeout: 10000 }`；设为 `false` 禁用 |
+| `cache` | 请求级内存缓存，默认不启用；配置对象启用，设为 `false` 禁用 |
+| `logPrefix` | 日志前缀，默认 `[NamiRequest]` |
+
+#### 工作原理
+
+插件初始化时先创建拦截器实例。服务启动后通过 `onServerStart` 创建 `ServerRequestAdapter`，客户端初始化时通过 `onClientInit` 创建 `ClientRequestAdapter`，随后都调用 `setGlobalAdapter()`。`useRequest`、`useSWR`、`prefetch` 和分页 Hook 都通过这个全局 adapter 发请求；如果插件没有安装或初始化未完成，`useRequest` 会返回 `[useRequest] 请求适配器未初始化` 错误。
+
+请求链路由 `InterceptedAdapter` 包装，实际执行顺序是：
+
+```
+CacheInterceptor（最外层，命中则直接返回）
+  → RetryInterceptor（失败时按条件重试）
+    → TimeoutInterceptor（单次请求超时中断）
+      → ServerRequestAdapter / ClientRequestAdapter（fetch）
+```
+
+`RetryInterceptor` 默认只重试超时、网络异常和 5xx，不重试 4xx 或主动取消。`TimeoutInterceptor` 使用 `AbortController` 真正中断底层 fetch。`CacheInterceptor` 默认只缓存 GET，请求键由 method、URL 和排序后的 params 组成，只缓存 HTTP 2xx 响应。
+
+`RequestClient` 是额外导出的独立客户端类，适合不在 React Hook 中使用请求能力；它支持 `get/post/put/delete/patch` 快捷方法，也支持请求/响应拦截器。`createAuthTokenInterceptor`、`createRequestLoggingInterceptor`、`createErrorNormalizationInterceptor`、`createResponseTransformInterceptor`、`createCacheReadThroughInterceptor` 可配合 `RequestClient` 使用。
+
+#### 适用建议
+
+- SSR 场景优先配置 `serverOptions.defaultTimeout` 或插件级 `timeout`，避免数据请求长期阻塞渲染。
+- 浏览器跨域带 Cookie 时配置 `clientOptions.credentials = 'include'`，并确保服务端 CORS 允许凭证。
+- `usePagination` / `useCursorPagination` 默认会从常见字段提取列表和总数，但正式业务建议显式传入 `getList`、`getTotal` 或 `getNextCursor`，避免接口格式变化时误判。
 
 ### @nami/plugin-skeleton
 
+骨架屏插件，提供页面级骨架布局、基础骨架组件、Suspense fallback，以及 SSR 渲染失败时的骨架屏降级。
+
+#### 基础用法
+
 ```typescript
+import { NamiSkeletonPlugin } from '@nami/plugin-skeleton';
+
 new NamiSkeletonPlugin({
-  layouts: ['list', 'detail', 'dashboard'],
+  defaultLayout: 'list',
+  routeSkeletons: {
+    '/products': 'list',
+    '/products/:id': 'detail',
+    '/dashboard': 'dashboard',
+  },
+  animation: 'pulse',
+  autoDetectLayout: true,
+  useAsFallback: true,
+  enableSuspense: true,
 })
 ```
 
-功能：`wrapApp` 注入 Suspense fallback、渲染错误时生成骨架屏 HTML 写入 `context.extra.__skeleton_fallback`。
+#### 单独使用骨架组件
+
+```tsx
+import {
+  SkeletonPage,
+  SkeletonText,
+  SkeletonImage,
+  SkeletonCard,
+} from '@nami/plugin-skeleton';
+
+export function ProductLoading() {
+  return (
+    <SkeletonPage layout="detail" showSidebar contentParagraphs={3}>
+      <SkeletonImage width="100%" height={300} />
+      <SkeletonText lines={4} />
+      <SkeletonCard showImage showActions />
+    </SkeletonPage>
+  );
+}
+```
+
+#### 关键配置
+
+| 配置 | 说明 |
+|------|------|
+| `defaultLayout` | 默认页面布局：`list`、`detail`、`dashboard`、`custom`，默认 `list` |
+| `routeSkeletons` | 路由到布局的映射，按 `route.path` 精确匹配，比如 `/users/:id` |
+| `animation` | 骨架动画：`pulse`、`wave`、`none`，默认 `pulse` |
+| `backgroundColor` / `highlightColor` | 骨架块背景色和波浪高亮色 |
+| `autoDetectLayout` | 未命中 `routeSkeletons` 时是否按路径自动推断布局，默认 `true` |
+| `useAsFallback` | SSR 渲染错误时是否写入骨架屏 HTML 降级，默认 `true` |
+| `enableSuspense` | 是否通过 `wrapApp` 加一层 `React.Suspense`，默认 `true` |
+| `customSkeletonComponent` | 自定义 Suspense fallback 组件 |
+| `fallbackHTML` | 自定义 SSR 错误降级时返回的静态 HTML |
+| `enabled` | 是否启用插件，默认 `true` |
+
+#### 工作原理
+
+插件的 `enforce` 是 `'post'`，目的是让缓存等前置插件先执行。
+
+- `wrapApp`：当 `enableSuspense` 为 `true` 时，用 `React.Suspense` 包裹应用根节点。fallback 组件优先使用 `customSkeletonComponent`，否则使用内置 `SkeletonPage`。
+- `onBeforeRender`：解析当前路由布局，并写入 `context.extra.__skeleton_layout` 和 `context.extra.__skeleton_enabled`，供后续渲染链路识别。
+- `onRenderError`：当 SSR 渲染失败且 `useAsFallback` 为 `true` 时，生成静态骨架 HTML，写入 `context.extra.__skeleton_fallback` 和 `__skeleton_fallback_used`。服务端中间件捕获渲染异常后，会优先读取 `__skeleton_fallback` 并返回 `200 + X-Nami-Render-Mode: skeleton-fallback`。
+
+布局解析优先级是：
+
+1. `routeSkeletons[route.path]`
+2. `route.meta.skeletonLayout`
+3. `detectLayoutFromRoute(route.path)`
+4. `defaultLayout`
+
+自动检测规则很轻量：包含 `/dashboard`、`/admin`、`/analytics` 倾向 `dashboard`；包含 `/list`、`/search` 或路径以 `s` 结尾倾向 `list`；包含 `/:`、`/detail`、`/article` 倾向 `detail`。复杂页面建议显式配置 `routeSkeletons` 或 `route.meta.skeletonLayout`。
+
+`SkeletonGenerator` 也是插件包的导出能力。它只能在浏览器环境使用，会读取 DOM 几何信息，把文本、图片、头像、按钮等可见元素转换成骨架节点描述，再生成自包含 HTML。它不是 `NamiSkeletonPlugin` 默认运行的一部分，通常用于构建时或调试工具中生成更贴近页面结构的骨架。
 
 ### @nami/plugin-error-boundary
 
+错误边界与渐进降级插件，负责客户端 React 渲染错误兜底、SSR 渲染错误记录、可恢复错误重试标记，以及降级策略决策。
+
+#### 基础用法
+
 ```typescript
+import { DegradationLevel } from '@nami/shared';
+import { NamiErrorBoundaryPlugin } from '@nami/plugin-error-boundary';
+
 new NamiErrorBoundaryPlugin({
-  maxRetries: 2,
-  fallbackPages: { 404: CustomNotFound },
+  retry: {
+    maxRetries: 2,
+    baseDelay: 500,
+    maxDelay: 5000,
+  },
+  degrade: {
+    maxDegradationLevel: DegradationLevel.StaticHTML,
+    staticHTML: '<!doctype html><html><body>页面暂时不可用</body></html>',
+  },
+  onError: (error, context) => {
+    // 上报到业务监控系统
+    console.error(error, context);
+  },
 })
 ```
 
-功能：`wrapApp` 包裹 `RouteErrorBoundary`、渲染错误时执行 `RetryStrategy` + `DegradeStrategy`。
+#### 自定义错误 UI
+
+```tsx
+import type { ErrorFallbackProps } from '@nami/plugin-error-boundary';
+import { NamiErrorBoundaryPlugin } from '@nami/plugin-error-boundary';
+
+function MyErrorFallback({ error, resetError }: ErrorFallbackProps) {
+  return (
+    <div role="alert">
+      <p>页面出错了：{error.message}</p>
+      <button onClick={resetError}>重试</button>
+    </div>
+  );
+}
+
+new NamiErrorBoundaryPlugin({
+  fallback: MyErrorFallback,
+});
+```
+
+#### 关键配置
+
+| 配置 | 说明 |
+|------|------|
+| `fallback` | 全局错误边界的 React 回退组件，默认使用内置 `ErrorFallback` |
+| `retry` | 重试策略配置，默认 `{ maxRetries: 2 }`；设为 `false` 禁用 |
+| `degrade` | 降级策略配置：最大降级等级、CSR HTML、骨架 HTML、静态 HTML、自定义决策函数 |
+| `enableGlobalBoundary` | 是否通过 `wrapApp` 包裹全局错误边界，默认 `true` |
+| `enableDegradation` | 是否在 `onRenderError` 中执行降级策略，默认 `true` |
+| `onError` | 错误回调，客户端错误边界、渲染降级、通用错误都会调用 |
+| `logPrefix` | 日志前缀，默认 `[NamiErrorBoundary]` |
+
+#### 工作原理
+
+`wrapApp` 会把根组件包进 `RouteErrorBoundary`。这是一个 class component，使用 `getDerivedStateFromError` 和 `componentDidCatch` 捕获 React 子树渲染错误，并展示 `fallback`。如果传入 `routePath`，路由变化时可以清理旧错误状态；插件全局包裹时主要承担“避免整页白屏”的兜底职责。
+
+服务端渲染失败时，插件在 `onRenderError` 中做两件事：
+
+- 如果 `RetryStrategy.shouldRetry(error)` 返回 `true`，写入 `context.extra.__retry_attempted = true`。服务端响应阶段会把这个标记转换为 `X-Nami-Retry: 1`，方便监控识别。
+- 调用 `DegradeStrategy.degrade(error, currentLevel)` 计算目标降级等级，并把 `__degradation_level`、`__degradation_html`、`__degradation_status`、`__degradation_reason`、`__degradation_path` 写入 `context.extra`，同时触发 `onError`。
+
+`RetryStrategy` 默认认为超时、数据预取失败、缓存读写失败、网络类错误等可恢复；`TypeError`、`ReferenceError`、`SyntaxError`、`RangeError` 和 `Fatal` 级别错误不可恢复。
+
+`DegradeStrategy` 的降级等级来自 `@nami/shared` 的 `DegradationLevel`：
+
+```
+None → Retry → CSRFallback → Skeleton → StaticHTML → ServiceUnavailable
+```
+
+默认最大降级到 `StaticHTML`，超过后返回 503。当前核心中间件已经会消费 `__retry_attempted`；最终错误响应仍由核心降级流程和骨架屏 fallback 共同兜底，因此建议把错误边界插件和骨架屏插件一起使用：错误边界负责决策与上报，骨架屏插件负责提供用户可见的加载占位。
 
 ## 7. 插件生命周期时序
 
