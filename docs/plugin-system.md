@@ -1,944 +1,736 @@
-# 插件系统
+# 插件系统原理
 
-Nami 的插件系统参考 Vite 的设计，支持构建、服务端、客户端三个阶段的全生命周期钩子。本文档从使用到原理，全面讲解插件机制。
+Nami 插件系统把框架扩展点集中在构建、服务端渲染、客户端运行时和通用清理四个阶段。插件通过 `setup(api)` 注册钩子或服务端中间件，框架在对应阶段由 `PluginManager` 统一调度。
 
-读完后你将能够：
-- 编写自己的 Nami 插件
-- 理解三种钩子模式的区别和使用场景
-- 利用 `context.extra` 实现插件间通信
-- 正确管理插件的资源生命周期
+这一章重点解释“插件如何注册、如何排序、哪些钩子当前真的会被调用、`context.extra` 如何在请求内传递信息”。如果某个 API 在类型中存在但当前主链路没有调用点，文档会明确标出，避免把“已定义能力”误写成“已接入行为”。
 
 ---
 
-## 1. 插件接口
+## 1. 源码地图
 
-每个插件必须实现 `NamiPlugin` 接口：
+| 主题 | 源码 |
+|------|------|
+| 插件类型与 API 类型 | `packages/shared/src/types/plugin.ts` |
+| 生命周期定义 | `packages/shared/src/types/lifecycle.ts` |
+| 插件管理器 | `packages/core/src/plugin/plugin-manager.ts` |
+| 钩子注册表 | `packages/core/src/plugin/hook-registry.ts` |
+| 插件 API 实现 | `packages/core/src/plugin/plugin-api-impl.ts` |
+| 字符串插件加载 | `packages/core/src/plugin/plugin-loader.ts` |
+| 服务端插件注册与中间件挂载 | `packages/server/src/app.ts` |
+| 服务启动和销毁 | `packages/server/src/server.ts` |
+| 渲染器触发插件钩子 | `packages/core/src/renderer/base-renderer.ts` |
+| 渲染中间件消费 `context.extra` | `packages/server/src/middleware/render-middleware.ts` |
+| 构建期插件调用 | `packages/webpack/src/builder.ts` |
+| 客户端插件调用 | `packages/client/src/entry-client.tsx` |
+| 官方缓存插件示例 | `packages/plugin-cache/src/cache-plugin.ts` |
+| LRU / TTL / CDN 缓存策略 | `packages/plugin-cache/src/strategies/*.ts` |
+
+---
+
+## 2. 插件接口
+
+源码位置：`packages/shared/src/types/plugin.ts`
+
+每个插件实现 `NamiPlugin`：
 
 ```typescript
-interface NamiPlugin {
-  name: string;              // 唯一标识
-  version?: string;          // 版本号
-  enforce?: 'pre' | 'post'; // 执行顺序控制
+export interface NamiPlugin {
+  name: string;
+  version?: string;
+  enforce?: 'pre' | 'post';
   setup: (api: PluginAPI) => void | Promise<void>;
 }
 ```
 
-`nami.config.ts` 中的 `plugins` 支持两种形式：
+字段语义：
+
+| 字段 | 要求 | 说明 |
+|------|------|------|
+| `name` | 必填，非空字符串 | 插件唯一标识；同名插件第二次注册会被跳过 |
+| `version` | 可选，字符串 | 用于日志和排查 |
+| `enforce` | 可选，只能是 `'pre'` 或 `'post'` | 控制插件和钩子顺序；不设置表示 normal |
+| `setup(api)` | 必填函数 | 插件在这里注册钩子、中间件或读取配置 |
+
+`enforce: 'normal'` 不是合法插件配置值。源码内部会用 `'normal'` 表示默认排序权重，但插件对象的 `enforce` 只能是 `'pre'`、`'post'` 或不设置。
+
+### 配置写法
+
+`NamiConfig.plugins` 的类型是：
+
+```typescript
+plugins: Array<NamiPlugin | string>;
+```
+
+示例：
 
 ```typescript
 export default defineConfig({
   plugins: [
-    new MyPlugin(),
+    myLocalPlugin(),
     '@nami/plugin-monitor',
   ],
 });
 ```
 
-- 插件实例会被直接验证并注册。
-- 字符串会通过 `PluginLoader.load()` 使用 `require(packageName)` 加载，并支持 ES Module 的 `default` 导出。
-- 构建阶段加载字符串插件失败会中断构建；服务端 `createNamiServer()` 加载字符串插件失败会记录错误并跳过该插件，避免单个可选插件阻断服务启动。
+字符串插件由 `PluginLoader.load()` 通过 `require(packageName)` 加载，支持 CommonJS 直接导出和 ES Module `default` 导出。
 
-### enforce 执行顺序
+不同入口的容错行为：
 
+| 入口 | 字符串插件加载失败 |
+|------|--------------------|
+| `NamiBuilder.prepareBuildContext()` | 抛错，中断构建 |
+| `createNamiServer()` | 记录错误并跳过该插件 |
+| `createDevServer()` | 记录错误并跳过该插件 |
+| `initNamiClient()` | 客户端不解析字符串插件，会 warn 并忽略 |
+
+客户端运行时必须拿到已经解析好的插件对象，不能依赖浏览器端 `require()` 插件包名。
+
+---
+
+## 3. 注册流程
+
+源码位置：`packages/core/src/plugin/plugin-manager.ts`
+
+插件注册从 `registerPlugins()` 开始：
+
+```text
+registerPlugins(plugins)
+  -> 按 enforce 排序
+       pre -> normal -> post
+  -> 依次 registerPlugin(plugin)
+       -> 校验 name / setup
+       -> 检查同名插件
+       -> 创建 PluginAPIImpl
+       -> await plugin.setup(api)
+       -> 写入 plugins Map
 ```
-enforce: 'pre'  →  无 enforce（normal）  →  enforce: 'post'
-  缓存插件              业务插件              监控插件
-  (最先执行)                                (最后执行)
+
+`plugins` 使用 `Map<string, PluginEntry>` 存储，同名插件不会覆盖旧插件：
+
+```text
+如果 this.plugins.has(plugin.name)
+  -> logger.warn
+  -> return
 ```
 
-## 2. 编写一个插件
+### `PluginAPIImpl`
 
-### 最小示例
+源码位置：`packages/core/src/plugin/plugin-api-impl.ts`
+
+每个插件都会拿到一个独立的 `PluginAPIImpl` 实例。这个实例保存：
+
+| 字段 | 作用 |
+|------|------|
+| `hookRegistry` | 全局钩子注册表 |
+| `config` | 框架配置 |
+| `logger` | 框架 logger |
+| `pluginName` | 当前插件名 |
+| `enforce` | 当前插件排序标记 |
+| `middlewares` | 当前插件通过 `addServerMiddleware` 添加的 Koa 中间件 |
+
+所有公开钩子注册方法最终都会调用：
 
 ```typescript
-import type { NamiPlugin } from '@nami/shared';
+this.hookRegistry.register(hookName, fn, this.pluginName, this.enforce);
+```
 
-export class MyPlugin implements NamiPlugin {
-  name = 'my-plugin';
-  version = '1.0.0';
+所以每个 hook handler 都知道来源插件和排序权重。
 
-  setup(api) {
-    const logger = api.getLogger();
+### `getConfig()` 和 `getLogger()`
 
-    api.onBeforeRender(async (context) => {
-      logger.info('渲染即将开始', { url: context.url });
-    });
+`getConfig()` 返回：
 
-    api.onAfterRender(async (context, result) => {
-      logger.info('渲染完成', {
-        url: context.url,
-        duration: result.meta.duration,
-        mode: result.meta.renderMode,
-      });
-    });
-  }
+```typescript
+Object.freeze({ ...this.config })
+```
+
+这是浅拷贝 + 顶层冻结，不是深冻结。插件不应直接修改配置；如果要修改路由或 Webpack 配置，应使用 `modifyRoutes` 或 `modifyWebpackConfig`。
+
+`getLogger()` 返回：
+
+```typescript
+this.logger.child({ plugin: this.pluginName })
+```
+
+用于让插件日志自动带上插件名。
+
+---
+
+## 4. 钩子定义与排序
+
+源码位置：
+
+- `packages/shared/src/types/lifecycle.ts`
+- `packages/core/src/plugin/hook-registry.ts`
+
+`HOOK_DEFINITIONS` 是运行时注册校验的来源。当前定义如下：
+
+| 阶段 | Hook | 类型 | 当前主链路是否调用 |
+|------|------|------|-------------------|
+| build | `modifyWebpackConfig` | Waterfall | 是，`NamiBuilder.applyWebpackConfigEnhancers()` |
+| build | `modifyRoutes` | Waterfall | 是，`NamiBuilder.prepareBuildContext()` |
+| build | `onBuildStart` | Parallel | 是，`NamiBuilder.build()` 编译前通过 `callHook('buildStart')` 触发 |
+| build | `onBuildEnd` | Parallel | 是，`NamiBuilder.build()` 收尾时通过 `callHook('buildEnd')` 触发 |
+| server | `onServerStart` | Parallel | 是，`startServer()` listen 成功后调用 |
+| server | `onRequest` | Parallel | 类型存在，当前服务端主链路未调用 |
+| server | `onBeforeRender` | Parallel | 是，由具体 Renderer 触发 |
+| server | `onAfterRender` | Parallel | 是，由具体 Renderer 触发 |
+| server | `onRenderError` | Parallel | 是，由具体 Renderer 触发 |
+| client | `onClientInit` | Parallel | 是，`initNamiClient()` |
+| client | `onHydrated` | Parallel | 是，Hydration 完成后 |
+| client | `wrapApp` | Waterfall | 是，客户端包裹根组件 |
+| client | `onRouteChange` | Parallel | 是，客户端路由变化时 |
+| common | `onError` | Parallel | 是，插件 hook 错误和客户端错误边界会触发 |
+| common | `onDispose` | Parallel | 是，`PluginManager.dispose()` |
+
+`HookType.Bail` 和 `runBailHook()` 已实现，但当前 `HOOK_DEFINITIONS` 没有任何 Bail 类型钩子，主链路也没有使用 `runBailHook()`。
+
+### 注册排序
+
+`HookRegistry.register()` 会把每个 handler 放入对应 hook 列表，然后按 `enforce` 排序：
+
+```text
+pre -> normal -> post
+```
+
+同级保持注册顺序。
+
+排序来源是插件对象的 `plugin.enforce`，不是单个 hook 单独传入的顺序。
+
+---
+
+## 5. 三种调度语义
+
+源码位置：`packages/core/src/plugin/plugin-manager.ts`
+
+### Waterfall
+
+用于需要逐步修改同一个值的场景，比如路由表、Webpack 配置、React 根组件包裹。
+
+```text
+initialValue
+  -> plugin A handler(value)
+  -> plugin B handler(valueFromA)
+  -> plugin C handler(valueFromB)
+  -> finalValue
+```
+
+源码行为：
+
+| 细节 | 行为 |
+|------|------|
+| 执行方式 | 按顺序 `await` |
+| 返回 `undefined` | 保留上一轮值 |
+| 返回其他值 | 替换当前值 |
+| handler 抛错 | 记录错误，继续下一个 handler |
+| 典型 hook | `modifyRoutes`、`modifyWebpackConfig`、`wrapApp` |
+
+### Parallel
+
+用于通知型事件，比如渲染前后、客户端初始化、服务启动。
+
+源码行为：
+
+| 细节 | 行为 |
+|------|------|
+| 执行方式 | `Promise.allSettled` |
+| 单个 handler 抛错 | 记录错误并 rethrow，让 allSettled 统计 rejected |
+| 最终结果 | 所有 handler 都有机会执行 |
+| 典型 hook | `onBeforeRender`、`onAfterRender`、`onClientInit` |
+
+### Bail
+
+用于“第一个有效结果胜出”的场景。源码已实现：
+
+```typescript
+if (result !== null && result !== undefined) {
+  return result;
 }
 ```
 
-### 完整示例：请求耗时统计插件
+因此 `false`、`0`、`''` 都算有效结果，会触发短路。但当前没有正式 Bail hook，不应在文档中把它描述成某个现有生命周期已经使用的能力。
 
-```typescript
-import type { NamiPlugin, RenderContext, RenderResult } from '@nami/shared';
+---
 
-interface TimingPluginOptions {
-  slowThreshold?: number; // 慢请求阈值（毫秒）
-}
+## 6. 构建阶段插件
 
-export class TimingPlugin implements NamiPlugin {
-  name = 'timing-plugin';
-  version = '1.0.0';
-  enforce = 'pre' as const; // 在其他插件之前记录开始时间
+源码位置：`packages/webpack/src/builder.ts`
 
-  private slowThreshold: number;
+构建阶段由 `NamiBuilder.prepareBuildContext()` 初始化插件：
 
-  constructor(options: TimingPluginOptions = {}) {
-    this.slowThreshold = options.slowThreshold ?? 3000;
-  }
-
-  setup(api) {
-    const logger = api.getLogger();
-    const config = api.getConfig();
-
-    // 渲染前：记录开始时间
-    api.onBeforeRender(async (context: RenderContext) => {
-      context.extra.__timing_start = Date.now();
-    });
-
-    // 渲染后：计算耗时并上报
-    api.onAfterRender(async (context: RenderContext, result: RenderResult) => {
-      const start = context.extra.__timing_start as number;
-      const duration = Date.now() - start;
-
-      if (duration > this.slowThreshold) {
-        logger.warn('慢请求检测', {
-          url: context.url,
-          duration,
-          threshold: this.slowThreshold,
-          renderMode: result.meta.renderMode,
-        });
-      }
-
-      // 通过 extra 传递数据给中间件
-      context.extra.__custom_headers = {
-        'X-Render-Duration': String(duration),
-      };
-    });
-
-    // 渲染错误：记录异常
-    api.onRenderError(async (context, error) => {
-      logger.error('渲染失败', {
-        url: context.url,
-        error: error.message,
-      });
-    });
-
-    // 服务启动通知
-    api.onServerStart(async ({ port, host }) => {
-      logger.info(`TimingPlugin 已就绪，监听 ${host}:${port}`);
-    });
-
-    // 清理资源
-    api.onDispose(async () => {
-      logger.info('TimingPlugin 正在清理...');
-    });
-  }
-}
+```text
+prepareBuildContext(isDev)
+  -> 解析 config.plugins
+  -> new PluginManager(config)
+  -> registerPlugins(resolvedPlugins)
+  -> runWaterfallHook('modifyRoutes', [...config.routes])
+  -> this.config.routes = modifiedRoutes
 ```
 
-## 3. 所有钩子一览
+之后每份 Webpack 配置都会经过：
 
-### 构建阶段
-
-| 钩子 | 类型 | 说明 | 典型用途 |
-|------|------|------|---------|
-| `modifyWebpackConfig` | Waterfall | 修改 Webpack 配置 | 添加 loader/plugin/别名 |
-| `modifyRoutes` | Waterfall | 修改路由配置 | 动态注入路由 |
-| `onBuildStart` | Parallel | 构建开始通知 | 清理临时文件 |
-| `onBuildEnd` | Parallel | 构建结束通知 | 生成额外文件 |
-
-**Waterfall 示例 — 修改 Webpack 配置：**
-
-```typescript
-api.modifyWebpackConfig((config, { isServer, isDev }) => {
-  if (!isServer) {
-    config.resolve.alias['@components'] = path.resolve('src/components');
-  }
-  return config; // 必须返回修改后的配置
-});
+```text
+raw webpack config
+  -> enhanceConfig()
+  -> config.webpack.client/server 自定义修改
+  -> pluginManager.runWaterfallHook('modifyWebpackConfig', config, { isServer, isDev })
+  -> analyze 插件可选追加
 ```
 
-**Waterfall 示例 — 注入路由：**
+当前 Builder 主链路实际调用的构建 hook：
 
-```typescript
-api.modifyRoutes((routes) => {
-  routes.push({
-    path: '/admin',
-    component: './pages/admin',
-    renderMode: 'csr',
-  });
-  return routes;
-});
+| Hook | 调用点 |
+|------|--------|
+| `modifyRoutes` | `prepareBuildContext()` |
+| `modifyWebpackConfig` | `applyWebpackConfigEnhancers()` |
+| `onBuildStart` | `build()` 中 client/server 编译前，调用 `pluginManager.callHook('buildStart')` |
+| `onBuildEnd` | `build()` 正常收尾或 catch 分支，调用 `pluginManager.callHook('buildEnd')` |
+
+`callHook()` 会把短名 `buildStart` / `buildEnd` 映射到正式 hook 名 `onBuildStart` / `onBuildEnd`，并按 Parallel 语义执行。
+
+---
+
+## 7. 服务端阶段插件
+
+### 插件初始化
+
+源码位置：`packages/server/src/app.ts`
+
+`createNamiServer()` 会在注册 Koa 中间件前初始化插件：
+
+```text
+new PluginManager(config, logger)
+  -> 解析 config.plugins
+  -> PluginLoader.load(string)
+  -> pluginManager.registerPlugins(resolvedPlugins)
 ```
 
-### 服务端阶段
+字符串插件加载失败会被 catch，记录错误并跳过。
 
-| 钩子 | 类型 | 说明 | 典型用途 |
-|------|------|------|---------|
-| `onServerStart` | Parallel | 服务启动成功 | 初始化外部连接 |
-| `onRequest` | Parallel | 请求到达 | 请求日志、鉴权 |
-| `onBeforeRender` | Parallel | 渲染前 | 预处理、缓存检查 |
-| `onAfterRender` | Parallel | 渲染后 | 指标采集、后处理 |
-| `onRenderError` | Parallel | 渲染错误 | 错误上报 |
-| `addServerMiddleware` | — | 注入 Koa 中间件 | 自定义中间件 |
+### 服务端中间件位置
 
-`addServerMiddleware()` 注册的中间件会在 `config.server.middlewares` 之后、`errorIsolation` 之前注入 Koa 管线。也就是说，它属于渲染保护层的上游；插件中间件如果要把错误转换为特定 HTTP 响应，应在中间件内部自行捕获处理。
-
-**中间件注入示例：**
+插件通过：
 
 ```typescript
 api.addServerMiddleware(async (ctx, next) => {
-  const token = ctx.headers['authorization'];
-  if (!token) {
-    ctx.status = 401;
-    ctx.body = { error: 'Unauthorized' };
-    return;
-  }
-  ctx.state.userId = verifyToken(token);
   await next();
 });
 ```
 
-### 客户端阶段
+注册 Koa 中间件。生产服务器中的真实位置是：
 
-| 钩子 | 类型 | 说明 | 典型用途 |
-|------|------|------|---------|
-| `onClientInit` | Parallel | 客户端初始化 | SDK 初始化 |
-| `wrapApp` | Waterfall | 包裹根组件 | Provider 注入 |
-| `onHydrated` | Parallel | Hydration 完成 | 性能指标采集 |
-| `onRouteChange` | Parallel | 路由切换 | 页面埋点 |
-
-**wrapApp 示例：**
-
-```typescript
-api.wrapApp((app) => (
-  <ThemeProvider theme={darkTheme}>
-    <IntlProvider locale="zh-CN">
-      {app}
-    </IntlProvider>
-  </ThemeProvider>
-));
+```text
+shutdownAware
+  -> timing
+  -> security
+  -> requestContext
+  -> healthCheck
+  -> staticServe
+  -> dataPrefetchMiddleware
+  -> config.server.middlewares
+  -> pluginManager.getServerMiddlewares()
+  -> errorIsolation
+  -> isrCacheMiddleware
+  -> renderMiddleware
 ```
 
-### 通用钩子
+关键结论：
 
-| 钩子 | 类型 | 说明 |
+| 事实 | 影响 |
+|------|------|
+| 插件中间件在 `dataPrefetchMiddleware` 后 | 插件中间件默认拦不到已被数据 API 短路的请求 |
+| 插件中间件在用户 `server.middlewares` 后 | 用户中间件先于插件中间件 |
+| 插件中间件在 `errorIsolation` 上游 | 插件中间件抛错不会被 `errorIsolationMiddleware` 捕获 |
+| 插件中间件顺序跟插件注册顺序一致 | `pre` 插件的中间件先执行，`post` 后执行 |
+
+如果插件中间件要把业务错误转换成 HTTP 响应，需要自己 try/catch 并设置 `ctx.status` / `ctx.body`。
+
+### `onServerStart`
+
+源码位置：`packages/server/src/server.ts`
+
+`onServerStart` 在 `app.listen()` 成功之后调用：
+
+```typescript
+await pluginManager.runParallelHook('onServerStart', { port, host });
+```
+
+这不是 `createNamiServer()` 创建完成时触发，而是 HTTP server 已经开始监听后触发。
+
+### 渲染钩子
+
+源码位置：
+
+- `packages/core/src/renderer/base-renderer.ts`
+- `packages/core/src/renderer/ssr-renderer.ts`
+- `packages/server/src/middleware/render-middleware.ts`
+
+渲染钩子由具体 Renderer 触发：
+
+```text
+renderer.render(context)
+  -> callPluginHook('beforeRender')
+  -> 执行该模式的数据预取/渲染
+  -> callPluginHook('afterRender')
+```
+
+渲染出错时：
+
+```text
+catch error
+  -> callPluginHook('renderError')
+  -> throw RenderError
+  -> renderMiddleware 进入降级逻辑
+```
+
+`renderMiddleware` 明确不再额外触发 `onBeforeRender` / `onAfterRender` / `onRenderError`，避免同一生命周期重复执行。
+
+SSR 中 `onBeforeRender` 的实际时机早于 `getServerSideProps`，因为 `SSRRenderer.render()` 先 `callPluginHook('beforeRender')`，再进入 `executeSSR()`，而数据预取在 `executeSSR()` 内部。
+
+### `onRequest`
+
+`api.onRequest()` 可以注册，`HOOK_DEFINITIONS` 也有定义，但当前服务端主链路没有调用 `runParallelHook('onRequest', ctx)`。因此不要把它当成当前版本每个请求都会触发的 hook。
+
+---
+
+## 8. 客户端阶段插件
+
+源码位置：`packages/client/src/entry-client.tsx`
+
+客户端初始化流程：
+
+```text
+initNamiClient(options)
+  -> new PluginManager(config)
+  -> 过滤掉字符串插件并 warn
+  -> registerPlugins(pluginInstances)
+  -> runParallelHook('onClientInit')
+  -> readServerData()
+  -> 创建 <NamiApp />
+  -> runWaterfallHook('wrapApp', appElement)
+  -> hydrateApp() 或 renderApp()
+  -> Hydration 完成后 runParallelHook('onHydrated')
+```
+
+客户端路由变化：
+
+```typescript
+pluginManager.runParallelHook('onRouteChange', {
+  from,
+  to,
+  params: {},
+});
+```
+
+当前传给 `onRouteChange` 的 `params` 固定为空对象 `{}`。如果插件需要路由参数，需要结合后续路由实现确认是否已传入。
+
+客户端错误边界会触发：
+
+```typescript
+pluginManager.runParallelHook('onError', error, {
+  source: 'client-error-boundary',
+});
+```
+
+---
+
+## 9. `context.extra`
+
+源码位置：
+
+- `packages/shared/src/types/context.ts`
+- `packages/server/src/middleware/render-middleware.ts`
+- `packages/plugin-cache/src/cache-plugin.ts`
+
+`RenderContext.extra` 的类型是：
+
+```typescript
+extra: Record<string, unknown>;
+```
+
+`renderMiddleware.createRenderContext()` 每次请求都会初始化：
+
+```typescript
+extra: {}
+```
+
+因此它是请求级隔离的，不会跨请求共享。但它不是权限沙箱，也不会阻止插件互相读写同一个 key。插件约定字段应尽量使用命名空间或双下划线前缀，避免冲突。
+
+### `renderMiddleware` 消费的约定字段
+
+`applyPluginExtras()` 当前消费这些字段：
+
+| 字段 | 类型 | 行为 |
 |------|------|------|
-| `onError` | Parallel | 任意阶段的未捕获错误 |
-| `onDispose` | Parallel | 插件销毁（热更新或停机） |
+| `__cache_hit` | `boolean` | 为 `true` 且有缓存内容时，替换 `result.html` |
+| `__cache_content` | `string` | 插件缓存命中的 HTML |
+| `__custom_headers` | `Record<string, string>` | 合并进 `result.headers` |
+| `__retry_attempted` | `boolean` | 写入 `X-Nami-Retry: 1` |
 
-### HOOK_DEFINITIONS 对照
+渲染异常分支还会读取：
 
-`packages/shared/src/types/lifecycle.ts` 中的 `HOOK_DEFINITIONS` 是运行时校验和文档口径的共同来源：
-
-| 阶段 | 钩子 | 执行模式 |
-|------|------|----------|
-| build | `modifyWebpackConfig`、`modifyRoutes` | Waterfall |
-| build | `onBuildStart`、`onBuildEnd` | Parallel |
-| server | `onServerStart`、`onRequest`、`onBeforeRender`、`onAfterRender`、`onRenderError` | Parallel |
-| client | `onClientInit`、`onHydrated`、`onRouteChange` | Parallel |
-| client | `wrapApp` | Waterfall |
-| common | `onError`、`onDispose` | Parallel |
-
-渲染器和构建器内部有时会调用历史别名，如 `beforeRender`、`afterRender`、`buildStart`。`PluginManager.callHook()` 会把这些名称映射为正式的 `onBeforeRender`、`onAfterRender`、`onBuildStart` 等名称；插件作者应始终使用 `PluginAPI` 暴露的正式 `on*` 方法注册钩子。
-
-## 4. 钩子执行模式深度解析
-
-### Waterfall（瀑布流）
-
-```
-initialValue → Plugin A → result A → Plugin B → result B → final result
-```
-
-- 前一个插件的输出是下一个的输入
-- 如果插件返回 `undefined`，保持上一个值（容错）
-- 单个插件失败：跳过该插件，用上一个值继续
-
-```typescript
-// PluginManager 内部实现
-async runWaterfallHook<T>(hookName, initialValue, ...args): Promise<T> {
-  let currentValue = initialValue;
-  for (const handler of handlers) {
-    try {
-      const result = await handler.fn(currentValue, ...args);
-      if (result !== undefined) currentValue = result;
-    } catch (error) {
-      this.handleHookError(hookName, handler.pluginName, error);
-      // 继续下一个，不中断
-    }
-  }
-  return currentValue;
-}
-```
-
-### Parallel（并行）
-
-```
-                ┌→ Plugin A ──┐
-args ──────────├→ Plugin B ──├→ Promise.allSettled → 统计失败数
-                └→ Plugin C ──┘
-```
-
-- 所有处理器并发执行（`Promise.allSettled`）
-- 单个失败不影响其他
-- 失败数量记入日志
-
-### Bail（短路）
-
-```
-args → Plugin A (返回 null) → Plugin B (返回 result) → 停止，返回 result
-```
-
-- 顺序执行，第一个返回非 `null` 且非 `undefined` 的值即为最终结果
-- 后续处理器不再执行
-- `false`、`0`、空字符串都不是空值，会触发短路
-- 当前核心调度器已经实现 `runBailHook()`，但 `HOOK_DEFINITIONS` 中尚无正式生命周期钩子使用 Bail；正式插件 API 目前主要使用 Waterfall 和 Parallel
-
-## 5. 插件间数据传递：context.extra
-
-`RenderContext.extra` 是一个 `Record<string, unknown>` 对象，是插件间以及插件与中间件之间的数据通道。同一个请求内，渲染器、各个插件钩子、`render-middleware` 拿到的是同一个 `RenderContext`，因此前面的写入可以被后面的阶段读取。
-
-```mermaid
-sequenceDiagram
-    participant MW as render-middleware
-    participant R as Renderer
-    participant A as CachePlugin
-    participant B as TimingPlugin
-    participant E as ErrorBoundary/Skeleton
-
-    MW->>R: render(renderContext)
-    R->>A: onBeforeRender(context)
-    A->>A: context.extra.__cache_hit = true/false
-    A->>A: context.extra.__cache_content = html
-    R->>B: onBeforeRender(context)
-    B->>B: context.extra.__timing_start = Date.now()
-
-    R->>R: 执行实际渲染
-
-    R->>B: onAfterRender(context, result)
-    B->>B: 读取 __timing_start
-    B->>B: context.extra.__custom_headers = {...}
-
-    alt 渲染异常
-        R->>E: onRenderError(context, error)
-        E->>E: context.extra.__retry_attempted = true
-        E->>E: context.extra.__skeleton_fallback = html
-    end
-
-    R-->>MW: result + 同一个 context.extra
-    MW->>MW: applyPluginExtras(context.extra)
-    MW->>MW: 读取 __cache_hit / __custom_headers
-    MW->>MW: 读取 __skeleton_fallback / __retry_attempted
-    MW-->>MW: 映射到 HTML、Header、降级响应
-```
-
-可以把它理解成一次请求里的“共享小黑板”：
-
-- 插件在不同生命周期把数据写到 `context.extra`
-- 后续插件或中间件从 `context.extra` 读取约定字段
-- `render-middleware` 最终把这些字段映射为 HTTP 响应行为
-
-### 约定的 extra 键名
-
-| 键名 | 写入方 | 读取方 | 说明 |
-|------|--------|--------|------|
-| `__cache_hit` | cache 插件 | render-middleware | 缓存命中标记 |
-| `__cache_key` | cache 插件 | cache 插件 / 调试日志 | 本次请求使用的缓存键 |
-| `__cache_content` | cache 插件 | render-middleware | 缓存内容 |
-| `__cache_etag` | cache 插件 | 下游中间件 / 调试 | 缓存条目的 ETag（如果 store 提供） |
-| `__cache_created_at` | cache 插件 | 下游中间件 / 调试 | 缓存条目创建时间 |
-| `__skeleton_layout` | skeleton 插件 | 渲染链路 / 调试 | 当前路由解析出的骨架屏布局 |
-| `__skeleton_enabled` | skeleton 插件 | 渲染链路 / 调试 | 当前请求可使用骨架屏 |
-| `__skeleton_fallback` | skeleton 插件 | render-middleware | 骨架屏 HTML |
-| `__skeleton_fallback_used` | skeleton 插件 | 下游中间件 / 调试 | 已生成骨架屏降级内容 |
-| `__custom_headers` | 任意插件 | render-middleware | 自定义响应头 |
-| `__retry_attempted` | error-boundary 插件 | render-middleware | 是否已重试 |
-| `__degradation_level` | error-boundary 插件 | 降级流程 / 调试 | 计算出的降级等级 |
-| `__degradation_html` | error-boundary 插件 | 降级流程 / 调试 | 降级策略生成的 HTML |
-| `__degradation_status` | error-boundary 插件 | 降级流程 / 调试 | 降级响应状态码 |
-| `__degradation_reason` | error-boundary 插件 | 降级流程 / 调试 | 降级原因 |
-| `__degradation_path` | error-boundary 插件 | 降级流程 / 调试 | 降级链路 |
-
-## 6. 官方插件
-
-本节以 `new NamiXxxPlugin(...)` 的类导出为主，这是类型最明确的推荐写法。`@nami/plugin-cache`、`@nami/plugin-monitor`、`@nami/plugin-request` 也保留了默认导出的历史工厂函数（如 `pluginCache({...})`），这些工厂会把少量旧字段转换成新配置；如果直接使用类导出，请按下面的真实配置项传参。
-
-### @nami/plugin-cache
-
-渲染结果缓存插件，适合给 SSR / ISR 页面做短期内存缓存，并可顺带生成 `Cache-Control` 响应头。
-
-#### 基础用法
-
-```typescript
-import { NamiCachePlugin } from '@nami/plugin-cache';
-
-new NamiCachePlugin({
-  strategy: 'lru',
-  lruOptions: {
-    maxSize: 500,      // LRU 最大条目数，默认 1000
-    ttl: 300,          // 单条缓存默认 TTL，单位秒；0 表示只受 LRU 淘汰影响
-  },
-  defaultTTL: 60,      // result.cacheControl.revalidate 不存在时的写入 TTL
-  cdnConfig: {
-    scope: 'public',
-    maxAge: 0,
-    sMaxAge: 60,
-    staleWhileRevalidate: 86400,
-  },
-})
-```
-
-如果使用默认工厂函数，可以继续使用历史字段：
-
-```typescript
-import pluginCache from '@nami/plugin-cache';
-
-pluginCache({
-  strategy: 'lru',
-  maxSize: 500, // 会转换为 lruOptions.maxSize
-  maxAge: 60,  // 会转换为 lruOptions.ttl
-})
-```
-
-#### 关键配置
-
-| 配置 | 说明 |
+| 字段 | 行为 |
 |------|------|
-| `strategy` | 内置缓存策略，支持 `'lru'` 和 `'ttl'`，默认 `'lru'` |
-| `lruOptions` | LRU 策略配置：`maxSize`、`ttl`、`enableStats` |
-| `ttlOptions` | TTL 策略配置：`defaultTTL`、`cleanupInterval`、`maxEntries`、`enableStats` |
-| `store` | 自定义 `CacheStore`，提供后会忽略内置 `strategy`，可接 Redis 等外部存储 |
-| `keyGenerator` | 自定义缓存键，默认是 `nami:page:${context.url}` |
-| `cdnConfig` | 生成 `Cache-Control`，支持 `public/private`、`max-age`、`s-maxage`、`stale-while-revalidate` 等 |
-| `defaultTTL` | 写缓存时的默认 TTL，默认 60 秒 |
-| `enabled` | 是否启用插件，默认 `true` |
+| `__skeleton_fallback` | 如果是字符串，直接返回骨架 HTML，状态码 200，跳过 `DegradationManager` |
 
-#### 工作原理
-
-`NamiCachePlugin` 的 `enforce` 是 `'pre'`，会尽早执行。它在 `onBeforeRender` 中根据 `keyGenerator(context)` 查缓存，命中时向 `context.extra` 写入：
-
-- `__cache_hit: true`
-- `__cache_key`
-- `__cache_content`
-- `__cache_etag`
-- `__cache_created_at`
-
-未命中时写入 `__cache_hit: false` 和 `__cache_key`。当前服务端中间件会在渲染完成后读取 `__cache_hit` / `__cache_content`，用缓存 HTML 替换本次渲染结果，并加上 `X-Nami-Plugin-Cache: HIT`。也就是说，插件通过 `context.extra` 完成“命中标记与响应替换”，而不是在插件钩子里直接返回 HTTP 响应。
-
-`onAfterRender` 会把 HTTP 2xx 的渲染结果写入缓存；如果本次已经是缓存命中，则不会重复写。写入 TTL 的优先级是 `result.cacheControl?.revalidate` 高于插件的 `defaultTTL`。如果配置了 `cdnConfig`，插件会用 `CDNCacheManager.generateHeader()` 生成 `Cache-Control`；如果没有 `cdnConfig` 但 `RenderResult` 带有 `cacheControl`，则生成 ISR 风格的 `s-maxage + stale-while-revalidate`。
-
-#### 适用建议
-
-- `lru` 适合控制内存上限的页面 HTML 缓存，靠最近访问淘汰旧内容。
-- `ttl` 适合需要明确过期时间的缓存，会按 `cleanupInterval` 定时清理过期条目，并用 `maxEntries` 防止无限增长。
-- 如果页面与登录态、地域、设备类型有关，必须自定义 `keyGenerator`，否则不同用户可能共享同一个缓存键。
-- 内置 LRU / TTL 都是进程内内存缓存，多实例部署时缓存不共享；需要共享缓存时传入自定义 `store`。
-
-### @nami/plugin-monitor
-
-性能、错误和渲染状态监控插件，适合把服务端渲染指标、渲染错误、客户端 Web Vitals 批量上报到监控后端。
-
-#### 基础用法
+最后，所有 `extra` 会被挂到：
 
 ```typescript
-import { NamiMonitorPlugin } from '@nami/plugin-monitor';
-
-new NamiMonitorPlugin({
-  endpoint: 'https://monitor.example.com/collect',
-  performanceThresholds: {
-    totalDuration: 3000,
-    dataFetchDuration: 2000,
-    renderDuration: 1000,
-  },
-  errorCollectorOptions: {
-    sampleRate: 0.1,   // 普通错误 10% 采样；Error / Fatal 级别仍会采集
-  },
-  flushInterval: 30000,
-  enableWebVitals: true,
-  meta: {
-    appName: 'my-app',
-    appVersion: '1.0.0',
-  },
-})
+ctx.state.namiExtra = extra;
 ```
 
-如果使用默认工厂函数，历史字段 `reportUrl` 和 `sampleRate` 仍可用：
+### 官方缓存插件示例
+
+`NamiCachePlugin` 在 `onBeforeRender` 中读取缓存，命中时写入：
 
 ```typescript
-import pluginMonitor from '@nami/plugin-monitor';
-
-pluginMonitor({
-  reportUrl: '/api/monitor/report', // 会转换为 endpoint
-  sampleRate: 1.0,                  // 会转换为 errorCollectorOptions.sampleRate
-})
+context.extra['__cache_hit'] = true;
+context.extra['__cache_key'] = cacheKey;
+context.extra['__cache_content'] = cached.content;
+context.extra['__cache_etag'] = cached.etag;
+context.extra['__cache_created_at'] = cached.createdAt;
 ```
 
-#### 关键配置
+`renderMiddleware` 看到 `__cache_hit` 和 `__cache_content` 后，会把最终 HTML 替换成插件缓存内容，并写：
 
-| 配置 | 说明 |
-|------|------|
-| `endpoint` | 上报地址。类导出写法中这是必填项 |
-| `reporterOptions` | `BeaconReporter` 配置：`maxBatchSize`、`maxRetries`、`headers`、`timeout`、`disableInDev` 等 |
-| `performanceThresholds` | 慢渲染阈值：总耗时、数据预取耗时、React 渲染耗时 |
-| `errorCollectorOptions` | 错误缓冲区、采样率、生产环境是否收集 stack |
-| `flushInterval` | 插件从收集器刷到上报器的间隔，默认 30000ms |
-| `enableWebVitals` | 是否在客户端采集 LCP、FID、CLS、FCP、TTFB，默认 `true` |
-| `meta` | 随每次上报附带的应用元信息 |
-| `enabled` | 是否启用监控，默认 `true` |
+```http
+X-Nami-Plugin-Cache: HIT
+```
 
-#### 工作原理
+`NamiCachePlugin` 在 `onAfterRender` 中写缓存。如果是缓存命中结果，跳过重复写入。
 
-插件本身是 `enforce: 'post'`，在其他插件之后采集最终结果，避免影响业务逻辑。
+---
 
-- `onAfterRender` 读取 `RenderContext` 和 `RenderResult`，用 `PerformanceCollector` 记录 `totalDuration`、`dataFetchDuration`、`renderDuration`、`htmlAssemblyDuration`、渲染模式、是否降级、是否缓存命中。
-- 同一个 `onAfterRender` 中，`RenderMetricsCollector` 会记录渲染模式分布、降级率、缓存命中率、HTTP 2xx 成功率。
-- `onRenderError` 通过 `ErrorCollector` 记录错误类型、严重等级、错误码、URL、requestId 和上下文。
-- `onHydrated` 在浏览器里用 `PerformanceObserver` / Navigation Timing 采集 Web Vitals。
-- 定时器每隔 `flushInterval` 调用 `flushCollectors()`，把 `performance`、`error`、`render` 和 `summary` 交给 `BeaconReporter`。
+## 10. 错误隔离与 `onError`
 
-`BeaconReporter` 在浏览器环境优先使用 `navigator.sendBeacon`，失败或非浏览器环境会退回 `fetch POST`，并按 `maxRetries` 做指数退避重试。它默认在非生产环境禁用远端上报（`disableInDev: true`），本地调试如果要真的发请求，需要显式设置 `reporterOptions.disableInDev = false`。
+插件 hook 执行错误不会直接打断核心流程。`PluginManager.handleHookError()` 会：
 
-#### 适用建议
+1. 记录错误日志。
+2. 如果当前失败的不是 `onError`，异步触发已注册的 `onError` 处理器。
+3. 不等待 `onError` 处理器完成，避免阻塞主流程。
+4. `onError` 自身失败时只记录日志，不递归触发。
 
-- 监控插件的采集和上报异常都会被捕获，不会中断页面渲染。
-- 高流量页面建议设置 `errorCollectorOptions.sampleRate`，但不要只依赖采样判断错误总数；错误计数器会记录真实次数，缓冲区上报才采样。
-- 如果要在开发环境观察格式化指标，可直接使用导出的 `ConsoleReporter` 自行接入调试脚本；`NamiMonitorPlugin` 默认使用 `BeaconReporter`。
+不同调度模式下错误处理略有差异：
 
-### @nami/plugin-request
+| 模式 | 单个 handler 抛错 |
+|------|-------------------|
+| Waterfall | 记录错误，继续下一个，当前值保持上一轮 |
+| Parallel | 记录错误，当前 handler 标为 rejected，其他 handler 继续 |
+| Bail | 记录错误，继续下一个 |
 
-同构 HTTP 请求插件，负责在服务端和客户端分别初始化请求适配器，并给 `useRequest`、`useSWR`、分页 Hook 等提供全局请求能力。
+---
 
-#### 基础用法
+## 11. 销毁流程
+
+源码位置：
+
+- `packages/core/src/plugin/plugin-manager.ts`
+- `packages/server/src/server.ts`
+
+正常生产服务器在开启 `config.server.gracefulShutdown` 时，会在优雅停机清理阶段调用：
 
 ```typescript
-import { NamiRequestPlugin } from '@nami/plugin-request';
-
-new NamiRequestPlugin({
-  serverOptions: {
-    baseURL: 'https://api.example.com',
-    defaultTimeout: 5000,
-    defaultHeaders: { 'X-From': 'nami-server' },
-  },
-  clientOptions: {
-    baseURL: '/api',
-    defaultTimeout: 15000,
-    credentials: 'include',
-  },
-  retry: {
-    maxRetries: 2,
-    baseDelay: 1000,
-  },
-  timeout: {
-    defaultTimeout: 10000,
-  },
-  cache: {
-    defaultTTL: 60000,
-    maxEntries: 100,
-  },
-})
+await pluginManager.dispose();
 ```
 
-如果使用默认工厂函数，历史字段 `baseURL` 和 `timeout` 会被转换：
+`dispose()` 流程：
+
+```text
+dispose()
+  -> 如果已 disposed，warn 后返回
+  -> 读取 onDispose handlers
+  -> Promise.allSettled 执行所有 onDispose
+  -> hookRegistry.clear()
+  -> plugins.clear()
+  -> disposed = true
+```
+
+`dispose()` 直接读取 `onDispose` handlers 执行，绕过普通 hook 的 `ensureNotDisposed` 检查。销毁后，再注册插件或执行普通 hook 会抛错。
+
+如果没有开启优雅停机，是否调用 `dispose()` 取决于启动入口是否另行处理清理逻辑。
+
+---
+
+## 12. 编写插件示例
+
+### 渲染耗时标记插件
 
 ```typescript
-import pluginRequest from '@nami/plugin-request';
+import type { NamiPlugin, RenderContext, RenderResult } from '@nami/shared';
 
-pluginRequest({
-  baseURL: '/api', // 会同时作为 serverOptions/clientOptions.baseURL
-  timeout: 10000, // 会转换为 timeout.defaultTimeout
-})
-```
+export function timingPlugin(): NamiPlugin {
+  return {
+    name: 'demo:timing',
+    enforce: 'pre',
+    setup(api) {
+      const logger = api.getLogger();
 
-#### 在组件中使用
+      api.onBeforeRender((context: RenderContext) => {
+        context.extra['demo:timing:start'] = Date.now();
+      });
 
-```tsx
-import { useRequest, usePagination } from '@nami/plugin-request';
+      api.onAfterRender((context: RenderContext, result: RenderResult) => {
+        const start = context.extra['demo:timing:start'];
+        if (typeof start !== 'number') return;
 
-function ProfilePanel() {
-  const { data, loading, error, refresh } = useRequest<unknown>(
-    '/profile',
-    {
-      transformResponse: (raw) => raw,
+        logger.info('页面渲染完成', {
+          url: context.url,
+          duration: Date.now() - start,
+          renderMode: result.meta.renderMode,
+        });
+      });
     },
-  );
-
-  if (loading) return <div>加载中...</div>;
-  if (error) return <div>{error.message}</div>;
-  return <button onClick={() => refresh()}>{JSON.stringify(data)}</button>;
+  };
 }
+```
 
-function ItemList() {
-  const { data, page, totalPages, next, hasNext } = usePagination<unknown[], unknown>(
-    '/items',
-    {
-      initialPageSize: 20,
-      getList: (res) => res,
-      getTotal: (res) => res.length,
+### 自定义响应头插件
+
+```typescript
+import type { NamiPlugin } from '@nami/shared';
+
+export function customHeaderPlugin(): NamiPlugin {
+  return {
+    name: 'demo:headers',
+    setup(api) {
+      api.onBeforeRender((context) => {
+        context.extra.__custom_headers = {
+          'X-Demo-Plugin': 'enabled',
+        };
+      });
     },
-  );
-
-  return (
-    <div>
-      {data.map((item, index) => <span key={index}>{JSON.stringify(item)}</span>)}
-      <button onClick={next} disabled={!hasNext}>{page} / {totalPages}</button>
-    </div>
-  );
+  };
 }
 ```
 
-#### 关键配置
+这里没有直接操作 Koa `ctx`，而是写入 `context.extra.__custom_headers`。渲染完成后，`renderMiddleware.applyPluginExtras()` 会把这些字段合并到 `RenderResult.headers`。
 
-| 配置 | 说明 |
-|------|------|
-| `serverOptions` | Node.js 服务端适配器配置：`baseURL`、`defaultHeaders`、`defaultTimeout` |
-| `clientOptions` | 浏览器适配器配置：`baseURL`、`defaultHeaders`、`defaultTimeout`、`credentials` |
-| `retry` | 重试拦截器配置，默认 `{ maxRetries: 3 }`；设为 `false` 禁用 |
-| `timeout` | 超时拦截器配置，默认 `{ defaultTimeout: 10000 }`；设为 `false` 禁用 |
-| `cache` | 请求级内存缓存，默认不启用；配置对象启用，设为 `false` 禁用 |
-| `logPrefix` | 日志前缀，默认 `[NamiRequest]` |
-
-#### 工作原理
-
-插件初始化时先创建拦截器实例。服务启动后通过 `onServerStart` 创建 `ServerRequestAdapter`，客户端初始化时通过 `onClientInit` 创建 `ClientRequestAdapter`，随后都调用 `setGlobalAdapter()`。`useRequest`、`useSWR`、`prefetch` 和分页 Hook 都通过这个全局 adapter 发请求；如果插件没有安装或初始化未完成，`useRequest` 会返回 `[useRequest] 请求适配器未初始化` 错误。
-
-请求链路由 `InterceptedAdapter` 包装，实际执行顺序是：
-
-```
-CacheInterceptor（最外层，命中则直接返回）
-  → RetryInterceptor（失败时按条件重试）
-    → TimeoutInterceptor（单次请求超时中断）
-      → ServerRequestAdapter / ClientRequestAdapter（fetch）
-```
-
-`RetryInterceptor` 默认只重试超时、网络异常和 5xx，不重试 4xx 或主动取消。`TimeoutInterceptor` 使用 `AbortController` 真正中断底层 fetch。`CacheInterceptor` 默认只缓存 GET，请求键由 method、URL 和排序后的 params 组成，只缓存 HTTP 2xx 响应。
-
-`RequestClient` 是额外导出的独立客户端类，适合不在 React Hook 中使用请求能力；它支持 `get/post/put/delete/patch` 快捷方法，也支持请求/响应拦截器。`createAuthTokenInterceptor`、`createRequestLoggingInterceptor`、`createErrorNormalizationInterceptor`、`createResponseTransformInterceptor`、`createCacheReadThroughInterceptor` 可配合 `RequestClient` 使用。
-
-#### 适用建议
-
-- SSR 场景优先配置 `serverOptions.defaultTimeout` 或插件级 `timeout`，避免数据请求长期阻塞渲染。
-- 浏览器跨域带 Cookie 时配置 `clientOptions.credentials = 'include'`，并确保服务端 CORS 允许凭证。
-- `usePagination` / `useCursorPagination` 默认会从常见字段提取列表和总数，但正式业务建议显式传入 `getList`、`getTotal` 或 `getNextCursor`，避免接口格式变化时误判。
-
-### @nami/plugin-skeleton
-
-骨架屏插件，提供页面级骨架布局、基础骨架组件、Suspense fallback，以及 SSR 渲染失败时的骨架屏降级。
-
-#### 基础用法
+### Koa 中间件插件
 
 ```typescript
-import { NamiSkeletonPlugin } from '@nami/plugin-skeleton';
+import type { NamiPlugin } from '@nami/shared';
 
-new NamiSkeletonPlugin({
-  defaultLayout: 'list',
-  routeSkeletons: {
-    '/products': 'list',
-    '/products/:id': 'detail',
-    '/dashboard': 'dashboard',
-  },
-  animation: 'pulse',
-  autoDetectLayout: true,
-  useAsFallback: true,
-  enableSuspense: true,
-})
-```
+export function apiMockPlugin(): NamiPlugin {
+  return {
+    name: 'demo:api-mock',
+    setup(api) {
+      api.addServerMiddleware(async (ctx, next) => {
+        if (ctx.path === '/api/mock') {
+          ctx.status = 200;
+          ctx.body = { ok: true };
+          return;
+        }
 
-#### 单独使用骨架组件
-
-```tsx
-import {
-  SkeletonPage,
-  SkeletonText,
-  SkeletonImage,
-  SkeletonCard,
-} from '@nami/plugin-skeleton';
-
-export function ProductLoading() {
-  return (
-    <SkeletonPage layout="detail" showSidebar contentParagraphs={3}>
-      <SkeletonImage width="100%" height={300} />
-      <SkeletonText lines={4} />
-      <SkeletonCard showImage showActions />
-    </SkeletonPage>
-  );
+        await next();
+      });
+    },
+  };
 }
 ```
 
-#### 关键配置
+这个中间件位于 `errorIsolation` 上游。插件内部如果抛错，不会被框架渲染错误页捕获。
 
-| 配置 | 说明 |
-|------|------|
-| `defaultLayout` | 默认页面布局：`list`、`detail`、`dashboard`、`custom`，默认 `list` |
-| `routeSkeletons` | 路由到布局的映射，按 `route.path` 精确匹配，比如 `/users/:id` |
-| `animation` | 骨架动画：`pulse`、`wave`、`none`，默认 `pulse` |
-| `backgroundColor` / `highlightColor` | 骨架块背景色和波浪高亮色 |
-| `autoDetectLayout` | 未命中 `routeSkeletons` 时是否按路径自动推断布局，默认 `true` |
-| `useAsFallback` | SSR 渲染错误时是否写入骨架屏 HTML 降级，默认 `true` |
-| `enableSuspense` | 是否通过 `wrapApp` 加一层 `React.Suspense`，默认 `true` |
-| `customSkeletonComponent` | 自定义 Suspense fallback 组件 |
-| `fallbackHTML` | 自定义 SSR 错误降级时返回的静态 HTML |
-| `enabled` | 是否启用插件，默认 `true` |
+---
 
-#### 工作原理
+## 13. 官方缓存插件附录
 
-插件的 `enforce` 是 `'post'`，目的是让缓存等前置插件先执行。
+源码位置：
 
-- `wrapApp`：当 `enableSuspense` 为 `true` 时，用 `React.Suspense` 包裹应用根节点。fallback 组件优先使用 `customSkeletonComponent`，否则使用内置 `SkeletonPage`。
-- `onBeforeRender`：解析当前路由布局，并写入 `context.extra.__skeleton_layout` 和 `context.extra.__skeleton_enabled`，供后续渲染链路识别。
-- `onRenderError`：当 SSR 渲染失败且 `useAsFallback` 为 `true` 时，生成静态骨架 HTML，写入 `context.extra.__skeleton_fallback` 和 `__skeleton_fallback_used`。服务端中间件捕获渲染异常后，会优先读取 `__skeleton_fallback` 并返回 `200 + X-Nami-Render-Mode: skeleton-fallback`。
+- `packages/plugin-cache/src/cache-plugin.ts`
+- `packages/plugin-cache/src/strategies/lru-cache.ts`
+- `packages/plugin-cache/src/strategies/ttl-cache.ts`
+- `packages/plugin-cache/src/strategies/cdn-cache.ts`
 
-布局解析优先级是：
+### LRU 和 TTL 的区别
 
-1. `routeSkeletons[route.path]`
-2. `route.meta.skeletonLayout`
-3. `detectLayoutFromRoute(route.path)`
-4. `defaultLayout`
+| 策略 | 源码类 | 核心机制 | 主要配置 | 适用场景 |
+|------|--------|----------|----------|----------|
+| LRU | `NamiLRUCache` | 固定容量，达到上限后淘汰最近最少使用的条目 | `maxSize`、`ttl`、`enableStats` | 热点页面缓存、需要防止内存无限增长 |
+| TTL | `NamiTTLCache` | 每个条目按过期时间失效，定时器周期清理 | `defaultTTL`、`cleanupInterval`、`maxEntries`、`enableStats` | 有明确时间窗口的数据、需要精确过期 |
 
-自动检测规则很轻量：包含 `/dashboard`、`/admin`、`/analytics` 倾向 `dashboard`；包含 `/list`、`/search` 或路径以 `s` 结尾倾向 `list`；包含 `/:`、`/detail`、`/article` 倾向 `detail`。复杂页面建议显式配置 `routeSkeletons` 或 `route.meta.skeletonLayout`。
+LRU 底层使用 `lru-cache`，`ttl` 单位是秒，内部转换为毫秒。TTL 策略底层是 `Map`，支持定时清理和读取时惰性清理，`dispose()` 会停止清理定时器。
 
-`SkeletonGenerator` 也是插件包的导出能力。它只能在浏览器环境使用，会读取 DOM 几何信息，把文本、图片、头像、按钮等可见元素转换成骨架节点描述，再生成自包含 HTML。它不是 `NamiSkeletonPlugin` 默认运行的一部分，通常用于构建时或调试工具中生成更贴近页面结构的骨架。
+### `NamiCachePlugin` 写入流程
 
-### @nami/plugin-error-boundary
+```text
+onBeforeRender
+  -> keyGenerator(context)
+  -> store.get(cacheKey)
+  -> 命中：写 context.extra.__cache_*
+  -> 未命中：写 __cache_hit=false 和 __cache_key
 
-错误边界与渐进降级插件，负责客户端 React 渲染错误兜底、SSR 渲染错误记录、可恢复错误重试标记，以及降级策略决策。
+onAfterRender
+  -> 非 2xx 不缓存
+  -> 缓存命中不重复写
+  -> ttl = result.cacheControl?.revalidate ?? defaultTTL
+  -> store.set(cacheKey, entry, ttl)
+  -> 写 Cache-Control
+```
 
-#### 基础用法
+默认缓存键：
 
 ```typescript
-import { DegradationLevel } from '@nami/shared';
-import { NamiErrorBoundaryPlugin } from '@nami/plugin-error-boundary';
-
-new NamiErrorBoundaryPlugin({
-  retry: {
-    maxRetries: 2,
-    baseDelay: 500,
-    maxDelay: 5000,
-  },
-  degrade: {
-    maxDegradationLevel: DegradationLevel.StaticHTML,
-    staticHTML: '<!doctype html><html><body>页面暂时不可用</body></html>',
-  },
-  onError: (error, context) => {
-    // 上报到业务监控系统
-    console.error(error, context);
-  },
-})
+`nami:page:${context.url}`
 ```
 
-#### 自定义错误 UI
+### `cdnConfig` 字段
 
-```tsx
-import type { ErrorFallbackProps } from '@nami/plugin-error-boundary';
-import { NamiErrorBoundaryPlugin } from '@nami/plugin-error-boundary';
+`CDNCacheConfig` 支持：
 
-function MyErrorFallback({ error, resetError }: ErrorFallbackProps) {
-  return (
-    <div role="alert">
-      <p>页面出错了：{error.message}</p>
-      <button onClick={resetError}>重试</button>
-    </div>
-  );
-}
+| 字段 | 类型 | 生成指令 | 说明 |
+|------|------|----------|------|
+| `scope` | `'public' | 'private'` | `public` / `private` | 默认 `public`；`private` 不会生成 `s-maxage` |
+| `maxAge` | `number` | `max-age=N` | 浏览器缓存时间，秒 |
+| `sMaxAge` | `number` | `s-maxage=N` | CDN/共享缓存时间，秒，仅 public 有效 |
+| `staleWhileRevalidate` | `number` | `stale-while-revalidate=N` | 过期后可返回旧内容并后台重验证的窗口 |
+| `staleIfError` | `number` | `stale-if-error=N` | 源站出错时允许使用旧缓存的窗口 |
+| `noStore` | `boolean` | `no-store` | 优先级最高，设置后直接返回 `no-store` |
+| `noCache` | `boolean` | `no-cache` | 可缓存，但每次使用前必须重验证 |
+| `mustRevalidate` | `boolean` | `must-revalidate` | 过期后必须向源站重验证 |
+| `immutable` | `boolean` | `immutable` | 适合带内容 hash 的不可变资源 |
 
-new NamiErrorBoundaryPlugin({
-  fallback: MyErrorFallback,
-});
+如果没有 `cdnConfig`，但 `RenderResult.cacheControl` 存在，缓存插件会用 `generateISRHeader(revalidate, staleWhileRevalidate)` 生成 ISR 风格响应头：
+
+```text
+public, max-age=0, s-maxage=<revalidate>, stale-while-revalidate=<window>, stale-if-error=<window>
 ```
 
-#### 关键配置
+---
 
-| 配置 | 说明 |
-|------|------|
-| `fallback` | 全局错误边界的 React 回退组件，默认使用内置 `ErrorFallback` |
-| `retry` | 重试策略配置，默认 `{ maxRetries: 2 }`；设为 `false` 禁用 |
-| `degrade` | 降级策略配置：最大降级等级、CSR HTML、骨架 HTML、静态 HTML、自定义决策函数 |
-| `enableGlobalBoundary` | 是否通过 `wrapApp` 包裹全局错误边界，默认 `true` |
-| `enableDegradation` | 是否在 `onRenderError` 中执行降级策略，默认 `true` |
-| `onError` | 错误回调，客户端错误边界、渲染降级、通用错误都会调用 |
-| `logPrefix` | 日志前缀，默认 `[NamiErrorBoundary]` |
+## 14. 常见误区
 
-#### 工作原理
+### 误区一：`onRequest` 当前每个请求都会触发
 
-`wrapApp` 会把根组件包进 `RouteErrorBoundary`。这是一个 class component，使用 `getDerivedStateFromError` 和 `componentDidCatch` 捕获 React 子树渲染错误，并展示 `fallback`。如果传入 `routePath`，路由变化时可以清理旧错误状态；插件全局包裹时主要承担“避免整页白屏”的兜底职责。
+不会。它在类型和注册表中存在，但当前服务端主链路没有调用点。
 
-服务端渲染失败时，插件在 `onRenderError` 中做两件事：
+### 误区二：需要直接调用 `runParallelHook('buildStart')`
 
-- 如果 `RetryStrategy.shouldRetry(error)` 返回 `true`，写入 `context.extra.__retry_attempted = true`。服务端响应阶段会把这个标记转换为 `X-Nami-Retry: 1`，方便监控识别。
-- 调用 `DegradeStrategy.degrade(error, currentLevel)` 计算目标降级等级，并把 `__degradation_level`、`__degradation_html`、`__degradation_status`、`__degradation_reason`、`__degradation_path` 写入 `context.extra`，同时触发 `onError`。
+不需要。`NamiBuilder.build()` 使用兼容入口 `callHook('buildStart')` 和 `callHook('buildEnd')`，`PluginManager.callHook()` 会映射到正式的 `onBuildStart` / `onBuildEnd`。
 
-`RetryStrategy` 默认认为超时、数据预取失败、缓存读写失败、网络类错误等可恢复；`TypeError`、`ReferenceError`、`SyntaxError`、`RangeError` 和 `Fatal` 级别错误不可恢复。
+### 误区三：Bail hook 已经用于某个生命周期
 
-`DegradeStrategy` 的降级等级来自 `@nami/shared` 的 `DegradationLevel`：
+没有。`HookType.Bail` 和 `runBailHook()` 是预留能力，当前没有正式 Bail hook。
 
-```
-None → Retry → CSRFallback → Skeleton → StaticHTML → ServiceUnavailable
-```
+### 误区四：插件中间件被 `errorIsolation` 保护
 
-默认最大降级到 `StaticHTML`，超过后返回 503。当前核心中间件已经会消费 `__retry_attempted`；最终错误响应仍由核心降级流程和骨架屏 fallback 共同兜底，因此建议把错误边界插件和骨架屏插件一起使用：错误边界负责决策与上报，骨架屏插件负责提供用户可见的加载占位。
+不是。插件中间件位于 `errorIsolation` 上游，自身错误要自己处理。
 
-## 7. 插件生命周期时序
+### 误区五：`getConfig()` 是深冻结
 
-```
-=== 构建阶段 ===
-PluginManager.registerPlugins()  ← 按 enforce 排序后依次 setup()
-  │
-modifyRoutes(routes)             ← waterfall
-modifyWebpackConfig(config)      ← waterfall
-onBuildStart()                   ← parallel
-  ... webpack 编译 ...
-onBuildEnd()                     ← parallel
+不是。它只冻结顶层浅拷贝。
 
-=== 服务启动阶段 ===
-createNamiServer()
-  │
-  ├── 注册插件 → setup()
-  ├── getServerMiddlewares() → 注入 Koa 管线
-  │
-startServer()
-  │
-  └── onServerStart({ port, host })  ← parallel
+### 误区六：客户端会自动加载字符串插件
 
-=== 请求处理阶段 (每次请求) ===
-onRequest(ctx)           ← parallel (如果注册了)
-onBeforeRender(context)  ← parallel
-  ... 渲染 ...
-onAfterRender(context, result)  ← parallel
-  [失败时] onRenderError(context, error)  ← parallel
+不会。客户端只注册已解析插件实例，字符串插件会被 warn 并忽略。
 
-=== 客户端阶段 ===
-initNamiClient()
-  │
-  ├── 注册插件 → setup()
-  ├── onClientInit()     ← parallel
-  ├── wrapApp(element)   ← waterfall
-  ├── hydrateRoot()
-  ├── onHydrated()       ← parallel
-  │
-  └── 路由切换时 onRouteChange({ from, to })  ← parallel
+### 误区七：`context.extra` 是跨请求共享缓存
 
-=== 停机阶段 ===
-onDispose()              ← parallel (所有插件)
-```
-
-## 8. 最佳实践
-
-### 命名规范
-
-- 插件 name 使用 kebab-case：`my-auth-plugin`
-- 类名使用 PascalCase：`MyAuthPlugin`
-- extra 键名使用 `__` 前缀防冲突：`__auth_token`
-
-### 错误处理
-
-```typescript
-api.onBeforeRender(async (context) => {
-  try {
-    // 插件逻辑
-  } catch (error) {
-    // 插件内部处理错误，不要让异常逃逸到钩子链
-    logger.warn('插件操作失败，已降级跳过', { error });
-  }
-});
-```
-
-### 资源清理
-
-```typescript
-setup(api) {
-  const connection = createDatabaseConnection();
-
-  api.onDispose(async () => {
-    await connection.close(); // 务必清理外部资源
-  });
-}
-```
-
-### 配置只读
-
-`api.getConfig()` 返回 `Object.freeze({ ...config })` 的浅拷贝浅冻结对象。顶层字段不能直接改，但嵌套对象不是深冻结；插件仍不应该修改它们。需要参与配置变更时，请使用 `modifyWebpackConfig` 或 `modifyRoutes` 钩子。
-
-## 9. 常见模式与注意事项
-
-### 条件执行（按渲染模式）
-
-```typescript
-api.onBeforeRender(async (context) => {
-  // 只在 SSR 模式下执行
-  if (context.renderMode !== 'ssr') return;
-  // ... SSR 特有逻辑
-});
-```
-
-### 插件间依赖
-
-如果你的插件依赖另一个插件先执行，使用 `enforce` 控制顺序：
-
-```typescript
-// 缓存插件 — 需要在其他插件之前检查缓存
-class CachePlugin implements NamiPlugin {
-  enforce = 'pre' as const;  // 最先执行
-  // ...
-}
-
-// 监控插件 — 需要在其他插件之后采集完整指标
-class MonitorPlugin implements NamiPlugin {
-  enforce = 'post' as const;  // 最后执行
-  // ...
-}
-```
-
-### 避免的反模式
-
-```typescript
-// ❌ 在 Waterfall 钩子中忘记返回值
-api.modifyRoutes((routes) => {
-  routes.push({ path: '/admin', component: './admin' });
-  // 忘记 return routes！结果下一个插件拿到 undefined
-});
-
-// ✅ Waterfall 钩子必须返回修改后的值
-api.modifyRoutes((routes) => {
-  routes.push({ path: '/admin', component: './admin' });
-  return routes;
-});
-```
-
-```typescript
-// ❌ 在钩子中抛出异常中断整个流程
-api.onBeforeRender(async (context) => {
-  const data = await riskyOperation();  // 可能抛异常
-  context.extra.__my_data = data;
-});
-
-// ✅ 内部 try/catch，失败时优雅降级
-api.onBeforeRender(async (context) => {
-  try {
-    context.extra.__my_data = await riskyOperation();
-  } catch (error) {
-    logger.warn('数据获取失败，已跳过', { error });
-    // 不设置 extra，下游代码应做 null 检查
-  }
-});
-```
-
-### 调试技巧
-
-1. 使用 `api.getLogger()` 而非 `console.log` — 插件日志会带上插件名前缀，方便追踪
-2. 在 `onAfterRender` 中检查 `result.meta` 可以获取渲染耗时、渲染模式等信息
-3. 关注 `PluginManager` 的 debug / warn 日志：重复注册会 warn 并跳过，Parallel 钩子会统计失败处理器数量，字符串插件加载失败会带上包名
+不是。它是每次请求新建的对象，适合请求内插件通信；跨请求缓存应使用插件自己的 store 或框架 ISR 缓存。
 
 ---
 
 ## 下一步
 
-- 想了解中间件管线如何消费插件数据？→ [服务器与中间件](./server-and-middleware.md)
-- 想了解路由系统？→ [路由系统](./routing.md)
+- 服务端中间件位置：阅读 [服务器与中间件](./server-and-middleware.md)
+- 渲染器触发插件的时机：阅读 [渲染模式原理](./rendering-modes.md)
+- 构建期 `modifyWebpackConfig` 的上下文：阅读 [构建系统](./webpack-build.md)
