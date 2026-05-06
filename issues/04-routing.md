@@ -125,7 +125,7 @@ routes: [
 ### 构建时：自动生成动态 import 映射
 
 ```typescript
-// .nami/generated-route-modules.ts（构建时自动生成）
+// 构建时自动生成，并通过模块说明符 @nami/generated-route-modules 引用
 export const generatedComponentLoaders = {
   './pages/home': () => import(/* webpackChunkName: "page-home" */ '../src/pages/home'),
   './pages/about': () => import(/* webpackChunkName: "page-about" */ '../src/pages/about'),
@@ -139,16 +139,22 @@ export const generatedComponentLoaders = {
 
 ```typescript
 // packages/client/src/router/nami-router.tsx
-const lazyComponentCache = new Map();
+const lazyComponentCache = new WeakMap<ComponentResolver, Map<string, React.LazyExoticComponent<any>>>();
 
-function getLazyComponent(componentKey: string): React.LazyExoticComponent {
-  if (lazyComponentCache.has(componentKey)) {
-    return lazyComponentCache.get(componentKey);
+function getLazyComponent(componentKey: string, resolver: ComponentResolver): React.LazyExoticComponent<any> {
+  let resolverCache = lazyComponentCache.get(resolver);
+  if (!resolverCache) {
+    resolverCache = new Map();
+    lazyComponentCache.set(resolver, resolverCache);
   }
 
-  const loader = generatedComponentLoaders[componentKey];
+  if (resolverCache.has(componentKey)) {
+    return resolverCache.get(componentKey);
+  }
+
+  const loader = () => resolver(componentKey);
   const LazyComponent = React.lazy(loader);
-  lazyComponentCache.set(componentKey, LazyComponent);
+  resolverCache.set(componentKey, LazyComponent);
   return LazyComponent;
 }
 
@@ -162,7 +168,7 @@ function getLazyComponent(componentKey: string): React.LazyExoticComponent {
 
 ### 为什么缓存 lazy 组件？
 
-`React.lazy()` 每次调用都会创建一个新的懒加载包装器。如果不缓存，路由切换时会重新创建，导致组件重新挂载（丢失状态）。缓存确保同一路由始终使用同一个 lazy 包装器。
+`React.lazy()` 每次调用都会创建一个新的懒加载包装器。如果不缓存，路由切换时会重新创建，导致组件重新挂载（丢失状态）。当前缓存按 `componentResolver` 分组：同一个 resolver 下同一路由复用 lazy 包装器；HMR 或多应用场景替换 resolver 后，不会复用旧 resolver 的组件缓存。
 
 ### 为什么用 webpackChunkName 注释？
 
@@ -209,7 +215,7 @@ dist/client/static/js/
 
 共用同一个匹配函数确保三者**始终命中同一条路由**。
 
-**性能考虑：** RouteManager 的 `getRankedRoutes()` 会缓存排序结果。多次调用 matchConfiguredRoute 实际上复用了已排序的路由列表，而不是每次重新排序。
+**性能考虑：** `RouteManager` 自身有 `getRankedRoutes()` 排序缓存；但服务端主链路使用的是 `packages/server/src/middleware/route-match.ts` 中的 `matchConfiguredRoute()`，它直接调用 `rankRoutes(routes)`，并不经过某个 `RouteManager` 实例。因此这里更重要的是逻辑一致性；排序缓存只对显式使用 `RouteManager` 的路径成立。
 
 ```typescript
 // packages/core/src/router/route-manager.ts

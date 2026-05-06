@@ -83,7 +83,7 @@ enforce: 'pre'  →  无 enforce（normal）  →  enforce: 'post'
 
 | enforce 值 | 执行位置 | 典型插件 |
 |-----------|---------|---------|
-| `'pre'` | 最先执行 | 缓存插件（先检查缓存）、timing 插件（先记录开始时间） |
+| `'pre'` | 最先执行 | 缓存插件（先检查缓存）、鉴权/上下文插件（先注入请求信息） |
 | 无（normal） | 中间执行 | 业务插件 |
 | `'post'` | 最后执行 | 监控插件（最后采集完整指标）、日志插件 |
 
@@ -219,9 +219,8 @@ Plugin A                    Plugin B                   render-middleware
 | `__skeleton_fallback` | skeleton 插件 | render-middleware | 骨架屏 HTML |
 | `__custom_headers` | 任意插件 | render-middleware | 自定义响应头 |
 | `__retry_attempted` | error-boundary 插件 | render-middleware | 是否已重试 |
-| `__timing_start` | timing 插件 | timing 插件自身 | 渲染开始时间 |
 
-**命名规范：** 使用 `__` 前缀防止与用户自定义字段冲突。
+**命名规范：** 框架内置协作字段使用 `__` 前缀防止与用户自定义字段冲突。不要把 Koa 层的 `timingMiddleware` 和插件系统混在一起：当前请求耗时统计是核心服务端中间件，不是一个通过 `enforce: 'pre'` 注册的插件。
 
 **为什么不用全局变量或 EventEmitter？**
 1. 请求级隔离：extra 是每个 RenderContext 独有的，不会跨请求污染

@@ -11,7 +11,9 @@ SSR（Server-Side Rendering）的核心原理是：在服务端执行 React 组�
 在 Nami 中，一个 SSR 请求经历以下步骤：
 
 ```
-1. Koa 中间件管线前处理（timing → security → requestContext）
+1. Koa 中间件管线前处理：
+   shutdownAware → timing → security → requestContext → healthCheck → staticServe
+   → 用户中间件 → 插件中间件 → dataPrefetch → errorIsolation → isrCache
 2. renderMiddleware 匹配路由 → matchConfiguredRoute(path, routes)
 3. 构造 RenderContext（URL、路由、参数、请求头、Cookie、requestId）
 4. RendererFactory.create({ mode: 'ssr' }) → 创建 SSRRenderer 实例
@@ -103,8 +105,9 @@ SSR 返回的 HTML（静态）      Hydration 后（动态）
 
 ```typescript
 // packages/client/src/hydration/hydrate.ts
-if (isSSR && container.childNodes.length > 0) {
-  // SSR 页面：使用 hydrateRoot 复用已有 DOM
+// 实际入口判断来自 entry-client.tsx：renderMode !== 'csr' && container.childNodes.length > 0
+if (renderMode !== 'csr' && container.childNodes.length > 0) {
+  // SSR / SSG / ISR 页面：使用 hydrateRoot 复用已有 DOM
   hydrateRoot(container, appElement, {
     onRecoverableError: (error) => { /* 处理 Hydration Mismatch */ }
   });
@@ -439,7 +442,8 @@ function readServerData() {
 - 确保 JSON 数据不会"逃逸"出 `<script>` 标签
 
 **源码参考：**
-- `packages/core/src/renderer/ssr-renderer.ts` — generateDataScript()
+- `packages/shared/src/utils/serialize.ts` — generateDataScript(), safeStringify()
+- `packages/core/src/renderer/ssr-renderer.ts` — 调用 generateDataScript()
 - `packages/client/src/data/data-hydrator.ts` — readServerData(), cleanupServerData()
 - `packages/client/src/data/use-nami-data.ts` — useNamiData Hook
 

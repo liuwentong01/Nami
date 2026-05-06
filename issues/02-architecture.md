@@ -355,11 +355,13 @@ export async function getServerSideProps(ctx) {
   return { props: { data } };
 }
 
-// 客户端构建 — data-fetch-loader 替换为空实现
+// 客户端构建 — 显式接入 data-fetch-loader 后替换为空实现
 export async function getServerSideProps() {
   return { props: {} }; // 安全：不包含任何服务端逻辑
 }
 ```
+
+注意当前默认 TypeScript 构建规则只串联 `ts-loader`，没有自动启用 `data-fetch-loader`。因此“服务端代码剥离”是仓库提供的 loader 能力，不是默认构建必然生效的结果；项目需要通过自定义 webpack rule 或插件 `modifyWebpackConfig` 显式接入。
 
 ### 3. 客户端 Bundle 瘦身（core-client-shim）
 
@@ -386,36 +388,35 @@ Webpack 别名 `@nami/core-client-shim` 映射到此文件，客户端 `import f
 
 **答案：**
 
-`withTimeout` 是 BaseRenderer 中定义的通用超时包装器，用 `Promise.race` 实现：
+`withTimeout` 是 BaseRenderer 中定义的通用超时包装器。当前实现没有使用 `Promise.race`，而是手动创建一个定时器，并在原始 Promise resolve/reject 后清理定时器：
 
 ```typescript
-protected async withTimeout<T>(
+protected withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
-  errorMessage: string
+  timeoutMessage: string = '操作超时'
 ): Promise<T> {
-  let timer: NodeJS.Timeout;
-
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(new RenderError(errorMessage, ErrorCode.RENDER_SSR_TIMEOUT));
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${timeoutMessage} (${timeoutMs}ms)`));
     }, timeoutMs);
-  });
 
-  try {
-    const result = await Promise.race([promise, timeoutPromise]);
-    clearTimeout(timer!);
-    return result;
-  } catch (error) {
-    clearTimeout(timer!);
-    throw error;
-  }
+    promise
+      .then((result) => {
+        clearTimeout(timer);
+        resolve(result);
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
 }
 ```
 
 **关键细节：**
-1. `Promise.race` — 第一个 resolve/reject 的 Promise 决定结果
-2. `clearTimeout` 在 try/catch 中都执行 — 防止定时器泄漏
+1. 超时后抛出普通 `Error`，错误码包装发生在更上层的渲染器 catch 逻辑中。
+2. 原始 Promise 成功或失败都会 `clearTimeout`，防止定时器泄漏。
 3. 返回泛型 `T` — 类型安全地包装任意异步操作
 
 **使用场景：**
@@ -444,17 +445,17 @@ protected async withTimeout<T>(
 
 ```typescript
 interface RenderContext {
-  url: string;              // 完整 URL
-  path: string;             // 路径部分
-  query: Record<string, string>; // 查询参数
-  params: Record<string, string>; // 路由参数（:id 等）
-  headers: Record<string, string>; // 请求头
-  cookies: Record<string, string>; // Cookie
-  route: NamiRoute;         // 匹配到的路由配置
-  renderMode: RenderMode;   // 渲染模式
-  requestId: string;        // 请求追踪 ID
+  url: string;                         // 完整 URL
+  path: string;                        // 路径部分
+  query: Record<string, string | string[]>; // 查询参数
+  headers: Record<string, string | string[] | undefined>; // 小写请求头
+  route: NamiRoute;                    // 匹配到的路由配置，renderMode 在 route 上
+  params: Record<string, string>;      // 路由参数（:id 等）
+  koaContext?: KoaContextSubset;       // SSR 请求下的 Koa 安全子集，cookies 在这里
+  initialData?: Record<string, unknown>; // 服务端预取数据
+  requestId: string;                   // 请求追踪 ID
   extra: Record<string, unknown>; // 插件间通信通道
-  timing: RenderTiming;     // 性能计时
+  timing: RenderTiming;                // 性能计时
 }
 ```
 
@@ -471,15 +472,22 @@ interface RenderContext {
 interface RenderResult {
   html: string;             // 最终 HTML
   statusCode: number;       // HTTP 状态码
+  headers: Record<string, string>; // 自定义响应头
+  cacheControl?: {
+    revalidate: number;
+    staleWhileRevalidate?: number;
+    tags?: string[];
+  };
   meta: {
     renderMode: RenderMode; // 实际使用的渲染模式
     duration: number;       // 渲染耗时（毫秒）
     degraded: boolean;      // 是否发生了降级
     degradeReason?: string; // 降级原因
-    degradeLevel?: number;  // 降级级别
+    dataFetchDuration: number;
+    renderDuration?: number;
+    cacheHit?: boolean;
+    cacheStale?: boolean;
   };
-  cacheControl?: string;    // Cache-Control 头建议值
-  headers?: Record<string, string>; // 自定义响应头
 }
 ```
 

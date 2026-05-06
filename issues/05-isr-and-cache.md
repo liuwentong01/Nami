@@ -49,13 +49,14 @@ Stale-While-Revalidate（SWR）是 ISR 缓存策略的核心，将缓存条目�
 
 ```typescript
 // packages/server/src/isr/stale-while-revalidate.ts
-function evaluateCacheFreshness(entry, revalidateAfter, staleMultiplier = 2) {
-  const age = (Date.now() - entry.createdAt) / 1000;
+function evaluateCacheFreshness(createdAt, revalidateAfter, options = {}) {
+  const { staleMultiplier = 2 } = options;
+  const age = (Date.now() - createdAt) / 1000;
   const maxStaleAge = revalidateAfter * staleMultiplier;
 
-  if (age <= revalidateAfter) return { state: 'fresh', needsRevalidation: false };
-  if (age <= maxStaleAge)     return { state: 'stale', needsRevalidation: true };
-  return { state: 'expired', needsRevalidation: true };
+  if (age <= revalidateAfter) return { state: SWRState.Fresh, needsRevalidation: false };
+  if (age <= maxStaleAge)     return { state: SWRState.Stale, needsRevalidation: true };
+  return { state: SWRState.Expired, needsRevalidation: true };
 }
 ```
 
@@ -85,11 +86,11 @@ RevalidationQueue 管理后台重验证任务，有三个关键约束：
 
 ```typescript
 class RevalidationQueue {
-  private queue: RevalidationJob[];        // 等待执行的任务队列（FIFO）
+  private pendingQueue: RevalidationJob[]; // 等待执行的任务队列（FIFO）
   private pendingKeys: Set<string>;        // 已排队但未执行的 key
   private activeKeys: Set<string>;         // 正在执行的 key
   private activeCount: number;             // 当前并发数
-  private activeTimers: Map<string, NodeJS.Timeout>; // 超时定时器
+  private activeTimers: Set<NodeJS.Timeout>; // close 时统一清理的超时定时器
 }
 ```
 
@@ -103,7 +104,7 @@ enqueue(key, renderFn, options) {
     return;
   }
 
-  this.queue.push({ key, renderFn, options });
+  this.pendingQueue.push({ key, renderFn, revalidateSeconds, tags, enqueuedAt: Date.now() });
   this.pendingKeys.add(key);
   this.processQueue(); // 尝试处理队列
 }
@@ -113,8 +114,8 @@ enqueue(key, renderFn, options) {
 
 ```typescript
 processQueue() {
-  while (this.activeCount < this.maxConcurrency && this.queue.length > 0) {
-    const job = this.queue.shift();      // FIFO 出队
+  while (this.activeCount < this.maxConcurrency && this.pendingQueue.length > 0) {
+    const job = this.pendingQueue.shift(); // FIFO 出队
     this.pendingKeys.delete(job.key);     // 从等待移到执行
     this.activeKeys.add(job.key);
     this.activeCount++;
@@ -126,31 +127,42 @@ processQueue() {
 ### 超时保护
 
 ```typescript
-executeJob(job) {
-  const timeoutPromise = new Promise((_, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error('Revalidation timeout')),
-      this.timeout
-    );
-    this.activeTimers.set(job.key, timer); // 记录定时器用于清理
-  });
+async executeJob(job) {
+  let timeoutHandle;
+  try {
+    const payload = await Promise.race([
+      job.renderFn(),
+      new Promise((_, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new Error(`重验证超时（${this.timeout}ms）`)),
+          this.timeout,
+        );
+        this.activeTimers.add(timeoutHandle);
+      }),
+    ]);
 
-  Promise.race([job.renderFn(), timeoutPromise])
-    .then(html => {
-      // 成功：更新缓存
-      this.cacheStore.set(job.key, html);
-    })
-    .catch(error => {
-      // 失败：保留旧缓存不动
-      logger.error('重验证失败', { key: job.key, error });
-    })
-    .finally(() => {
-      this.activeKeys.delete(job.key);
-      this.activeCount--;
-      clearTimeout(this.activeTimers.get(job.key));
-      this.activeTimers.delete(job.key);
-      this.processQueue(); // 处理下一个任务
-    });
+    const normalized = typeof payload === 'string'
+      ? { html: payload, tags: job.tags ?? [] }
+      : { html: payload.html, tags: payload.tags ?? job.tags ?? [] };
+
+    await this.cacheStore.set(job.key, {
+      content: normalized.html,
+      createdAt: Date.now(),
+      revalidateAfter: job.revalidateSeconds,
+      tags: normalized.tags,
+    }, job.revalidateSeconds * 2);
+  } catch (error) {
+    // 失败：保留旧缓存不动
+    logger.error('重验证失败，保留旧缓存', { key: job.key, error });
+  } finally {
+    if (timeoutHandle !== undefined) {
+      clearTimeout(timeoutHandle);
+      this.activeTimers.delete(timeoutHandle);
+    }
+    this.activeKeys.delete(job.key);
+    this.activeCount--;
+    this.processQueue(); // 处理下一个任务
+  }
 }
 ```
 
@@ -163,7 +175,7 @@ async close() {
     clearTimeout(timer);
   }
   this.activeTimers.clear();
-  this.queue.length = 0;
+  this.pendingQueue.length = 0;
   this.pendingKeys.clear();
 }
 ```
@@ -363,11 +375,7 @@ Redis Store:   SADD prefix:tag:product:123 key1 key2 key3
 ```typescript
 // ISRManager.invalidateByTag()
 async invalidateByTag(tag: string): Promise<number> {
-  const keys = await this.store.getKeysByTag(tag);
-  for (const key of keys) {
-    await this.store.delete(key);
-  }
-  return keys.length; // 返回失效条目数
+  return this.cacheStore.invalidateByTag(tag);
 }
 ```
 
@@ -385,7 +393,7 @@ export async function getStaticProps(context) {
 }
 ```
 
-ISRRenderer 从路由的 `meta.cacheTags` 或 `context.extra.cacheTags` 中提取 tags，存入缓存条目。
+当前主链路里，缓存标签主要来自渲染结果或中间件状态，最终由 ISR 中间件/Manager 写入 `CacheStore`。不同 Store 各自维护 tag 反向索引，`ISRManager.invalidateByTag()` 只负责委托给 `cacheStore.invalidateByTag(tag)`。
 
 **源码参考：**
 - `packages/server/src/isr/isr-manager.ts` — invalidateByTag()
@@ -411,14 +419,16 @@ ISR 缓存未命中时，需要后台重验证。Nami 的 `revalidateByInternalR
           → 无限循环！
 ```
 
-### 解决方案：请求头标记
+### 解决方案：请求头标记 + 来源校验
 
 ```typescript
 // 后台重验证时，添加特殊请求头
-async function revalidateByInternalRequest(url: string) {
-  const response = await fetch(url, {
+async function revalidateByInternalRequest(ctx) {
+  const response = await fetch(internalURL, {
     headers: {
-      'X-Nami-ISR-Revalidate': '1',  // 标记这是重验证请求
+      'x-nami-isr-revalidate': '1',  // 标记这是重验证请求
+      'x-nami-isr-revalidate-token': process.env.NAMI_ISR_REVALIDATE_TOKEN,
+      'X-Requested-With': 'nami-isr-revalidate',
     },
   });
   return response.text();
@@ -428,8 +438,8 @@ async function revalidateByInternalRequest(url: string) {
 ```typescript
 // ISR 缓存中间件检查这个头
 function isrCacheMiddleware(ctx, next) {
-  // 如果是重验证请求，跳过缓存层直接渲染
-  if (ctx.headers['x-nami-isr-revalidate'] === '1') {
+  // 如果是校验通过的内部重验证请求，跳过缓存层直接渲染
+  if (isInternalRevalidateRequest(ctx, config)) {
     ctx.set('X-Nami-Cache', 'BYPASS');
     await next(); // 直接进入渲染中间件
     return;
@@ -445,8 +455,8 @@ function isrCacheMiddleware(ctx, next) {
 用户请求 GET /products/123
   → ISR 中间件：缓存 Stale
   → 返回旧缓存给用户（X-Nami-Cache: STALE）
-  → 后台发起内部请求 GET /products/123 + X-Nami-ISR-Revalidate: 1
-    → ISR 中间件：检测到 Revalidate 头 → BYPASS 缓存
+  → 后台发起内部请求 GET /products/123 + x-nami-isr-revalidate: 1
+    → ISR 中间件：校验 header、可信本机来源和可选 token → BYPASS 缓存
     → 直接进入渲染中间件 → getStaticProps() → renderToString()
     → 返回新 HTML
   → 新 HTML 写入缓存
@@ -454,8 +464,7 @@ function isrCacheMiddleware(ctx, next) {
 ```
 
 **源码参考：**
-- `packages/server/src/middleware/isr-cache-middleware.ts` — bypass 检查（154-157 行）
-- `packages/server/src/middleware/isr-cache-middleware.ts` — revalidateByInternalRequest()（278-302 行）
+- `packages/server/src/middleware/isr-cache-middleware.ts` — 内部重验证校验与 revalidateByInternalRequest()
 
 ---
 
@@ -465,8 +474,23 @@ function isrCacheMiddleware(ctx, next) {
 
 ### 缓存 Key 生成
 
+这里要区分两条路径：
+
+- 服务端 ISR 缓存中间件默认使用 `ctx.path` 作为 key，不包含 query、Cookie、Header。
+- `packages/core/src/renderer/isr-renderer.ts` 里还有一套基于 `RenderContext` 的 `buildCacheKey()`，会把 query 排序后拼入 key；它只对使用该 renderer 内部缓存路径的场景成立。
+
 ```typescript
-function generateCacheKey(context: RenderContext): string {
+// packages/server/src/middleware/isr-cache-middleware.ts
+function defaultGenerateCacheKey(ctx: Koa.Context): string {
+  return ctx.path;
+}
+```
+
+如果你的 ISR 页面内容依赖 query，生产服务端应通过 `generateCacheKey(ctx)` 自定义 key。否则 `/search?q=a` 和 `/search?q=b` 默认会共享同一份 HTML。
+
+```typescript
+// packages/core/src/renderer/isr-renderer.ts 的内部 key 思路
+function buildCacheKey(context: RenderContext): string {
   let key = context.path;
 
   // 将查询参数排序后拼接
@@ -499,10 +523,11 @@ key = "/search?brand=apple&category=phone"
 
 ### 额外的 Key 优化
 
-ISR 缓存 key 还会忽略某些不影响页面内容的参数（如 `utm_source`、`fbclid`），避免营销追踪参数导致缓存碎片化。
+当前仓库没有内置忽略 `utm_source`、`fbclid` 这类营销参数的逻辑。如果需要这类优化，应在自定义 `generateCacheKey(ctx)` 中显式实现。
 
 **源码参考：**
-- `packages/core/src/renderer/isr-renderer.ts` — 缓存 key 生成逻辑
+- `packages/server/src/middleware/isr-cache-middleware.ts` — 服务端默认缓存 key
+- `packages/core/src/renderer/isr-renderer.ts` — renderer 内部缓存 key
 
 ---
 
@@ -589,47 +614,47 @@ keyToFilename(key: string): string {
 
 ```typescript
 // ISRManager.warmup()
-async warmup(routes: WarmupRoute[]): Promise<WarmupResult> {
+async warmup(
+  routes: string[],
+  renderFn: (path: string) => Promise<string>,
+): Promise<void> {
   let successCount = 0;
   let failCount = 0;
 
   for (const route of routes) {
     try {
-      const html = await route.renderFn(); // 执行渲染
-      await this.cacheStore.set(route.key, {
-        html,
+      const html = await renderFn(route); // 执行渲染
+      await this.cacheStore.set(route, {
+        content: html,
         createdAt: Date.now(),
-        tags: route.tags || [],
-      });
+        revalidateAfter: this.config.defaultRevalidate,
+        tags: [],
+        etag: generateETag(html),
+      }, this.config.defaultRevalidate * 2);
       successCount++;
     } catch (error) {
-      logger.warn('预热失败', { path: route.path, error });
+      logger.error('预热失败', { route, error });
       failCount++;
       // 单页面预热失败不影响其他页面
     }
   }
 
   logger.info(`缓存预热完成: ${successCount} 成功, ${failCount} 失败`);
-  return { successCount, failCount, duration };
 }
 ```
 
 ### 配置
 
 ```typescript
-// nami.config.ts
-isr: {
-  warmup: [
-    '/',               // 首页
-    '/products/hot',   // 热门商品页
-    '/categories',     // 分类页
-  ],
-}
+await isrManager.warmup(
+  ['/', '/products/hot', '/categories'],
+  async (path) => await renderPage(path),
+);
 ```
 
 ### 预热时机
 
-在 `onServerStart` 钩子中执行，服务器已经绑定端口但还没有接收请求（或者在 K8s readinessProbe 通过之前）。
+当前仓库提供的是 `ISRManager.warmup(routes, renderFn)` 方法，不是内置的 `nami.config.ts isr.warmup` 配置项自动执行链路。需要预热时，可以在服务启动后的自定义代码或插件生命周期里调用它；若要避免冷流量打进来，应配合 readinessProbe 或外层发布流程控制接流时机。
 
 **源码参考：**
 - `packages/server/src/isr/isr-manager.ts` — warmup()

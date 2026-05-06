@@ -46,8 +46,8 @@
    └────┬─────┘ └──────────┘ │ shutdown → timing →   │
         │                    │ security → context →   │
         ▼                    │ health → static →      │
-   ┌──────────┐              │ dataPrefetch → user →  │
-   │ dist/    │              │ plugin → errorIso →    │
+   ┌──────────┐              │ user → plugin →        │
+   │ dist/    │              │ data → errorIso         │
    │ client/  │              │ ISR cache → render     │
    │ server/  │              └───────────┬───────────┘
    └──────────┘                          ▼

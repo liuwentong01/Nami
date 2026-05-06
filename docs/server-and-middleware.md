@@ -189,7 +189,10 @@ ctx.set('X-Response-Time', `${durationMs.toFixed(2)}ms`);
 ```typescript
 await next();
 
-if (typeof ctx.state.namiCacheControl === 'string') {
+if (
+  typeof ctx.state.namiCacheControl === 'string'
+  && ctx.state.namiCacheControl.length > 0
+) {
   ctx.set('Cache-Control', ctx.state.namiCacheControl);
 }
 
@@ -227,7 +230,9 @@ frame-ancestors 'self'
 
 `'unsafe-inline'` 和 `'unsafe-eval'` 是为了兼容 SSR 注水脚本、开发调试和部分运行时需求。生产项目如果有更严格安全要求，应通过 `securityMiddleware(options)` 的 `csp` / `cspEnabled` 等选项收紧策略。
 
-`Cache-Control` 不是在安全中间件里计算的。ISR 中间件或渲染结果会把最终缓存语义挂到 `ctx.state.namiCacheControl`，`securityMiddleware` 在出站阶段再兜底回写一次，避免更内层的历史逻辑覆盖了核心缓存协议。
+`Strict-Transport-Security` 当前默认会在响应阶段统一写入，没有额外判断 `ctx.secure`。它通常只在 HTTPS 访问下被浏览器采纳；纯 HTTP 本地调试时即使响应里存在该头，也不代表浏览器会建立 HSTS 策略。
+
+`Cache-Control` 不是在安全中间件里计算的。ISR 中间件或渲染结果会把最终缓存语义挂到 `ctx.state.namiCacheControl`，`securityMiddleware` 在出站阶段再兜底回写一次，避免更内层的历史逻辑覆盖了核心缓存协议。只有非空字符串会被回写，空字符串不会覆盖已有响应头。
 
 ### ④ `requestContextMiddleware`：请求上下文与日志链路
 
@@ -530,11 +535,11 @@ errorIsolation
 - `packages/server/src/isr/isr-manager.ts`
 - `packages/server/src/isr/stale-while-revalidate.ts`
 
-这个中间件只在 `config.isr.enabled` 为 `true` 时注册。它只处理普通页面 `GET` 请求，并且会跳过内部重验证请求：
+这个中间件只在 `config.isr.enabled` 为 `true` 时注册。它只处理普通页面 `GET` 请求，并且会跳过校验通过的内部重验证请求：
 
 ```typescript
 if (ctx.method !== 'GET') await next();
-if (ctx.get(NAMI_ISR_REVALIDATE_HEADER) === '1') await next();
+if (isInternalRevalidateRequest(ctx, config)) await next();
 ```
 
 内部重验证请求头来自 `@nami/shared`：
@@ -616,16 +621,19 @@ isrManager.getOrRevalidate(cacheKey, renderFn, revalidateSeconds, backgroundReva
 Stale 状态下，中间件不会直接在当前请求里重新渲染，而是通过 `revalidateByInternalRequest(ctx)` 发起一次内部 GET 请求：
 
 ```typescript
-fetch(currentUrl, {
+fetch(internalURL, {
   method: 'GET',
   headers: {
     [NAMI_ISR_REVALIDATE_HEADER]: '1',
+    'x-nami-isr-revalidate-token': process.env.NAMI_ISR_REVALIDATE_TOKEN,
     'X-Requested-With': 'nami-isr-revalidate',
   },
 });
 ```
 
-该请求带有 `x-nami-isr-revalidate: 1`，所以再次经过 ISR 中间件时会绕过缓存层，直接进入渲染中间件生成新 HTML，避免“后台重验证又命中 stale 缓存”的循环。
+内部 URL 不使用浏览器入站请求的 `Host`。源码会把监听 host 规范化为本机地址（例如 `0.0.0.0`/`::` 会使用 `127.0.0.1`），端口优先取 `config.server.port`，否则取当前 socket 的本地端口，并拼接当前请求的 path 和 querystring。
+
+该请求带有 `x-nami-isr-revalidate: 1`，但再次经过 ISR 中间件时还需要满足可信来源校验：请求源 IP 必须是回环地址或与明确配置的本机 host 匹配；如果配置了 `NAMI_ISR_REVALIDATE_TOKEN`，还必须携带匹配的 token。校验通过后才会绕过缓存层，直接进入渲染中间件生成新 HTML，避免“后台重验证又命中 stale 缓存”的循环。
 
 缓存查询失败时，ISR 中间件不会让页面失败，而是降级为直接 `await next()` 渲染，并设置：
 
@@ -1042,6 +1050,7 @@ webpack-dev-middleware
 | 停机感知 | 注册 `shutdownAware` | 不注册 |
 | 优雅停机 | `startServer()` 按配置注册 | `DevServer.close()` 手动关闭 watcher 和 HTTP server |
 | ISR 缓存 | `config.isr.enabled` 时注册 | 不注册 ISR 缓存层 |
+| 用户/插件 Koa 中间件 | 注册 `config.server.middlewares` 和插件 `addServerMiddleware()` | 默认不注册这两类中间件 |
 | server bundle 更新 | 启动时注入或由运行时提供 | 可通过 `runtimeProvider` 每请求读取最新 runtime |
 
 ### Webpack dev middleware

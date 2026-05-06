@@ -158,9 +158,9 @@ security
 requestContext
 healthCheck
 staticServe
-dataPrefetch
 用户 middlewares
 插件 middlewares
+dataPrefetch
 errorIsolation
 isrCacheMiddleware
 renderMiddleware
@@ -169,7 +169,7 @@ renderMiddleware
 由此可以得到几个边界：
 
 1. `errorIsolation` 只包住它后面的 `isrCacheMiddleware` 和 `renderMiddleware`。
-2. `dataPrefetch`、用户自定义中间件、插件 server middleware 在 `errorIsolation` 之前，它们抛出的异常不会被 `errorIsolation` 的 500 HTML 捕获。
+2. 用户自定义中间件、插件 server middleware、`dataPrefetch` 都在 `errorIsolation` 之前；它们抛出的异常不会被 `errorIsolation` 的 500 HTML 捕获。
 3. `renderMiddleware` 内部有自己的 `try/catch`，渲染失败通常会先走降级，不会再抛到 `errorIsolation`。
 4. Koa 的全局 `app.on('error')` 是兜底日志通道，不负责构造 Nami 的降级 HTML。
 
@@ -240,10 +240,12 @@ catch error
 renderer = RendererFactory.create({
   mode: RenderMode.CSR,
   config,
+  pluginManager,
+  assetManifest,
 });
 ```
 
-这里降级到 CSR，但没有传 `pluginManager`。因此创建渲染器失败后的兜底渲染，与正常路径的插件钩子行为不同。
+这里降级到 CSR，并会传入 `pluginManager` 和中间件闭包里的 `assetManifest`。需要注意的是：如果开发模式下 `runtimeProvider` 刚读到了更新的 manifest，创建失败的兜底路径不会再使用这份 runtime manifest，而是使用中间件初始化时传入的 manifest。
 
 ### 渲染失败
 
@@ -457,6 +459,8 @@ export const DEFAULT_FALLBACK_CONFIG = {
 | `timeout` | 否 | 有默认值与校验，但降级管理器和 renderer 超时逻辑不读取它 |
 
 SSR/Streaming SSR 的超时来自 `config.server.ssrTimeout`，不是 `fallback.timeout`。
+
+`createNamiServer()` 初始化 `DegradationManager` 时会传入 `publicPath` 和可选的 `assetManifest`。因此 CSR 降级页是否能引用真实 content hash 资源，取决于启动链路是否把 `assetManifest` 注入到 `createNamiServer`。
 
 ---
 

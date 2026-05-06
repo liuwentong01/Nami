@@ -143,9 +143,9 @@ security
 requestContext
 healthCheck
 staticServe
-dataPrefetch
 用户 middlewares
 插件 middlewares
+dataPrefetch
 errorIsolation
 isrCacheMiddleware     仅 isr.enabled 时注册
 renderMiddleware
@@ -169,7 +169,7 @@ renderMiddleware
 非 GET
   -> next()
 
-GET + x-nami-isr-revalidate: 1
+GET + x-nami-isr-revalidate: 1 + 可信本机来源 + 可选 token 校验通过
   -> next()，绕过缓存
 
 GET + 匹配 ISR 路由 + isr.enabled

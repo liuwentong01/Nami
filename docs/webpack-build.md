@@ -640,6 +640,8 @@ builder.createWebpackConfig(target, 'production', { analyze: true })
 
 它生成单个目标的 Webpack 配置并直接编译，不走 `builder.build()` 的完整流程，因此不会执行双任务并行、SSG 和 `nami-manifest.json` 生成。
 
+但它并不是完全绕过构建前上下文。`builder.createWebpackConfig()` 内部仍会先执行 `prepareBuildContext()`，因此插件初始化、`modifyRoutes` 以及后续 `modifyWebpackConfig` 仍可能影响分析用的 webpack 配置。
+
 `nami analyze` 会同时检查 webpack callback 的 `err` 和 `stats.hasErrors()`。只要 compilation 内存在错误，就会走失败分支，不会继续提示“分析报告已生成”。
 
 ### `nami dev`

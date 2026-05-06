@@ -18,7 +18,7 @@ SSR 需要在 Node.js 中执行 React 组件生成 HTML。但服务端代码和�
 | CSS 处理 | 提取为独立 `.css` 文件 | `asset/source`（返回 CSS 字符串） |
 | Tree-shaking | 需要（减小下载体积、提升长期缓存命中） | 不是核心目标（产物不走网络传输，且大量依赖已 external） |
 | Externals | 无（所有依赖打包进 Bundle） | `webpack-node-externals`（node_modules 运行时 require） |
-| 数据预取函数 | 被替换为空实现（安全） | 保留原始实现 |
+| 数据预取函数 | 目标是替换为空实现；当前默认 TS rule 未自动接入 `data-fetch-loader`，需要项目或插件显式接入 | 保留原始实现 |
 | 目标 | `target: 'web'` | `target: 'node'` |
 
 ### Server Bundle 为什么不做代码分割？
@@ -122,7 +122,9 @@ dist/
 
 ### 作用
 
-data-fetch-loader 在**客户端构建**时，会把 `getServerSideProps`、`getStaticProps`、`getStaticPaths` 这些**只应在服务端/构建期执行**的函数替换为空实现。
+data-fetch-loader 的职责是在**客户端构建**时，把 `getServerSideProps`、`getStaticProps`、`getStaticPaths` 这些**只应在服务端/构建期执行**的函数替换为空实现。
+
+需要先说明当前状态：仓库里已经实现了 `packages/webpack/src/loaders/data-fetch-loader.ts`，但默认 `createTypeScriptRule()` 只使用 `ts-loader`，没有自动串联这个 loader。因此下面描述的是该 loader 被显式接入客户端构建后的安全效果；如果没有接入，不能假设数据函数一定已经从客户端 bundle 中剥离。
 
 这里要区分两类"数据获取"：
 - `getServerSideProps / getStaticProps / getStaticPaths`：是 **SSR / SSG / ISR 协议**，由服务端或构建阶段执行
@@ -344,18 +346,19 @@ function detectDataFetchFunctions(source: string) {
 ```typescript
 // packages/webpack/src/optimization/split-chunks.ts
 cacheGroups: {
-  'react-vendor': {
-    test: /[\\/]node_modules[\\/](react|react-dom|react-router-dom|scheduler)/,
-    name: 'react-vendor',
+  react: {
+    test: /[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/,
+    name: 'vendor-react',
     chunks: 'all',
     priority: 30,        // 最高优先级
+    enforce: true,
   },
   vendor: {
     test: /[\\/]node_modules[\\/]/,
     name: 'vendor',
     chunks: 'all',
     priority: 20,
-    minSize: 10000,      // 只分离 >10KB 的依赖
+    minSize: 30 * 1024,  // 只分离 >=30KB 的依赖
   },
   commons: {
     minChunks: 2,        // 被 2+ chunk 引用
@@ -370,7 +373,7 @@ cacheGroups: {
 
 ```
 1. runtime.[hash].js       — Webpack 运行时代码（~2KB）
-2. react-vendor.[hash].js  — React 全家桶（~140KB gzipped）
+2. vendor-react.[hash].js  — React / ReactDOM / scheduler
 3. vendor.[hash].js        — 其他 node_modules 依赖
 4. commons.[hash].js       — 被多页面共享的业务代码
 5. page-*.[hash].js        — 每个路由独立的 chunk
@@ -382,8 +385,8 @@ cacheGroups: {
 
 React 的版本在项目中很少变化。把它单独分出来意味着：
 
-1. 更新业务代码时，`react-vendor.[hash].js` 的 hash 不变 → 浏览器缓存继续有效
-2. 更新其他第三方依赖时，`react-vendor.[hash].js` 也不变
+1. 更新业务代码时，`vendor-react.[hash].js` 的 hash 不变 → 浏览器缓存继续有效
+2. 更新其他第三方依赖时，`vendor-react.[hash].js` 也不变
 3. 只有升级 React 版本时，这个 chunk 才需要重新下载
 
 **量化收益：**
@@ -487,7 +490,7 @@ resolveAssets() {
 // packages/webpack/src/configs/base.config.ts
 cache: {
   type: 'filesystem',
-  cacheDirectory: path.join(cacheDir, isDev ? 'dev' : 'prod'),
+  cacheDirectory: path.resolve(projectRoot, 'node_modules/.cache/webpack', isDev ? 'dev' : 'prod'),
   version: createContentHash(config),
 }
 ```
@@ -506,14 +509,18 @@ Webpack 5 的 filesystem cache 将编译结果缓存到磁盘：
 ```typescript
 function createContentHash(config: NamiConfig): string {
   const configStr = JSON.stringify({
-    routes: config.routes,
-    renderMode: config.defaultRenderMode,
-    plugins: config.plugins?.map(p => p.name),
-    // ... 其他影响构建的配置
+    appName: config.appName,
+    srcDir: config.srcDir,
+    outDir: config.outDir,
+    publicPath: config.assets.publicPath,
+    defaultRenderMode: config.defaultRenderMode,
+    routes: config.routes?.map((r) => r.path),
   });
-  return crypto.createHash('md5').update(configStr).digest('hex');
+  return crypto.createHash('md5').update(configStr).digest('hex').slice(0, 8);
 }
 ```
+
+注意：当前 hash 没有序列化插件完整配置或函数类配置项。插件如果改变 webpack 行为，通常应让自身修改后的 webpack 配置参与最终编译，而不要假设这里的 cache version 会覆盖所有插件变化。
 
 配置变化 → hash 变化 → `version` 变化 → Webpack 认为缓存无效 → 完整重建。
 
@@ -530,7 +537,7 @@ rm -rf node_modules/.cache/webpack/
 #### 4. dev/prod 隔离
 
 ```typescript
-cacheDirectory: path.join(cacheDir, isDev ? 'dev' : 'prod')
+cacheDirectory: path.resolve(projectRoot, 'node_modules/.cache/webpack', isDev ? 'dev' : 'prod')
 ```
 
 开发模式和生产模式使用不同的缓存目录，互不干扰。因为两者的配置差异很大（如 devtool、optimization），复用缓存反而可能导致问题。

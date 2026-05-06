@@ -326,9 +326,9 @@ shutdownAware
   -> requestContext
   -> healthCheck
   -> staticServe
-  -> dataPrefetchMiddleware
   -> config.server.middlewares
   -> pluginManager.getServerMiddlewares()
+  -> dataPrefetchMiddleware
   -> errorIsolation
   -> isrCacheMiddleware
   -> renderMiddleware
@@ -338,7 +338,7 @@ shutdownAware
 
 | 事实 | 影响 |
 |------|------|
-| 插件中间件在 `dataPrefetchMiddleware` 后 | 插件中间件默认拦不到已被数据 API 短路的请求 |
+| 插件中间件在 `dataPrefetchMiddleware` 前 | 插件中间件可以先处理或拦截 `/_nami/data/*` 数据 API 请求，适合做鉴权、租户识别、请求上下文注入 |
 | 插件中间件在用户 `server.middlewares` 后 | 用户中间件先于插件中间件 |
 | 插件中间件在 `errorIsolation` 上游 | 插件中间件抛错不会被 `errorIsolationMiddleware` 捕获 |
 | 插件中间件顺序跟插件注册顺序一致 | `pre` 插件的中间件先执行，`post` 后执行 |

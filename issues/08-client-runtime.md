@@ -285,13 +285,22 @@ function ProductPage() {
 ```typescript
 // packages/client/src/data/use-nami-data.ts
 function useNamiData<T = any>(key?: string): T {
-  const allData = useMemo(() => {
+  const data = useMemo(() => {
     const serverData = readServerData(); // 首次读取后会在 data-hydrator 中缓存
-    return serverData.props ?? serverData;
+    const namiData = serverData.props ?? serverData;
+
+    if (!namiData) {
+      return EMPTY_OBJECT as T;
+    }
+
+    if (key) {
+      return namiData[key] as T;
+    }
+
+    return namiData as T;
   }, [key]);
 
-  if (key) return allData[key];
-  return allData;
+  return data;
 }
 ```
 
@@ -446,7 +455,7 @@ NamiApp
 
 **② NamiDataProvider**
 - React Context Provider，向子组件提供服务端注入的数据
-- 让 `useNamiData` Hook 能读取 SSR/ISR 预取的数据
+- 给应用树保留一份初始数据上下文；当前 `useNamiData` 的直接读取路径是 `data-hydrator.ts` 中的 `readServerData()` 快照，而不是从该 Context 中读取
 - 数据在整个组件树生命周期中保持稳定
 
 **③ NamiHead（默认）**
@@ -708,5 +717,4 @@ window.__NAMI_DATA__ = {"content":"line1\u2028line2"} // OK
 
 **源码参考：**
 - `packages/shared/src/utils/serialize.ts` — `safeStringify()` / `generateDataScript()`
-- `packages/core/src/data/serializer.ts`
 - `packages/client/src/head/nami-head.tsx` — `escapeHtml()`（HTML 属性值转义，对比脚本上下文）

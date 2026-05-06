@@ -292,7 +292,7 @@ SSR 支持两种服务端渲染入口：
 | `cookies` | `context.koaContext?.cookies ?? {}` |
 | `requestId` | 请求 ID |
 
-当前 HTML 渲染链路中，SSRRenderer 会把 `result.props ?? {}` 作为页面数据。它会在日志里记录 `redirect` / `notFound` 是否存在，但 HTML 链路没有把它们转换成 307/404 响应；`redirect` / `notFound` 的 HTTP 语义目前体现在 `dataPrefetchMiddleware` 的 JSON API 链路中。
+当前 HTML 渲染链路中，`SSRRenderer` 会先执行 `getServerSideProps`。如果返回 `redirect` 或 `notFound`，渲染器会在 React 渲染前短路，分别返回 30x 或 404；否则才把 `result.props ?? {}` 作为页面数据继续组装 HTML。Streaming SSR 也会在开始流式输出前处理这类早期结果，避免已经写出 shell 后再尝试改状态码。
 
 ### HTML 组装与注水
 
@@ -657,7 +657,7 @@ GET /_nami/data/blog/hello
 |------|--------------|--------------|
 | SSR 数据函数 | `SSRRenderer.prefetchData()` | `dataPrefetchMiddleware` 执行 |
 | SSG/ISR 数据函数 | 构建期或 ISR miss/revalidate 执行 | `dataPrefetchMiddleware` 执行 |
-| `redirect` / `notFound` | 当前 Renderer 主要只取 `props` | API 会转换为 307/308 或 404 |
+| `redirect` / `notFound` | SSR / Streaming SSR 会在渲染前短路为 30x / 404 | API 会转换为 307/308 或 404 |
 | 返回内容 | HTML / stream | JSON 或 204 |
 | 路径前缀 | 页面原始路径 | `/_nami/data` |
 
@@ -736,9 +736,9 @@ if (typeof renderContext.extra.__skeleton_fallback === 'string') {
 
 不是。它是客户端路由预取 JSON 的 API。HTML SSR 请求的数据预取发生在 `SSRRenderer.prefetchData()` 中。
 
-### 误区四：HTML 链路会自动处理 `redirect` / `notFound`
+### 误区四：所有渲染模式都会以同样方式处理 `redirect` / `notFound`
 
-当前 Renderer 的 HTML 链路主要使用数据函数返回的 `props`；`redirect` / `notFound` 的 HTTP 响应处理在 `dataPrefetchMiddleware` 中更完整。写业务时不要假设 HTML SSR 已经完全等同 Next.js 的语义。
+SSR 和 Streaming SSR 的 HTML 链路会把 `getServerSideProps` 的 `redirect` / `notFound` 转成 HTTP 响应；数据预取 API 也会返回对应 JSON/状态码。SSG/ISR 仍要结合构建期、缓存层和具体 renderer 的执行时机理解，不要把所有模式都简单等同于 Next.js 的完整语义。
 
 ### 误区五：ISR 默认按完整 URL 缓存
 

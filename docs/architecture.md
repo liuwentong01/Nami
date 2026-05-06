@@ -157,13 +157,13 @@ RouteManager
     │           │                                               │
     │  ⑤  healthCheck  ─ path === /_health? → 短路返回           │
     │           │                                               │
-    │  ⑥  staticServe  ─ 匹配 dist/client 静态文件? → 短路返回    │
+    │  ⑥  staticServe  ─ defer 到下游，未处理时尝试发静态文件       │
     │           │                                               │
-    │  ⑦  dataPrefetch  ─ path 以 /_nami/data 开头? → JSON 返回  │
+    │  ⑦  [用户中间件]  ─ config.server.middlewares              │
     │           │                                               │
-    │  ⑧  [用户中间件]  ─ config.server.middlewares              │
+    │  ⑧  [插件中间件]  ─ pluginManager.getServerMiddlewares()   │
     │           │                                               │
-    │  ⑨  [插件中间件]  ─ pluginManager.getServerMiddlewares()   │
+    │  ⑨  dataPrefetch  ─ path 以 /_nami/data 开头? → JSON 返回  │
     │           │                                               │
     │  ⑩  errorIsolation  ─ try/catch 包裹下游                   │
     │           │                                               │
@@ -205,7 +205,7 @@ renderer.render() 失败
         │ 没有
         ▼
 DegradationManager.executeWithDegradation()
-  Level 0: 已失败
+  Level 0: 再尝试传入的正常 renderFn
   Level 1: 重试 (maxRetries 次)
   Level 2: CSR 降级（空壳 HTML + JS/CSS）
   Level 3: 骨架屏（route.skeleton 配置）
@@ -558,7 +558,7 @@ renderToString(<App data={data} />)       hydrateRoot(<App data={data} />)
 
 ### 服务端代码剥离
 
-Webpack 的 `data-fetch-loader` 在客户端构建时将 `getServerSideProps`、`getStaticProps`、`getStaticPaths` 替换为空实现，防止敏感服务端逻辑进入浏览器 Bundle。 
+`packages/webpack/src/loaders/data-fetch-loader.ts` 提供了将 `getServerSideProps`、`getStaticProps`、`getStaticPaths` 替换为空实现的能力，用于防止敏感服务端逻辑进入浏览器 Bundle。需要注意：当前默认 TypeScript 规则只接入 `ts-loader`，没有自动串联 `data-fetch-loader`。如果项目依赖这层剥离，需要通过 `config.webpack.client` 或插件的 `modifyWebpackConfig` 显式把 loader 接入客户端构建。
 
 ### 客户端 Bundle 瘦身
 

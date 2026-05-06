@@ -171,7 +171,8 @@ export default function Home({ title, items }: HomeProps) {
 /**
  * 服务端数据预取函数
  *
- * - 仅在服务端执行，不会进入客户端 Bundle
+ * - 运行语义上仅应在服务端执行
+ * - 如需确保实现不进入客户端 Bundle，需要在客户端构建中接入 data-fetch-loader 或等价剥离逻辑
  * - 每次请求都会调用
  * - 返回的 props 会注入到组件 props 中
  * - 也会被序列化到 HTML 中供客户端 Hydration 读取
@@ -325,7 +326,8 @@ pnpm nami start
 
 # 静态页面生成（仅 SSG/ISR 路由）
 pnpm nami generate
-# 可选 --route /blog/hello 仅生成指定路由
+# 可选 --route '/blog/:slug' 仅生成指定路由配置项
+# 注意参数匹配的是 nami.config.ts 中的 route.path，而不是某个具象 URL
 
 # 包分析 — 可视化 Bundle 组成，帮助优化包体积
 pnpm nami analyze

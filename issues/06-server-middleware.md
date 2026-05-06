@@ -18,9 +18,9 @@
 ④ requestContext ── 生成 requestId, logger      │
 ⑤ healthCheck ──── /_health? → 短路返回        │
 ⑥ staticServe ──── 匹配静态文件? → 短路返回     │
-⑦ dataPrefetch ─── /_nami/data/*? → JSON        │
-⑧ [用户中间件] ── config.server.middlewares     │
-⑨ [插件中间件] ── pluginManager 收集           │
+⑦ [用户中间件] ── config.server.middlewares     │
+⑧ [插件中间件] ── pluginManager 收集           │
+⑨ dataPrefetch ─── /_nami/data/*? → JSON        │
 ⑩ errorIsolation ─ try/catch 包裹下游          │
 ⑪ isrCacheMiddleware ── 缓存命中? → 短路       │
 ⑫ renderMiddleware ── 核心渲染逻辑             │
@@ -36,8 +36,8 @@
 | ④ | requestContext | 后续所有中间件可使用 `ctx.state.requestId` 和 `ctx.state.logger` |
 | ⑤ | healthCheck | K8s 探针**不需要经过**后续渲染流程，尽早短路 |
 | ⑥ | staticServe | 静态资源直接返回，**不进入渲染**（节省服务器资源） |
-| ⑦ | dataPrefetch | `/_nami/data/*` 数据 API 请求短路返回 JSON，不需要渲染 HTML |
-| ⑧⑨ | 用户/插件 | 在 errorIsolation **之前**：自身错误由 Koa 全局 `app.on('error')` 兜底 |
+| ⑦⑧ | 用户/插件 | 在 `dataPrefetch` 和 `errorIsolation` **之前**：可先做鉴权/上下文注入；自身错误由 Koa 全局 `app.on('error')` 兜底 |
+| ⑨ | dataPrefetch | `/_nami/data/*` 数据 API 请求在经过用户/插件中间件后短路返回 JSON，不需要渲染 HTML |
 | ⑩ | errorIsolation | **保护 ISR + 渲染层**：500 不崩进程 |
 | ⑪ | isrCache | **在渲染之前**：缓存命中直接返回，跳过昂贵的渲染操作 |
 | ⑫ | render | 核心渲染逻辑，最内层 |
