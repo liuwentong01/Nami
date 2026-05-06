@@ -54,6 +54,7 @@ export { ErrorReporter } from './error/error-reporter';
 export { DocumentTemplate } from './html/document';
 export { HeadManager } from './html/head-manager';
 export { ScriptInjector } from './html/script-injector';
+export type { AssetManifest, ScriptAttributes } from './html/script-injector';
 
 // 模块加载器
 export { ModuleLoader } from './module';

@@ -89,7 +89,14 @@ const prefetchedPaths = new Set<string>();
  */
 function extractPath(to: LinkProps['to']): string {
   if (typeof to === 'string') return to;
-  return to.pathname ?? '/';
+  const pathname = to.pathname ?? '/';
+  const search = to.search
+    ? (to.search.startsWith('?') ? to.search : `?${to.search}`)
+    : '';
+  const hash = to.hash
+    ? (to.hash.startsWith('#') ? to.hash : `#${to.hash}`)
+    : '';
+  return `${pathname}${search}${hash}`;
 }
 
 // ==================== 组件实现 ====================

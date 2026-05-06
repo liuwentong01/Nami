@@ -96,6 +96,9 @@ export class ISRManager {
   /** SWR 策略配置 */
   private readonly swrOptions: SWROptions;
 
+  /** 同一缓存键的同步渲染合并，避免冷启动或过期瞬间并发放大 */
+  private readonly inFlightRenders = new Map<string, Promise<ISRCacheResult>>();
+
   constructor(
     config: ISRConfig,
     cacheStore: CacheStore,
@@ -228,8 +231,28 @@ export class ISRManager {
     }
 
     // ===== 3. 缓存未命中 — 同步渲染并缓存结果 =====
-    logger.info('ISR 缓存未命中，执行同步渲染', { key });
+    const existingRender = this.inFlightRenders.get(key);
+    if (existingRender) {
+      logger.info('ISR 同步渲染已在进行，复用同 key 结果', { key });
+      return existingRender;
+    }
 
+    logger.info('ISR 缓存未命中，执行同步渲染', { key });
+    const renderPromise = this.renderAndCache(key, renderFn, effectiveRevalidate);
+    this.inFlightRenders.set(key, renderPromise);
+
+    try {
+      return await renderPromise;
+    } finally {
+      this.inFlightRenders.delete(key);
+    }
+  }
+
+  private async renderAndCache(
+    key: string,
+    renderFn: () => Promise<ISRRenderPayload | string>,
+    effectiveRevalidate: number,
+  ): Promise<ISRCacheResult> {
     try {
       const payload = await renderFn();
       const { html, tags } = normalizeRenderPayload(payload);

@@ -45,6 +45,7 @@ import type { NamiConfig, NamiPlugin, Logger } from '@nami/shared';
 import { createLogger } from '@nami/shared';
 import { PluginManager, PluginLoader } from '@nami/core';
 import { DegradationManager } from '@nami/core';
+import path from 'path';
 
 // 中间件
 import { timingMiddleware } from './middleware/timing';
@@ -61,7 +62,12 @@ import { createShutdownAwareMiddleware } from './middleware/graceful-shutdown';
 // ISR
 import { createCacheStore } from './isr/cache-store';
 import { ISRManager } from './isr/isr-manager';
-import type { AppElementFactory, HTMLRenderer, ModuleLoaderLike } from '@nami/core';
+import type {
+  AppElementFactory,
+  HTMLRenderer,
+  ModuleLoaderLike,
+  AssetManifest,
+} from '@nami/core';
 
 /** 模块级日志实例 */
 const logger: Logger = createLogger('@nami/server:app');
@@ -110,6 +116,14 @@ export interface CreateServerOptions {
   moduleLoader?: ModuleLoaderLike;
 
   /**
+   * 构建产物资源清单
+   *
+   * 服务端渲染 HTML 时用它注入真实的 JS/CSS 文件名，
+   * 尤其是生产构建中的 contenthash 文件。
+   */
+  assetManifest?: AssetManifest;
+
+  /**
    * 开发模式动态运行时提供器
    *
    * 当 server bundle 持续重编译时，通过该函数按请求读取最新 runtime，
@@ -119,6 +133,7 @@ export interface CreateServerOptions {
     appElementFactory?: AppElementFactory;
     htmlRenderer?: HTMLRenderer;
     moduleLoader?: ModuleLoaderLike;
+    assetManifest?: AssetManifest;
   }>;
 
   /**
@@ -201,6 +216,7 @@ export async function createNamiServer(
   // ===== 3. 初始化降级管理器 =====
   const degradationManager = new DegradationManager({
     publicPath: config.assets.publicPath,
+    assetManifest: options.assetManifest,
   });
 
   // ===== 4. 初始化 ISR 管理器（如果启用） =====
@@ -263,19 +279,10 @@ export async function createNamiServer(
    * 中间件 5: 静态资源服务
    * 处理 JS/CSS/图片等静态文件请求
    */
-  app.use(staticServeMiddleware());
-  appLogger.debug('中间件已注册: staticServe');
-
-  /**
-   * 中间件 5.1: 路由数据预取接口
-   * 为客户端 route prefetch 提供与页面级数据函数对齐的 JSON 入口
-   */
-  app.use(dataPrefetchMiddleware({
-    config,
-    moduleLoader: options.moduleLoader,
-    runtimeProvider: options.runtimeProvider,
+  app.use(staticServeMiddleware({
+    root: path.resolve(process.cwd(), config.outDir, 'client'),
   }));
-  appLogger.debug('中间件已注册: dataPrefetch');
+  appLogger.debug('中间件已注册: staticServe');
 
   /**
    * 中间件 5.5: 用户自定义中间件
@@ -299,6 +306,17 @@ export async function createNamiServer(
     }
     appLogger.debug(`插件中间件已注册: ${pluginMiddlewares.length} 个`);
   }
+
+  /**
+   * 中间件 6.5: 路由数据预取接口
+   * 放在用户/插件中间件之后，确保业务鉴权与拦截逻辑先执行。
+   */
+  app.use(dataPrefetchMiddleware({
+    config,
+    moduleLoader: options.moduleLoader,
+    runtimeProvider: options.runtimeProvider,
+  }));
+  appLogger.debug('中间件已注册: dataPrefetch');
 
   /**
    * 中间件 7: 错误隔离
@@ -330,6 +348,7 @@ export async function createNamiServer(
     appElementFactory: options.appElementFactory,
     htmlRenderer: options.htmlRenderer,
     moduleLoader: options.moduleLoader,
+    assetManifest: options.assetManifest,
     isrManager,
     runtimeProvider: options.runtimeProvider,
   }));

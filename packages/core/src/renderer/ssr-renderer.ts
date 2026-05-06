@@ -252,6 +252,10 @@ export class SSRRenderer extends BaseRenderer {
         errors: [],
         degraded: false,
         duration,
+        redirect: result.redirect,
+        notFound: result.notFound,
+        headers: result.headers,
+        cache: result.cache,
         details: [
           {
             key: 'getServerSideProps',
@@ -327,6 +331,43 @@ export class SSRRenderer extends BaseRenderer {
     // 将预取数据注入到渲染上下文中，供 React 组件读取
     context.initialData = prefetchResult.data as Record<string, unknown>;
 
+    if (prefetchResult.redirect) {
+      timing.htmlEnd = Date.now();
+      const statusCode = prefetchResult.redirect.statusCode
+        ?? (prefetchResult.redirect.permanent ? 308 : 307);
+      return this.createDefaultResult(
+        '',
+        statusCode,
+        RenderModeEnum.SSR,
+        timing,
+        {
+          headers: {
+            ...prefetchResult.headers,
+            Location: prefetchResult.redirect.destination,
+            'Cache-Control': 'private, no-cache',
+          },
+          degraded: prefetchResult.degraded,
+        },
+      );
+    }
+
+    if (prefetchResult.notFound) {
+      timing.htmlEnd = Date.now();
+      return this.createDefaultResult(
+        this.assembleHTML('', context),
+        404,
+        RenderModeEnum.SSR,
+        timing,
+        {
+          headers: {
+            ...prefetchResult.headers,
+            'Cache-Control': 'private, no-cache',
+          },
+          degraded: prefetchResult.degraded,
+        },
+      );
+    }
+
     // ========== 阶段二：服务端渲染 ==========
     timing.renderStart = Date.now();
     const renderedHTML = await this.renderAppHTML(context);
@@ -354,7 +395,8 @@ export class SSRRenderer extends BaseRenderer {
         headers: {
           // SSR 页面通常不应被 CDN 长时间缓存（数据实时性要求高）
           // 但可以设置短暂缓存以应对突发流量
-          'Cache-Control': 'private, no-cache',
+          'Cache-Control': this.buildCacheControl(prefetchResult.cache),
+          ...prefetchResult.headers,
         },
         degraded: prefetchResult.degraded,
         degradeReason: prefetchResult.degraded
@@ -439,6 +481,18 @@ export class SSRRenderer extends BaseRenderer {
     }
 
     return this.assembleHTML(renderedHTML, context);
+  }
+
+  private buildCacheControl(cache?: PrefetchResult['cache']): string {
+    if (!cache || cache.maxAge === undefined) {
+      return 'private, no-cache';
+    }
+
+    let value = `s-maxage=${cache.maxAge}`;
+    if (cache.staleWhileRevalidate !== undefined) {
+      value += `, stale-while-revalidate=${cache.staleWhileRevalidate}`;
+    }
+    return value;
   }
 
   /**

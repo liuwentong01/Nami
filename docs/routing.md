@@ -278,15 +278,15 @@ route.component
 
 默认 `componentResolver` 读取构建时生成的 `generatedComponentLoaders`。如果找不到对应 loader，会返回 rejected Promise，并记录“未找到路由组件加载器”。
 
-`NamiRouter` 内部有 `lazyComponentCache`，按 `componentPath` 缓存 `React.lazy` 包装结果，避免每次渲染重新创建 lazy 组件。
+`NamiRouter` 内部有 `lazyComponentCache`，按 `componentResolver + componentPath` 缓存 `React.lazy` 包装结果，避免每次渲染重新创建 lazy 组件，同时允许测试、HMR 或多应用场景替换 resolver 后拿到新的组件加载器。
 
 ### 客户端路由变化
 
-`RouteChangeListener` 使用 `useLocation()` 监听 `location.pathname`：
+`RouteChangeListener` 使用 `useLocation()` 监听完整的 `pathname + search + hash`：
 
 ```text
 from = previousPathRef.current
-to = location.pathname
+to = location.pathname + location.search + location.hash
 from !== to 时触发 onRouteChange({ from, to })
 ```
 
@@ -412,10 +412,10 @@ prefetchRoute(path)
 `NamiLink` 的 `to` 支持字符串或对象。对象形式下：
 
 ```typescript
-return to.pathname ?? '/';
+return `${to.pathname ?? '/'}${to.search ?? ''}${to.hash ?? ''}`;
 ```
 
-用于预取的路径只取 `pathname`，不包含 `search` 和 `hash`。
+用于预取的路径会包含 `search` 和 `hash`，因此对象形式 `to={{ pathname, search, hash }}` 与真实导航目标保持一致，预取去重也按完整目标计算。
 
 ---
 

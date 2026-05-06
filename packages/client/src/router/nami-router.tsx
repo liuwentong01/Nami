@@ -120,7 +120,10 @@ const defaultComponentResolver: ComponentResolver = (componentPath: string) => {
  * 避免每次路由切换时重新创建 lazy 包装器。
  * key 为组件路径，value 为 React.lazy 返回的组件。
  */
-const lazyComponentCache = new Map<string, React.LazyExoticComponent<React.ComponentType<unknown>>>();
+const lazyComponentCache = new WeakMap<
+  ComponentResolver,
+  Map<string, React.LazyExoticComponent<React.ComponentType<unknown>>>
+>();
 
 /**
  * 获取或创建懒加载组件
@@ -133,15 +136,25 @@ function getLazyComponent(
   componentPath: string,
   resolver: ComponentResolver,
 ): React.LazyExoticComponent<React.ComponentType<unknown>> {
+  let resolverCache = lazyComponentCache.get(resolver);
+  if (!resolverCache) {
+    resolverCache = new Map();
+    lazyComponentCache.set(resolver, resolverCache);
+  }
+
   // 命中缓存直接返回
-  const cached = lazyComponentCache.get(componentPath);
+  const cached = resolverCache.get(componentPath);
   if (cached) return cached;
 
   // 创建新的 lazy 组件并缓存
   const LazyComponent = React.lazy(resolver(componentPath));
-  lazyComponentCache.set(componentPath, LazyComponent);
+  resolverCache.set(componentPath, LazyComponent);
 
   return LazyComponent;
+}
+
+function formatLocation(location: ReturnType<typeof useLocation>): string {
+  return `${location.pathname}${location.search}${location.hash}`;
 }
 
 // ==================== 内部组件 ====================
@@ -157,19 +170,19 @@ const RouteChangeListener: React.FC<{
 }> = ({ onRouteChange }) => {
   const location = useLocation();
   /** 保存上一个路径，用于 from 参数 */
-  const previousPathRef = useRef(location.pathname);
+  const previousPathRef = useRef(formatLocation(location));
 
   useEffect(() => {
     const from = previousPathRef.current;
-    const to = location.pathname;
+    const to = formatLocation(location);
 
-    // 路径确实发生了变化
+    // 路径、查询参数或 hash 确实发生了变化
     if (from !== to) {
       logger.debug('路由变化', { from, to });
       onRouteChange?.({ from, to });
       previousPathRef.current = to;
     }
-  }, [location.pathname, onRouteChange]);
+  }, [location, onRouteChange]);
 
   return null;
 };

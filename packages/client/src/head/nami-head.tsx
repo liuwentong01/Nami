@@ -190,6 +190,17 @@ const NAMI_HEAD_ATTR = 'data-nami-head';
 const dedupeMap = new Map<string, HTMLElement>();
 
 /**
+ * 转义内联脚本的 HTML 结束标签，避免 SSR 输出跳出 <script> 上下文。
+ */
+function escapeScriptContent(value: string): string {
+  return value
+    .replace(/<\/script/gi, '<\\/script')
+    .replace(/<!--/g, '<\\!--')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
+/**
  * 获取 meta 标签的去重键
  */
 function getMetaDedupeKey(tag: MetaTag): string {
@@ -246,7 +257,7 @@ function createLinkElement(tag: LinkTag): HTMLLinkElement {
 function createScriptElement(tag: ScriptTag): HTMLScriptElement {
   const script = document.createElement('script');
   if (tag.src) script.src = tag.src;
-  if (tag.innerHTML) script.innerHTML = tag.innerHTML;
+  if (tag.innerHTML) script.text = tag.innerHTML;
   if (tag.type) script.type = tag.type;
   if (tag.async !== undefined) script.async = tag.async;
   if (tag.defer !== undefined) script.defer = tag.defer;
@@ -638,7 +649,7 @@ export function renderHeadToString(tags: CollectedHeadTags): string {
 
       const attrStr = attrs.length > 0 ? ` ${attrs.join(' ')}` : '';
       if (s.innerHTML) {
-        parts.push(`<script${attrStr}>${s.innerHTML}</script>`);
+        parts.push(`<script${attrStr}>${escapeScriptContent(s.innerHTML)}</script>`);
       } else {
         parts.push(`<script${attrStr}></script>`);
       }

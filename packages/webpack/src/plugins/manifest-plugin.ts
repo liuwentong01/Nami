@@ -56,7 +56,7 @@ export class NamiManifestPlugin {
         entrypoints: [],
       };
 
-      const publicPath = compilation.outputOptions.publicPath || '/';
+      const publicPath = String(compilation.outputOptions.publicPath || '/');
 
       // 收集所有资源文件
       for (const [name, source] of Object.entries(compilation.assets)) {
@@ -65,17 +65,17 @@ export class NamiManifestPlugin {
 
         // 确定逻辑名称（去除 hash 部分）
         const logicalName = name
-          .replace(/\.[a-f0-9]{8}\./, '.')
+          .replace(/\.[a-f0-9]{8,}\./i, '.')
           .replace(/^static\/(js|css)\//, '');
 
-        manifest.files[logicalName] = `${publicPath}${name}`.replace(/\/\//g, '/');
+        manifest.files[logicalName] = joinPublicPath(publicPath, name);
       }
 
       // 收集入口文件（按加载顺序）
       for (const [entryName, entrypoint] of compilation.entrypoints) {
         const files = entrypoint.getFiles().filter((f: string) => !f.endsWith('.map'));
         for (const file of files) {
-          const fullPath = `${publicPath}${file}`.replace(/\/\//g, '/');
+          const fullPath = joinPublicPath(publicPath, file);
           if (!manifest.entrypoints.includes(fullPath)) {
             manifest.entrypoints.push(fullPath);
           }
@@ -92,4 +92,16 @@ export class NamiManifestPlugin {
       callback();
     });
   }
+}
+
+function joinPublicPath(publicPath: string, assetPath: string): string {
+  if (/^https?:\/\//.test(assetPath) || assetPath.startsWith('//')) {
+    return assetPath;
+  }
+
+  if (/^https?:\/\//.test(publicPath) || publicPath.startsWith('//')) {
+    return `${publicPath.replace(/\/$/, '')}/${assetPath.replace(/^\//, '')}`;
+  }
+
+  return path.posix.join(publicPath || '/', assetPath);
 }

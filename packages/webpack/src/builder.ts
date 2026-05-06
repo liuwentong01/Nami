@@ -44,6 +44,58 @@ import { createProgressPlugin } from './plugins/progress-plugin';
 
 const logger = createLogger('@nami/webpack');
 
+function isOutsideDirectory(relativePath: string): boolean {
+  return relativePath === '..' || relativePath.startsWith(`..${path.sep}`);
+}
+
+function assertPathInsideDirectory(
+  baseDir: string,
+  targetPath: string,
+  description: string,
+): string {
+  const resolvedBase = path.resolve(baseDir);
+  const resolvedTarget = path.resolve(targetPath);
+  const relative = path.relative(resolvedBase, resolvedTarget);
+
+  if (isOutsideDirectory(relative) || path.isAbsolute(relative)) {
+    throw new Error(`${description} 不能超出目标目录: ${resolvedTarget}`);
+  }
+
+  return resolvedTarget;
+}
+
+function resolveSafeOutDir(projectRoot: string, configuredOutDir: string): string {
+  if (typeof configuredOutDir !== 'string' || configuredOutDir.trim().length === 0) {
+    throw new Error('outDir 必须是非空字符串');
+  }
+
+  const resolvedProjectRoot = path.resolve(projectRoot);
+  const resolvedOutDir = path.resolve(resolvedProjectRoot, configuredOutDir);
+  const relative = path.relative(resolvedProjectRoot, resolvedOutDir);
+  const topLevelDir = relative.split(path.sep)[0];
+
+  if (
+    relative === ''
+    || isOutsideDirectory(relative)
+    || path.isAbsolute(relative)
+    || topLevelDir === '.git'
+    || topLevelDir === 'node_modules'
+  ) {
+    throw new Error(`outDir 必须位于项目内的安全子目录，当前值: ${configuredOutDir}`);
+  }
+
+  return resolvedOutDir;
+}
+
+function resolveStaticOutputPath(staticOutputDir: string, actualPath: string): string {
+  const outputPath = path.join(
+    staticOutputDir,
+    actualPath === '/' ? 'index.html' : `${actualPath}/index.html`,
+  );
+
+  return assertPathInsideDirectory(staticOutputDir, outputPath, `SSG 输出路径 "${actualPath}"`);
+}
+
 /**
  * 构建任务类型
  */
@@ -106,7 +158,7 @@ export class NamiBuilder {
    * 仅清理框架管理的 outDir 目录（默认 dist/）。
    */
   private clean(): void {
-    const outDir = path.resolve(this.projectRoot, this.config.outDir);
+    const outDir = resolveSafeOutDir(this.projectRoot, this.config.outDir);
     if (fs.existsSync(outDir)) {
       logger.info(`清理构建输出目录: ${outDir}`);
       fs.rmSync(outDir, { recursive: true, force: true });
@@ -131,6 +183,8 @@ export class NamiBuilder {
     const stats: Record<string, Stats | null> = {};
 
     logger.info(`开始构建 [${this.config.appName}]，模式: ${mode}`);
+
+    resolveSafeOutDir(this.projectRoot, this.config.outDir);
 
     if (options.clean !== false) {
       this.clean();
@@ -527,20 +581,16 @@ export class NamiBuilder {
   private async generateStaticPages(routes: NamiRoute[]): Promise<void> {
     logger.info(`开始静态页面生成，共 ${routes.length} 个路由...`);
 
-    const primaryServerBundlePath = path.resolve(
-      this.projectRoot,
-      this.config.outDir,
-      'server',
-      'entry-server.js',
-    );
-    const staticOutputDir = path.resolve(this.projectRoot, this.config.outDir, 'static');
+    const outDir = resolveSafeOutDir(this.projectRoot, this.config.outDir);
+    const primaryServerBundlePath = path.resolve(outDir, 'server', 'entry-server.js');
+    const staticOutputDir = path.resolve(outDir, 'static');
 
     // 确保输出目录存在
     fs.mkdirSync(staticOutputDir, { recursive: true });
 
     const moduleManifest = this.buildModuleManifest();
     const fallbackServerBundlePath = Object.values(moduleManifest)[0]
-      ? path.resolve(this.projectRoot, this.config.outDir, 'server', Object.values(moduleManifest)[0]!)
+      ? path.resolve(outDir, 'server', Object.values(moduleManifest)[0]!)
       : primaryServerBundlePath;
     const serverBundlePath = fs.existsSync(primaryServerBundlePath)
       ? primaryServerBundlePath
@@ -685,10 +735,7 @@ export class NamiBuilder {
 
           if (html) {
             // 写入文件
-            const outputPath = path.join(
-              staticOutputDir,
-              actualPath === '/' ? 'index.html' : `${actualPath}/index.html`,
-            );
+            const outputPath = resolveStaticOutputPath(staticOutputDir, actualPath);
             fs.mkdirSync(path.dirname(outputPath), { recursive: true });
             fs.writeFileSync(outputPath, html, 'utf-8');
             generatedCount++;
@@ -741,8 +788,7 @@ export class NamiBuilder {
     };
 
     const outputPath = path.resolve(
-      this.projectRoot,
-      this.config.outDir,
+      resolveSafeOutDir(this.projectRoot, this.config.outDir),
       NAMI_MANIFEST_FILENAME,
     );
 

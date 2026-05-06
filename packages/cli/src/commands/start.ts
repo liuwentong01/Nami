@@ -71,6 +71,7 @@ export function registerStartCommand(program: Command): void {
           appElementFactory: runtime.appElementFactory,
           htmlRenderer: runtime.htmlRenderer,
           moduleLoader: runtime.moduleLoader,
+          assetManifest: runtime.assetManifest,
         });
 
         cliLogger.newline();

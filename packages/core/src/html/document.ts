@@ -193,7 +193,7 @@ export class DocumentTemplate {
 
     // 内联样式
     for (const style of styles) {
-      parts.push(`  <style>${style}</style>`);
+      parts.push(`  <style>${this.escapeStyleContent(style)}</style>`);
     }
 
     // 额外的 head 内容
@@ -238,7 +238,7 @@ export class DocumentTemplate {
 
     // 内联脚本
     for (const content of inlineScripts) {
-      parts.push(`  <script>${content}</script>`);
+      parts.push(`  <script>${this.escapeScriptContent(content)}</script>`);
     }
 
     // 外链脚本
@@ -274,5 +274,23 @@ export class DocumentTemplate {
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
+  }
+
+  /**
+   * 转义内联脚本的 HTML 结束标签，避免跳出 <script> 上下文。
+   */
+  private escapeScriptContent(value: string): string {
+    return value
+      .replace(/<\/script/gi, '<\\/script')
+      .replace(/<!--/g, '<\\!--')
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029');
+  }
+
+  /**
+   * 转义内联样式的 HTML 结束标签，避免跳出 <style> 上下文。
+   */
+  private escapeStyleContent(value: string): string {
+    return value.replace(/<\/style/gi, '<\\/style');
   }
 }

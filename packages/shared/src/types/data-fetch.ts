@@ -29,6 +29,25 @@ export interface PrefetchResult<T = Record<string, unknown>> {
 
   /** 各数据源的预取详情 */
   details?: PrefetchDetail[];
+
+  /** SSR 数据函数返回的重定向信息 */
+  redirect?: {
+    destination: string;
+    permanent?: boolean;
+    statusCode?: number;
+  };
+
+  /** SSR/SSG 数据函数声明当前请求应返回 404 */
+  notFound?: boolean;
+
+  /** SSR 数据函数返回的自定义响应头 */
+  headers?: Record<string, string>;
+
+  /** SSR 数据函数返回的缓存控制 */
+  cache?: {
+    maxAge?: number;
+    staleWhileRevalidate?: number;
+  };
 }
 
 /**

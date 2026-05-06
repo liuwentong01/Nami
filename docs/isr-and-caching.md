@@ -317,12 +317,15 @@ const effectiveRevalidate = revalidateSeconds || this.config.defaultRevalidate;
   │     -> isCacheMiss: false
   │
   └── 未命中或 Expired
+        -> 复用同 key 的 in-flight 渲染，或创建新的 renderAndCache()
         -> await renderFn()
         -> generateETag(html)
         -> cacheStore.set(key, entry, effectiveRevalidate * 2)
         -> 返回新 HTML
         -> isCacheMiss: true
 ```
+
+未命中和 Expired 的同步渲染路径会按缓存 key 做请求合并：同一 key 已经在渲染时，后续请求会等待并复用同一个 Promise，不会并发触发多次 SSR/数据请求。这个合并只作用于当前 Node 进程；多进程或多机部署仍需要共享缓存后端和上游限流策略。
 
 同步冷渲染写入的 `CacheEntry`：
 
@@ -382,13 +385,14 @@ Stale 状态不会阻塞用户请求，而是入队后台任务。
 
 源码位置：`packages/server/src/middleware/isr-cache-middleware.ts`
 
-后台重验证默认通过内部 HTTP 请求重新渲染：
+后台重验证默认通过内部 HTTP 请求重新渲染。内部请求目标固定到本机监听地址，不使用入站请求的 `Host`；如果配置了环境变量 `NAMI_ISR_REVALIDATE_TOKEN`，请求还会携带匹配的 token 头：
 
 ```typescript
-fetch(`${ctx.protocol}://${host}${ctx.path}${querystring}`, {
+fetch(`http://${serverHost}:${serverPort}${ctx.path}${querystring}`, {
   method: 'GET',
   headers: {
     [NAMI_ISR_REVALIDATE_HEADER]: '1',
+    'x-nami-isr-revalidate-token': process.env.NAMI_ISR_REVALIDATE_TOKEN,
     'X-Requested-With': 'nami-isr-revalidate',
   },
 });
@@ -400,7 +404,7 @@ fetch(`${ctx.protocol}://${host}${ctx.path}${querystring}`, {
 NAMI_ISR_REVALIDATE_HEADER = 'x-nami-isr-revalidate'
 ```
 
-`isrCacheMiddleware` 检测到该头值为 `'1'` 时直接 `next()`，不读缓存，避免后台重验证再次命中旧缓存并重复入队。
+`isrCacheMiddleware` 检测到该头值为 `'1'` 时，还会校验请求来源是可信本机地址；配置了 `NAMI_ISR_REVALIDATE_TOKEN` 时还会校验 token。校验通过后才直接 `next()`，不读缓存，避免后台重验证再次命中旧缓存并重复入队。
 
 内部请求完成后会读取响应头：
 

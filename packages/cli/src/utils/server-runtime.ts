@@ -1,8 +1,14 @@
 import fs from 'fs';
 import path from 'path';
 import type { NamiConfig } from '@nami/shared';
+import { ASSET_MANIFEST_FILENAME } from '@nami/shared';
 import { ModuleLoader } from '@nami/core';
-import type { AppElementFactory, HTMLRenderer, ModuleLoaderLike } from '@nami/core';
+import type {
+  AppElementFactory,
+  HTMLRenderer,
+  ModuleLoaderLike,
+  AssetManifest,
+} from '@nami/core';
 
 interface RuntimeModuleShape {
   default?: unknown;
@@ -15,6 +21,7 @@ export interface ResolvedServerRuntime {
   appElementFactory?: AppElementFactory;
   htmlRenderer?: HTMLRenderer;
   moduleLoader?: ModuleLoaderLike;
+  assetManifest?: AssetManifest;
   serverBundlePath?: string;
 }
 
@@ -30,19 +37,21 @@ interface ResolveServerRuntimeOptions {
  * P0 阶段最关键的问题之一，是 CLI 默认启动路径无法自动把
  * `dist/server/entry-server.js` 与 renderer 所需的运行时对象连接起来。
  *
- * 这里集中做三件事：
+ * 这里集中做四件事：
  * 1. 读取 `entry-server.js` 导出的渲染入口（优先 `createAppElement`，兼容 `renderToHTML`）
  * 2. 构造 `ModuleLoader`，用于解析页面级数据预取函数
- * 3. 在开发模式下支持 `fresh` 读取，避免命中旧的 require 缓存
+ * 3. 读取客户端 `asset-manifest.json`，让服务端 HTML 注入真实资源路径
+ * 4. 在开发模式下支持 `fresh` 读取，避免命中旧的 require 缓存
  */
 export function resolveServerRuntime(
   options: ResolveServerRuntimeOptions,
 ): ResolvedServerRuntime {
   const { projectRoot, config, fresh = false } = options;
   const serverBundlePath = path.resolve(projectRoot, config.outDir, 'server', 'entry-server.js');
+  const assetManifest = readAssetManifest(projectRoot, config);
 
   if (!fs.existsSync(serverBundlePath)) {
-    return {};
+    return { assetManifest };
   }
 
   if (fresh) {
@@ -62,6 +71,7 @@ export function resolveServerRuntime(
     appElementFactory,
     htmlRenderer,
     moduleLoader,
+    assetManifest,
     serverBundlePath,
   };
 }
@@ -114,5 +124,25 @@ function readModuleManifest(projectRoot: string, config: NamiConfig): Record<str
     return parsed.moduleManifest ?? {};
   } catch {
     return {};
+  }
+}
+
+function readAssetManifest(projectRoot: string, config: NamiConfig): AssetManifest | undefined {
+  const manifestPath = path.resolve(
+    projectRoot,
+    config.outDir,
+    'client',
+    ASSET_MANIFEST_FILENAME,
+  );
+
+  if (!fs.existsSync(manifestPath)) {
+    return undefined;
+  }
+
+  try {
+    const manifestContent = fs.readFileSync(manifestPath, 'utf-8');
+    return JSON.parse(manifestContent) as AssetManifest;
+  } catch {
+    return undefined;
   }
 }

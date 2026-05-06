@@ -144,6 +144,10 @@ export class PrefetchManager {
         errors: [],
         degraded: false,
         duration,
+        redirect: result.redirect,
+        notFound: result.notFound,
+        headers: result.headers,
+        cache: result.cache,
         details: [
           {
             key: 'getServerSideProps',

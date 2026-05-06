@@ -31,6 +31,14 @@ vi.mock('@nami/core', () => {
     },
     PluginManager: vi.fn(),
     DegradationManager: vi.fn(),
+    rankRoutes: vi.fn((routes) => routes),
+    matchPath: vi.fn((pattern, pathname, options) => {
+      if (options?.exact === false) {
+        return pathname.startsWith(pattern) ? { params: {} } : null;
+      }
+
+      return pattern === pathname ? { params: {} } : null;
+    }),
   };
 });
 

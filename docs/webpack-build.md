@@ -425,10 +425,10 @@ dist/client/asset-manifest.json
 
 `files` 的逻辑名通过两步得到：
 
-1. 去掉 `.[8位hex].` 形式的 hash。
+1. 去掉 `.[8位以上hex].` 形式的 hash。
 2. 去掉 `static/js/` 或 `static/css/` 前缀。
 
-渲染器的 `BaseRenderer.resolveAssets()` 和 `ScriptInjector` 会读取这份清单，生成 HTML 中的 `<link>` 和 `<script>`。
+渲染器的 `BaseRenderer.resolveAssets()` 和 `ScriptInjector` 会读取这份清单，生成 HTML 中的 `<link>` 和 `<script>`。优先使用 `entrypoints` 保留 Webpack 的加载顺序；只有清单缺少 `entrypoints/js/css` 时，才从 `files` 兜底提取资源，并按 runtime、vendor、普通 chunk、main/app 的顺序稳定排序。
 
 ### `NamiHtmlInjectPlugin`
 
@@ -639,6 +639,8 @@ builder.createWebpackConfig(target, 'production', { analyze: true })
 ```
 
 它生成单个目标的 Webpack 配置并直接编译，不走 `builder.build()` 的完整流程，因此不会执行双任务并行、SSG 和 `nami-manifest.json` 生成。
+
+`nami analyze` 会同时检查 webpack callback 的 `err` 和 `stats.hasErrors()`。只要 compilation 内存在错误，就会走失败分支，不会继续提示“分析报告已生成”。
 
 ### `nami dev`
 

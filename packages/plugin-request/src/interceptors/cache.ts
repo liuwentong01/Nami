@@ -166,19 +166,38 @@ export class CacheInterceptor {
   /**
    * 手动失效指定 URL 的缓存
    *
-   * @param url - 要失效的 URL（支持前缀匹配）
+   * @param url - 要失效的 URL（支持 URL 边界前缀匹配）
    * @returns 失效的条目数
    */
   invalidate(url: string): number {
     let count = 0;
     for (const key of this.store.keys()) {
-      // 支持前缀匹配（如 '/api/user' 可失效 '/api/user:...' 的所有缓存）
-      if (key.includes(url)) {
+      if (this.matchesInvalidateTarget(key, url)) {
         this.store.delete(key);
         count++;
       }
     }
     return count;
+  }
+
+  private matchesInvalidateTarget(key: string, url: string): boolean {
+    if (key === url) {
+      return true;
+    }
+
+    const candidates = [url];
+    const firstColonIndex = key.indexOf(':');
+    if (firstColonIndex > 0) {
+      candidates.push(key.slice(firstColonIndex + 1));
+    }
+
+    return candidates.some((candidate) => (
+      candidate === url
+      || candidate.startsWith(`${url}:`)
+      || candidate.startsWith(`${url}?`)
+      || candidate.startsWith(`${url}/`)
+      || candidate.startsWith(`${url}#`)
+    ));
   }
 
   /**

@@ -29,7 +29,7 @@ export interface AssetManifest {
     js?: string[];
     /** CSS 入口文件列表 */
     css?: string[];
-  };
+  } | string[];
   /** 所有资源文件映射（chunk name → 文件路径） */
   files?: Record<string, string>;
   /** JS chunk 文件列表 */
@@ -204,7 +204,18 @@ export class ScriptInjector {
    */
   private resolveJSFiles(manifest: AssetManifest): string[] {
     // 优先从 entrypoints 获取
-    if (manifest.entrypoints?.js && manifest.entrypoints.js.length > 0) {
+    if (Array.isArray(manifest.entrypoints)) {
+      const jsEntrypoints = manifest.entrypoints.filter((file) => file.endsWith('.js'));
+      if (jsEntrypoints.length > 0) {
+        return jsEntrypoints;
+      }
+    }
+
+    if (
+      !Array.isArray(manifest.entrypoints)
+      && manifest.entrypoints?.js
+      && manifest.entrypoints.js.length > 0
+    ) {
       return manifest.entrypoints.js;
     }
 
@@ -215,7 +226,7 @@ export class ScriptInjector {
 
     // 从 files 映射中提取 .js 文件
     if (manifest.files) {
-      return Object.values(manifest.files).filter((f) => f.endsWith('.js'));
+      return this.sortAssetFiles(Object.values(manifest.files).filter((f) => f.endsWith('.js')));
     }
 
     return [];
@@ -226,7 +237,18 @@ export class ScriptInjector {
    */
   private resolveCSSFiles(manifest: AssetManifest): string[] {
     // 优先从 entrypoints 获取
-    if (manifest.entrypoints?.css && manifest.entrypoints.css.length > 0) {
+    if (Array.isArray(manifest.entrypoints)) {
+      const cssEntrypoints = manifest.entrypoints.filter((file) => file.endsWith('.css'));
+      if (cssEntrypoints.length > 0) {
+        return cssEntrypoints;
+      }
+    }
+
+    if (
+      !Array.isArray(manifest.entrypoints)
+      && manifest.entrypoints?.css
+      && manifest.entrypoints.css.length > 0
+    ) {
       return manifest.entrypoints.css;
     }
 
@@ -237,10 +259,25 @@ export class ScriptInjector {
 
     // 从 files 映射中提取 .css 文件
     if (manifest.files) {
-      return Object.values(manifest.files).filter((f) => f.endsWith('.css'));
+      return this.sortAssetFiles(Object.values(manifest.files).filter((f) => f.endsWith('.css')));
     }
 
     return [];
+  }
+
+  private sortAssetFiles(files: string[]): string[] {
+    return files
+      .map((file, index) => ({ file, index, priority: this.getAssetPriority(file) }))
+      .sort((a, b) => a.priority - b.priority || a.index - b.index)
+      .map((item) => item.file);
+  }
+
+  private getAssetPriority(file: string): number {
+    const filename = file.split(/[?#]/)[0]?.split('/').pop() ?? file;
+    if (/runtime/i.test(filename)) return 0;
+    if (/vendor|vendors|chunk-vendors/i.test(filename)) return 1;
+    if (/main|app|entry/i.test(filename)) return 3;
+    return 2;
   }
 
   /**

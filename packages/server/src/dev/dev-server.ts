@@ -39,7 +39,12 @@ import type { NamiConfig, Logger, NamiPlugin } from '@nami/shared';
 import { createLogger } from '@nami/shared';
 import type { Configuration as WebpackConfiguration, Compiler, Stats } from 'webpack';
 import { DegradationManager, PluginLoader, PluginManager } from '@nami/core';
-import type { AppElementFactory, HTMLRenderer, ModuleLoaderLike } from '@nami/core';
+import type {
+  AppElementFactory,
+  HTMLRenderer,
+  ModuleLoaderLike,
+  AssetManifest,
+} from '@nami/core';
 
 /**
  * 开发服务器配置选项
@@ -81,6 +86,9 @@ export interface DevServerOptions {
   /** 页面模块加载器 */
   moduleLoader?: ModuleLoaderLike;
 
+  /** 构建产物资源清单 */
+  assetManifest?: AssetManifest;
+
   /**
    * 动态运行时提供器
    *
@@ -91,6 +99,7 @@ export interface DevServerOptions {
     appElementFactory?: AppElementFactory;
     htmlRenderer?: HTMLRenderer;
     moduleLoader?: ModuleLoaderLike;
+    assetManifest?: AssetManifest;
   }>;
 
   /**
@@ -199,7 +208,10 @@ export async function createDevServer(
   }
 
   if (!effectiveDegradationManager) {
-    effectiveDegradationManager = new DegradationManager();
+    effectiveDegradationManager = new DegradationManager({
+      publicPath: config.assets.publicPath,
+      assetManifest: options.assetManifest,
+    });
   }
 
   // 经过上面的兜底初始化后，开发服务器始终应持有一套可用的
@@ -312,6 +324,7 @@ export async function createDevServer(
     appElementFactory: options.appElementFactory,
     htmlRenderer: options.htmlRenderer,
     moduleLoader: options.moduleLoader,
+    assetManifest: options.assetManifest,
     runtimeProvider: options.runtimeProvider,
   }));
 

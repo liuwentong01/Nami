@@ -133,6 +133,9 @@ export class NamiLRUCache implements CacheStore {
    * @param ttl - 过期时间（秒），0 表示使用默认 TTL
    */
   async set(key: string, entry: CacheEntry, ttl?: number): Promise<void> {
+    // 覆盖同 key 时先清理旧标签索引，避免旧 tag 继续指向新条目。
+    this.removeFromTagIndex(key);
+
     // 构建 lru-cache 的选项
     const options: LRUCacheLib.SetOptions<string, CacheEntry, unknown> = {};
     if (ttl !== undefined && ttl > 0) {

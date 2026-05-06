@@ -82,6 +82,8 @@ export interface ISRCacheMiddlewareOptions {
 
 /** 模块级日志实例 */
 const moduleLogger: Logger = createLogger('@nami/server:isr-cache');
+const ISR_REVALIDATE_TOKEN_HEADER = 'x-nami-isr-revalidate-token';
+const ISR_REVALIDATE_TOKEN_ENV = 'NAMI_ISR_REVALIDATE_TOKEN';
 
 /**
  * 默认的简单路由匹配器
@@ -107,6 +109,60 @@ function defaultGenerateCacheKey(ctx: Koa.Context): string {
 
 function buildISRCacheControl(revalidateSeconds: number): string {
   return `public, s-maxage=${revalidateSeconds}, stale-while-revalidate=${revalidateSeconds * 2}`;
+}
+
+function normalizeIPAddress(ip: string): string {
+  return ip.replace(/^::ffff:/, '').replace(/^\[|\]$/g, '');
+}
+
+function isLoopbackAddress(ip: string): boolean {
+  const normalized = normalizeIPAddress(ip);
+  return normalized === '::1' || normalized === 'localhost' || normalized.startsWith('127.');
+}
+
+function isTrustedInternalAddress(ctx: Koa.Context, config: NamiConfig): boolean {
+  const remoteAddress = normalizeIPAddress(ctx.ip || ctx.req.socket.remoteAddress || '');
+  if (isLoopbackAddress(remoteAddress)) {
+    return true;
+  }
+
+  const configuredHost = normalizeIPAddress(config.server.host || '');
+  if (!configuredHost || configuredHost === '0.0.0.0' || configuredHost === '::') {
+    return false;
+  }
+
+  return remoteAddress === configuredHost;
+}
+
+function isInternalRevalidateRequest(ctx: Koa.Context, config: NamiConfig): boolean {
+  if (ctx.get(NAMI_ISR_REVALIDATE_HEADER) !== '1') {
+    return false;
+  }
+
+  const expectedToken = process.env[ISR_REVALIDATE_TOKEN_ENV];
+  if (expectedToken && ctx.get(ISR_REVALIDATE_TOKEN_HEADER) !== expectedToken) {
+    return false;
+  }
+
+  return isTrustedInternalAddress(ctx, config);
+}
+
+function normalizeInternalHost(host: string | undefined): string {
+  if (!host || host === '0.0.0.0' || host === '::' || host === '[::]') {
+    return '127.0.0.1';
+  }
+
+  const normalized = normalizeIPAddress(host);
+  return normalized.includes(':') ? `[${normalized}]` : normalized;
+}
+
+function buildInternalRevalidateURL(ctx: Koa.Context, config?: NamiConfig): string {
+  const host = normalizeInternalHost(config?.server.host);
+  const port = config?.server.port ?? ctx.req.socket.localPort;
+  const portPart = port ? `:${port}` : '';
+  const query = ctx.querystring ? `?${ctx.querystring}` : '';
+
+  return `http://${host}${portPart}${ctx.path}${query}`;
 }
 
 /**
@@ -151,7 +207,7 @@ export function isrCacheMiddleware(
     }
 
     // 内部后台重验证请求需要绕过 ISR 缓存层，避免 stale 命中再次把自己重新排队。
-    if (ctx.get(NAMI_ISR_REVALIDATE_HEADER) === '1') {
+    if (isInternalRevalidateRequest(ctx, config)) {
       await next();
       return;
     }
@@ -200,7 +256,7 @@ export function isrCacheMiddleware(
           };
         },
         revalidateSeconds,
-        async () => await revalidateByInternalRequest(ctx),
+        async () => await revalidateByInternalRequest(ctx, config),
       );
 
       /**
@@ -277,13 +333,16 @@ export function isrCacheMiddleware(
 
 export async function revalidateByInternalRequest(
   ctx: Koa.Context,
+  config?: NamiConfig,
 ): Promise<{ html: string; tags?: string[] }> {
-  const host = ctx.host || ctx.get('host');
-  const url = `${ctx.protocol}://${host}${ctx.path}${ctx.querystring ? `?${ctx.querystring}` : ''}`;
+  const url = buildInternalRevalidateURL(ctx, config);
+  const token = process.env[ISR_REVALIDATE_TOKEN_ENV];
   const response = await fetch(url, {
     method: 'GET',
+    redirect: 'manual',
     headers: {
       [NAMI_ISR_REVALIDATE_HEADER]: '1',
+      ...(token ? { [ISR_REVALIDATE_TOKEN_HEADER]: token } : {}),
       'X-Requested-With': 'nami-isr-revalidate',
     },
   });

@@ -55,6 +55,7 @@ import type {
   HTMLRenderer,
   ModuleLoaderLike,
   ISRManagerLike,
+  AssetManifest,
 } from '@nami/core';
 import { PluginManager } from '@nami/core';
 import { DegradationManager } from '@nami/core';
@@ -99,6 +100,13 @@ export interface RenderMiddlewareOptions {
   isrManager?: ISRManagerLike;
 
   /**
+   * 构建产物资源清单
+   *
+   * 用于让 SSR/CSR/SSG/ISR HTML 注入真实的带 contenthash 的 JS/CSS 文件名。
+   */
+  assetManifest?: AssetManifest;
+
+  /**
    * 动态运行时提供器
    *
    * 开发模式下 server bundle 会持续重编译，静态注入的 runtime 很容易过期。
@@ -108,6 +116,7 @@ export interface RenderMiddlewareOptions {
     appElementFactory?: AppElementFactory;
     htmlRenderer?: HTMLRenderer;
     moduleLoader?: ModuleLoaderLike;
+    assetManifest?: AssetManifest;
   }>;
 
   /**
@@ -249,6 +258,7 @@ export function renderMiddleware(
     htmlRenderer,
     moduleLoader,
     isrManager,
+    assetManifest,
     runtimeProvider,
     matchRoute = defaultMatchRoute,
   } = options;
@@ -311,6 +321,7 @@ export function renderMiddleware(
         appElementFactory: runtime?.appElementFactory ?? appElementFactory,
         htmlRenderer: runtime?.htmlRenderer ?? htmlRenderer,
         moduleLoader: runtime?.moduleLoader ?? moduleLoader,
+        assetManifest: runtime?.assetManifest ?? assetManifest,
         isrManager,
         preferStreaming:
           renderMode === RenderMode.SSR && matchResult.route.meta?.streaming === true,
@@ -326,6 +337,8 @@ export function renderMiddleware(
       renderer = RendererFactory.create({
         mode: RenderMode.CSR,
         config,
+        pluginManager: pluginManager as unknown as PluginManagerLike,
+        assetManifest,
       });
     }
 

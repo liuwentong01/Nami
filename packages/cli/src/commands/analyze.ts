@@ -37,8 +37,17 @@ export function registerAnalyzeCommand(program: Command): void {
           // 执行构建
           return new Promise<void>((resolve, reject) => {
             webpack(webpackConfig, (err, stats) => {
-              if (err) reject(err);
-              else resolve();
+              if (err) {
+                reject(err);
+                return;
+              }
+
+              if (stats?.hasErrors()) {
+                reject(new Error(stats.toString({ all: false, errors: true })));
+                return;
+              }
+
+              resolve();
             });
           });
         });

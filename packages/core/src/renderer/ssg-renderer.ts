@@ -54,6 +54,34 @@ import { BaseRenderer } from './base-renderer';
 import { CSRRenderer } from './csr-renderer';
 import type { RendererOptions, AppElementFactory, StaticFileReader } from './types';
 
+function isOutsideDirectory(relativePath: string): boolean {
+  return relativePath === '..' || relativePath.startsWith(`..${path.sep}`);
+}
+
+function assertStaticFileInsideDirectory(
+  staticDir: string,
+  filePath: string,
+  requestPath: string,
+): string {
+  const resolvedStaticDir = path.resolve(staticDir);
+  const resolvedFilePath = path.resolve(filePath);
+  const relative = path.relative(resolvedStaticDir, resolvedFilePath);
+
+  if (isOutsideDirectory(relative) || path.isAbsolute(relative)) {
+    throw new RenderError(
+      `SSG 静态文件路径非法: ${requestPath}`,
+      ErrorCode.RENDER_SSG_FAILED,
+      {
+        requestPath,
+        staticDir: resolvedStaticDir,
+        filePath: resolvedFilePath,
+      },
+    );
+  }
+
+  return resolvedFilePath;
+}
+
 /**
  * SSG 渲染器配置
  */
@@ -562,7 +590,8 @@ export class SSGRenderer extends BaseRenderer {
       normalizedPath += '.html';
     }
 
-    return path.join(this.staticDir, normalizedPath);
+    const filePath = path.join(this.staticDir, normalizedPath);
+    return assertStaticFileInsideDirectory(this.staticDir, filePath, requestPath);
   }
 
   /**

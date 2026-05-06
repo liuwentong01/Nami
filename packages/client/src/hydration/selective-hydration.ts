@@ -249,9 +249,8 @@ export const SelectiveHydration: React.FC<SelectiveHydrationProps> = ({
 
   /**
    * 客户端 — 未触发 Hydration：
-   * 使用 suppressHydrationWarning 保留 SSR 阶段输出的 DOM，
-   * 不渲染任何子节点，让浏览器原样保持服务端的 innerHTML。
-   * 当 shouldHydrate 翻转后 React 才接管渲染。
+   * 首帧必须与 SSR 输出保持同构，否则 React 会丢弃服务端子树并重挂。
+   * ssrRender=true 时继续渲染 children；ssrRender=false 时继续渲染 fallback/null。
    */
   if (!shouldHydrate) {
     return React.createElement(
@@ -262,6 +261,7 @@ export const SelectiveHydration: React.FC<SelectiveHydrationProps> = ({
         'data-nami-hydration-pending': 'true',
         suppressHydrationWarning: true,
       },
+      ssrRender ? children : fallback || null,
     );
   }
 

@@ -178,6 +178,7 @@ RouteManager
     │      ├── renderer.render(context)                          │
     │      │     ├── callPluginHook('beforeRender')             │
     │      │     ├── prefetchData() (getServerSideProps)        │
+    │      │     ├── redirect/notFound? → 直接返回 30x/404       │
     │      │     ├── renderToString() / renderToPipeableStream  │
     │      │     ├── assembleHTML() + resolveAssets()            │
     │      │     └── callPluginHook('afterRender')              │
@@ -630,3 +631,68 @@ Webpack 的 `data-fetch-loader` 在客户端构建时将 `getServerSideProps`、
 - 排序缓存：减少整套路由重复排序的成本
 
 所以文档第 2.3 节里提到的“优先级排序 + 编译缓存”，本质上是在一起解决两个问题：既保证“谁该先匹配”，也避免为了得出这个结果而重复做无意义计算。
+
+## 附录：为什么 `shared` 要尽量保持零依赖？
+
+文档开头把 `packages/shared` 标记为“零依赖”，这里的“零依赖”不是说技术上绝对不能安装任何包，而是一个架构边界约束：`shared` 位于依赖图最底层，是全仓所有包共同引用的基础层。
+
+```text
+@nami/shared
+  ├── @nami/core
+  ├── @nami/server
+  ├── @nami/client
+  ├── @nami/webpack
+  ├── @nami/cli
+  └── plugin-*
+```
+
+如果 `shared` 依赖了 `lodash` 这类通用运行时库，通常不会让框架立刻不能运行，但会带来几个被放大的影响。
+
+### 1. 客户端 Bundle 可能被动变大
+
+`shared` 会被 `client` 和 `core-client-shim` 等浏览器端代码间接引用。如果 `shared` 中某个工具引入了 `lodash`，即使只使用一个小函数，也可能因为打包格式、导入方式或 tree-shaking 不理想，把额外代码带进客户端 bundle。
+
+对于底层包来说，一个看似很小的依赖选择，会被所有上层包继承。
+
+### 2. 依赖会向全仓传播
+
+`shared` 是所有包的共同语言。一旦它依赖 `lodash`，就等于所有使用 `@nami/shared` 的包都间接受到 `lodash` 的影响，包括：
+
+- 安装体积
+- 版本冲突
+- ESM / CJS 兼容性
+- 安全漏洞扫描
+- 发布产物依赖声明
+
+如果依赖只放在 `server` 或 `webpack` 这类上层包里，影响范围会小很多；放在 `shared` 里，影响范围会扩大到整个框架。
+
+### 3. 多运行环境兼容成本变高
+
+`shared` 同时运行在 Node.js、浏览器、构建工具、插件等环境中。它依赖的任何库都必须适配这些环境。
+
+例如某个依赖在 Node 侧正常，但浏览器侧需要 polyfill；或者在 ESM 构建下正常，但 CJS 消费方表现不同。这类问题放在上层包时比较容易隔离，放进 `shared` 后会变成全局问题。
+
+### 4. 底层包容易被塞入过多职责
+
+`shared` 理想上只放：
+
+- 类型定义
+- 常量
+- 很小且无副作用的工具函数
+- 跨包都需要的纯逻辑
+
+如果为了使用第三方库不断往 `shared` 加复杂工具，`shared` 会从“共同语言层”变成“通用工具箱”。这会削弱包边界，让上层能力逐渐下沉，后续更容易出现循环依赖或职责不清。
+
+### 5. 安全与发布风险会被放大
+
+底层依赖一旦出现安全漏洞、破坏性升级或供应链问题，影响的不只是一个功能模块，而是所有依赖 `shared` 的包。对框架类项目来说，底层包越稳定、越少外部依赖，整体维护成本越低。
+
+### 实践建议
+
+如果只是需要 `debounce`、`pick`、`isPlainObject` 这类小能力，优先考虑：
+
+1. 在 `shared` 中实现一个很小的、明确用途的内部函数。
+2. 如果必须引入第三方库，优先选择体积小、无副作用、明确支持 ESM/tree-shaking 的独立包。
+3. 如果依赖只服务于某个运行环境，把它放在对应上层包里，例如 `server`、`webpack` 或具体插件包，而不是放进 `shared`。
+
+简而言之：`shared` 不是不能依赖任何东西，而是每加一个依赖，都要按“它会影响整个框架依赖图”来评估。

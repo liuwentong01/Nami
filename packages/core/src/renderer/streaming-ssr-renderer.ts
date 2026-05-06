@@ -190,6 +190,14 @@ export class StreamingSSRRenderer extends BaseRenderer {
       timing.dataFetchEnd = Date.now();
       context.initialData = prefetchResult.data as Record<string, unknown>;
 
+      const earlyResult = this.createEarlyDataResult(prefetchResult, context, timing);
+      if (earlyResult) {
+        return {
+          ...earlyResult,
+          isStreaming: false,
+        };
+      }
+
       // 构建 HTML 头部（立即发送）
       const { headHTML, tailHTML } = this.buildHTMLShell(context);
 
@@ -271,7 +279,8 @@ export class StreamingSSRRenderer extends BaseRenderer {
           {
             headers: {
               'Transfer-Encoding': 'chunked',
-              'Cache-Control': 'private, no-cache',
+              'Cache-Control': this.buildCacheControl(prefetchResult.cache),
+              ...prefetchResult.headers,
             },
             degraded: prefetchResult.degraded,
           },
@@ -334,6 +343,10 @@ export class StreamingSSRRenderer extends BaseRenderer {
         errors: [],
         degraded: false,
         duration: Date.now() - startTime,
+        redirect: result.redirect,
+        notFound: result.notFound,
+        headers: result.headers,
+        cache: result.cache,
       };
     } catch (error) {
       return {
@@ -355,6 +368,7 @@ export class StreamingSSRRenderer extends BaseRenderer {
       pluginManager: this.pluginManager,
       assetManifest: this.assetManifest,
       appElementFactory: this.appElementFactory,
+      moduleLoader: this.moduleLoader,
     });
   }
 
@@ -369,6 +383,11 @@ export class StreamingSSRRenderer extends BaseRenderer {
     const prefetchResult = await this.prefetchData(context);
     timing.dataFetchEnd = Date.now();
     context.initialData = prefetchResult.data as Record<string, unknown>;
+
+    const earlyResult = this.createEarlyDataResult(prefetchResult, context, timing);
+    if (earlyResult) {
+      return earlyResult;
+    }
 
     // React 渲染（收集完整 HTML）
     timing.renderStart = Date.now();
@@ -389,7 +408,8 @@ export class StreamingSSRRenderer extends BaseRenderer {
       timing,
       {
         headers: {
-          'Cache-Control': 'private, no-cache',
+          'Cache-Control': this.buildCacheControl(prefetchResult.cache),
+          ...prefetchResult.headers,
         },
         degraded: prefetchResult.degraded,
       },
@@ -408,17 +428,39 @@ export class StreamingSSRRenderer extends BaseRenderer {
     return new Promise<string>((resolve, reject) => {
       const chunks: Buffer[] = [];
       const writable = new PassThrough();
+      let settled = false;
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
+      const cleanup = () => {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
+      };
+
+      const safeResolve = (value: string) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+
+      const safeReject = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error instanceof Error ? error : new Error(String(error)));
+      };
 
       writable.on('data', (chunk: Buffer) => chunks.push(chunk));
-      writable.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
-      writable.on('error', reject);
+      writable.on('end', () => safeResolve(Buffer.concat(chunks).toString('utf-8')));
+      writable.on('error', safeReject);
 
       const { pipe, abort } = renderToPipeableStream(element, {
         onAllReady: () => {
           pipe(writable);
         },
         onShellError: (error: unknown) => {
-          reject(error instanceof Error ? error : new Error(String(error)));
+          safeReject(error);
         },
         onError: (error: unknown) => {
           this.logger.warn('Streaming render 非致命错误', {
@@ -428,10 +470,72 @@ export class StreamingSSRRenderer extends BaseRenderer {
       });
 
       // 超时保护
-      setTimeout(() => {
+      timeoutHandle = setTimeout(() => {
         abort();
+        safeReject(new RenderError(
+          `Streaming SSR 流式渲染超时（${this.streamTimeout}ms）`,
+          ErrorCode.RENDER_SSR_TIMEOUT,
+          { timeout: this.streamTimeout },
+        ));
       }, this.streamTimeout);
     });
+  }
+
+  private createEarlyDataResult(
+    prefetchResult: PrefetchResult,
+    context: RenderContext,
+    timing: RenderTiming,
+  ): RenderResult | null {
+    if (prefetchResult.redirect) {
+      timing.htmlEnd = Date.now();
+      const statusCode = prefetchResult.redirect.statusCode
+        ?? (prefetchResult.redirect.permanent ? 308 : 307);
+      return this.createDefaultResult(
+        '',
+        statusCode,
+        RenderModeEnum.SSR,
+        timing,
+        {
+          headers: {
+            ...prefetchResult.headers,
+            Location: prefetchResult.redirect.destination,
+            'Cache-Control': 'private, no-cache',
+          },
+          degraded: prefetchResult.degraded,
+        },
+      );
+    }
+
+    if (prefetchResult.notFound) {
+      timing.htmlEnd = Date.now();
+      return this.createDefaultResult(
+        this.assembleHTML('', context),
+        404,
+        RenderModeEnum.SSR,
+        timing,
+        {
+          headers: {
+            ...prefetchResult.headers,
+            'Cache-Control': 'private, no-cache',
+          },
+          degraded: prefetchResult.degraded,
+        },
+      );
+    }
+
+    return null;
+  }
+
+  private buildCacheControl(cache?: PrefetchResult['cache']): string {
+    if (!cache || cache.maxAge === undefined) {
+      return 'private, no-cache';
+    }
+
+    let value = `s-maxage=${cache.maxAge}`;
+    if (cache.staleWhileRevalidate !== undefined) {
+      value += `, stale-while-revalidate=${cache.staleWhileRevalidate}`;
+    }
+    return value;
   }
 
   private async importStreamRenderer(): Promise<{

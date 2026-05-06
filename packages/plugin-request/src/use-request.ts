@@ -380,8 +380,7 @@ export function useRequest<T = unknown>(
     if (!manual) {
       fetchData();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [manual, ...deps]);
+  }, [manual, fetchData, ...deps]);
 
   /**
    * 轮询

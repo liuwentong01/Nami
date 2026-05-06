@@ -128,6 +128,7 @@ export class RendererFactory {
       appElementFactory,
       htmlRenderer,
       moduleLoader,
+      assetManifest,
       preferStreaming,
     } = options;
 
@@ -137,6 +138,7 @@ export class RendererFactory {
         return new CSRRenderer({
           config,
           pluginManager,
+          assetManifest,
         });
 
       // ==================== SSR ====================
@@ -161,6 +163,7 @@ export class RendererFactory {
             pluginManager,
             appElementFactory,
             moduleLoader,
+            assetManifest,
           });
         }
 
@@ -170,6 +173,7 @@ export class RendererFactory {
           appElementFactory,
           htmlRenderer,
           moduleLoader,
+          assetManifest,
         });
       }
 
@@ -180,6 +184,7 @@ export class RendererFactory {
           pluginManager,
           appElementFactory,
           moduleLoader,
+          assetManifest,
         });
       }
 
@@ -203,6 +208,7 @@ export class RendererFactory {
           appElementFactory,
           htmlRenderer,
           moduleLoader,
+          assetManifest,
         });
       }
 

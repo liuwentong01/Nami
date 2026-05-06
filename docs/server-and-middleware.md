@@ -80,14 +80,14 @@ app.use(async (ctx, next) => {
 ⑥ staticServe
   │  注册在这里，但默认 defer: true，会先让下游处理，再回退尝试发送静态文件
   ▼
-⑦ dataPrefetch
-  │  命中 GET /_nami/data/* 时执行页面数据函数并返回 JSON
-  ▼
-⑧ config.server.middlewares
+⑦ config.server.middlewares
   │  用户自定义 Koa 中间件，位于插件中间件之前
   ▼
-⑨ pluginManager.getServerMiddlewares()
+⑧ pluginManager.getServerMiddlewares()
   │  插件通过 api.addServerMiddleware() 注册，按插件 enforce 顺序收集
+  ▼
+⑨ dataPrefetch
+  │  命中 GET /_nami/data/* 时执行页面数据函数并返回 JSON
   ▼
 ⑩ errorIsolation
   │  try/catch 包裹下游 ISR 和 render
@@ -112,9 +112,9 @@ app.use(async (ctx, next) => {
 | ④ | `requestContext` | 后续健康检查、数据预取、渲染、日志都能使用同一个 `requestId` |
 | ⑤ | `healthCheck` | 探针请求不应触发静态资源查找、插件逻辑或渲染 |
 | ⑥ | `staticServe` | 静态资源由框架统一兜底发送；包装层会按最终路径为 2xx 响应补缓存头 |
-| ⑦ | `dataPrefetch` | 数据预取 API 是路由数据接口，命中后返回 JSON，不进入页面渲染 |
-| ⑧ | 用户中间件 | 业务可在插件前注入 Koa 逻辑，例如鉴权、代理、API mock |
-| ⑨ | 插件中间件 | 插件按 `enforce: pre -> normal -> post` 注册顺序提供服务端扩展 |
+| ⑦ | 用户中间件 | 业务可在插件前注入 Koa 逻辑，例如鉴权、代理、API mock |
+| ⑧ | 插件中间件 | 插件按 `enforce: pre -> normal -> post` 注册顺序提供服务端扩展 |
+| ⑨ | `dataPrefetch` | 数据预取 API 是路由数据接口，位于业务/插件中间件之后，命中后返回 JSON |
 | ⑩ | `errorIsolation` | 保护框架核心的 ISR 和渲染层，不吞掉用户/插件中间件本身的异常 |
 | ⑪ | `isrCache` | 必须在渲染前，缓存命中才能跳过昂贵的 React SSR/ISR 渲染 |
 | ⑫ | `render` | 最内层负责最终页面响应 |
@@ -291,7 +291,7 @@ export const HEALTH_CHECK_PATH = '/_health';
 
 源码位置：`packages/server/src/middleware/static-serve.ts`
 
-静态资源中间件基于 `koa-static` 包装，默认配置：
+静态资源中间件基于 `koa-static` 包装。生产装配会把 `root` 设为 `${process.cwd()}/{config.outDir}/client`，因此自定义 `outDir` 时也会读取对应的客户端产物目录；直接单独调用中间件时默认配置如下：
 
 | 选项 | 默认值 | 说明 |
 |------|--------|------|
@@ -302,14 +302,14 @@ export const HEALTH_CHECK_PATH = '/_health';
 | `brotli` | `true` | 支持 `.br` 预压缩文件 |
 | `defer` | `true` | 先执行下游，再在下游未处理时尝试发送文件 |
 
-这里最容易误解的是 `defer: true`。虽然 `staticServeMiddleware` 在 `dataPrefetchMiddleware` 和 `renderMiddleware` 之前注册，但 `koa-static` 会先 `await next()`，下游没有产生响应时才尝试从 `dist/client` 发送文件。实际效果是：
+这里最容易误解的是 `defer: true`。虽然 `staticServeMiddleware` 在用户中间件、插件中间件、`dataPrefetchMiddleware` 和 `renderMiddleware` 之前注册，但 `koa-static` 会先 `await next()`，下游没有产生响应时才尝试从客户端产物目录发送文件。实际效果是：
 
 ```text
 静态资源请求 /assets/main.abcdef12.js
   ├─ staticServe 入站
-  ├─ 先进入 dataPrefetch / 用户中间件 / 插件中间件 / errorIsolation / render
+  ├─ 先进入用户中间件 / 插件中间件 / dataPrefetch / errorIsolation / render
   ├─ render 未匹配页面路由，返回
-  └─ staticServe 回退查找 dist/client/assets/main.abcdef12.js 并发送
+  └─ staticServe 回退查找 {outDir}/client/assets/main.abcdef12.js 并发送
 ```
 
 这种设计让静态资源作为框架兜底能力存在，同时避免无条件抢占后续业务中间件。需要注意的是，当前包装层并不额外判断“文件是否由 `koa-static` 命中”，而是在 `koa-static` 返回后检查最终 `ctx.status` 是否为 2xx，并根据 `ctx.path` 写入缓存头。因此它既会给静态文件补缓存策略，也可能给下游成功生成的页面补上默认 `public, no-cache`；如果渲染结果或 ISR 中间件设置了 `ctx.state.namiCacheControl`，外层 `securityMiddleware` 会在更后的出站阶段把最终缓存语义重新写回。
@@ -444,7 +444,7 @@ if (config.server.middlewares && config.server.middlewares.length > 0) {
 }
 ```
 
-这些中间件位于数据预取之后、插件中间件之前、错误隔离之前。常见用途：
+这些中间件位于静态资源之后、插件中间件之前、数据预取之前、错误隔离之前。常见用途：
 
 | 用途 | 说明 |
 |------|------|
@@ -783,6 +783,7 @@ GET /_nami/data/products/1
   -> requestContext
   -> healthCheck 放行
   -> staticServe 入站，因 defer 先进入下游
+  -> 用户/插件中间件
   -> dataPrefetch 匹配数据 API，执行页面数据函数并返回 JSON
   <- staticServe 通常不会覆盖已生成的数据响应
   <- security / timing 出站补头
@@ -798,12 +799,12 @@ GET /assets/main.abcdef12.js
   -> requestContext
   -> healthCheck 放行
   -> staticServe 入站，defer 到下游
-  -> dataPrefetch 放行
   -> 用户/插件中间件
+  -> dataPrefetch 放行
   -> errorIsolation
   -> isrCache 放行
   -> render 路由未匹配，放行
-  <- staticServe 从 dist/client 发送文件，并因路径带 hash 设置长期缓存
+  <- staticServe 从 {outDir}/client 发送文件，并因路径带 hash 设置长期缓存
   <- security / timing 出站补头
 ```
 
