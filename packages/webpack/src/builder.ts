@@ -44,10 +44,12 @@ import { createProgressPlugin } from './plugins/progress-plugin';
 
 const logger = createLogger('@nami/webpack');
 
+// 判断 path.relative() 的结果是否已经逃出基准目录。
 function isOutsideDirectory(relativePath: string): boolean {
   return relativePath === '..' || relativePath.startsWith(`..${path.sep}`);
 }
 
+// 确保目标路径位于指定目录内，防止通过 ../ 或绝对路径写到目录外。
 function assertPathInsideDirectory(
   baseDir: string,
   targetPath: string,
@@ -64,6 +66,7 @@ function assertPathInsideDirectory(
   return resolvedTarget;
 }
 
+// 解析构建输出目录，并禁止输出到项目外、项目根、.git 或 node_modules。
 function resolveSafeOutDir(projectRoot: string, configuredOutDir: string): string {
   if (typeof configuredOutDir !== 'string' || configuredOutDir.trim().length === 0) {
     throw new Error('outDir 必须是非空字符串');
@@ -87,6 +90,7 @@ function resolveSafeOutDir(projectRoot: string, configuredOutDir: string): strin
   return resolvedOutDir;
 }
 
+// 根据路由路径生成 SSG HTML 输出路径，并确保仍在 static 输出目录内。
 function resolveStaticOutputPath(staticOutputDir: string, actualPath: string): string {
   const outputPath = path.join(
     staticOutputDir,
@@ -355,6 +359,7 @@ export class NamiBuilder {
    * - modifyRoutes：先产出最终路由表，再驱动 client/server/ssg 三条任务链
    * - modifyWebpackConfig：在每份 webpack 配置创建后继续做 waterfall 修改
    */
+  // @Riven
   private async prepareBuildContext(isDev: boolean): Promise<void> {
     const resolvedPlugins: NamiPlugin[] = [];
     this.pluginManager = new PluginManager(this.config, logger);

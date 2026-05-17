@@ -161,7 +161,7 @@ ssg:
 | dev 模式不会加入 `ssg` 任务 | 开发环境不做构建期静态生成 |
 | SSG/ISR 都会进入静态生成 | ISR 也会生成首轮静态 HTML |
 | `options.ssgRoutes` 只过滤静态生成路由 | client/server Webpack 仍会按整体配置构建 |
-| `ssg` 任务没有 Webpack config | 它复用已经编译好的 server bundle |
+| `ssg` 任务没有 Webpack config | 它复用已经编译好的 server bundle | TODO
 
 ---
 
@@ -245,7 +245,7 @@ fallback: {
 }
 ```
 
-服务端设置 `compilerOptions.module = 'commonjs'`，客户端设置 `module = 'esnext'` 并启用 `jsx: 'react-jsx'`。
+服务端设置 `compilerOptions.module = 'commonjs'`，客户端设置 `module = 'esnext'` 并启用 `jsx: 'react-jsx'`。 TODO
 
 默认 TypeScript rule 没有串联 `page-loader` 或 `data-fetch-loader`。
 

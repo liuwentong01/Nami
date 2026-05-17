@@ -678,11 +678,11 @@ ISR 缓存是性能优化层。缓存故障默认不会让页面失败，而是�
 ```text
 RendererFactory.create(mode) 抛错
   -> renderMiddleware catch
-  -> RendererFactory.create({ mode: CSR, config })
+  -> RendererFactory.create({ mode: CSR, config, pluginManager, assetManifest })
   -> 后续按 CSR renderer 继续
 ```
 
-这个路径没有传插件管理器。
+这个路径会传入插件管理器，并使用中间件初始化时传入的 `assetManifest`；如果开发模式下 `runtimeProvider` 刚读到更新的 manifest，兜底路径不会再使用这份 runtime manifest。
 
 ### 客户端组件渲染失败
 
