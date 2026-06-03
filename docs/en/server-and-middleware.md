@@ -1765,6 +1765,6 @@ It is recommended to use the Redis cache adapter for production multi-instance d
 
 
 
-- To learn about ISR storage and invalidation strategies: read [ISR and Caching](./isr-and-caching.en.md)
-- To learn about renderers and degradation chains: read [Error handling and degradation](./error-and-degradation.en.md)
-- To learn how build products provide server runtime: read [Build System](./webpack-build.en.md)
+- To learn about ISR storage and invalidation strategies: read [ISR and Caching](./isr-and-caching.md)
+- To learn about renderers and degradation chains: read [Error handling and degradation](./error-and-degradation.md)
+- To learn how build products provide server runtime: read [Build System](./webpack-build.md)

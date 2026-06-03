@@ -752,6 +752,6 @@ Not completely. `nami analyze` only creates a config for a single target and dir
 
 ## Next Steps
 
-- How routes and data functions affect rendering: read [Rendering Modes Internals](./rendering-modes.en.md)
-- How the server reads build artifacts: read [Server and Middleware](./server-and-middleware.en.md)
-- How plugins modify build config: read [Plugin System Internals](./plugin-system.en.md)
+- How routes and data functions affect rendering: read [Rendering Modes Internals](./rendering-modes.md)
+- How the server reads build artifacts: read [Server and Middleware](./server-and-middleware.md)
+- How plugins modify build config: read [Plugin System Internals](./plugin-system.md)

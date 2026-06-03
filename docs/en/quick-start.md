@@ -448,6 +448,6 @@ export default defineConfig({
 
 ## Next Steps
 
-- Want to understand the framework's internal architecture? → [Architecture Design](./architecture.en.md)
-- Want to learn differences between rendering modes and how to choose one? → [Five Rendering Modes](./rendering-modes.en.md)
-- Want to write a custom plugin? → [Plugin System](./plugin-system.en.md)
+- Want to understand the framework's internal architecture? → [Architecture Design](./architecture.md)
+- Want to learn differences between rendering modes and how to choose one? → [Five Rendering Modes](./rendering-modes.md)
+- Want to write a custom plugin? → [Plugin System](./plugin-system.md)

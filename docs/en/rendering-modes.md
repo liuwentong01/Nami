@@ -1182,6 +1182,6 @@ The type allows this structure, but the renderer injects `context.initialData` i
 
 
 
-- Server-side middleware sequence: Read [Server and Middleware](./server-and-middleware.en.md)
-- ISR cache storage and invalidation: read [ISR and cache](./isr-and-caching.en.md)
-- Double Bundle and static generation during build: read [Build System](./webpack-build.en.md)
+- Server-side middleware sequence: Read [Server and Middleware](./server-and-middleware.md)
+- ISR cache storage and invalidation: read [ISR and cache](./isr-and-caching.md)
+- Double Bundle and static generation during build: read [Build System](./webpack-build.md)

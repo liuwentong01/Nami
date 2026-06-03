@@ -584,9 +584,9 @@ renderToString(<App data={data} />)        hydrateRoot(<App data={data} />)
 
 ## Next Steps
 
-- Want to dive deeper into the principles of each rendering mode? → [Five Rendering Modes](./rendering-modes.en.md)
-- Want to understand middleware pipeline details? → [Server and Middleware](./server-and-middleware.en.md)
-- Want to understand the build system? → [Build System](./webpack-build.en.md)
+- Want to dive deeper into the principles of each rendering mode? → [Five Rendering Modes](./rendering-modes.md)
+- Want to understand middleware pipeline details? → [Server and Middleware](./server-and-middleware.md)
+- Want to understand the build system? → [Build System](./webpack-build.md)
 
 ## Appendix: Route Compile Cache Notes
 

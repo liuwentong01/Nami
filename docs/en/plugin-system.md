@@ -731,6 +731,6 @@ No. It is a new object created for each request and is suitable for in-request p
 
 ## Next Steps
 
-- Server middleware position: read [Server and Middleware](./server-and-middleware.en.md)
-- Renderer plugin hook timing: read [Rendering Modes Internals](./rendering-modes.en.md)
-- Build-time `modifyWebpackConfig` context: read [Build System](./webpack-build.en.md)
+- Server middleware position: read [Server and Middleware](./server-and-middleware.md)
+- Renderer plugin hook timing: read [Rendering Modes Internals](./rendering-modes.md)
+- Build-time `modifyWebpackConfig` context: read [Build System](./webpack-build.md)

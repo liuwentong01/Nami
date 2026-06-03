@@ -950,6 +950,6 @@ No. What is passed in the routing configuration is the export function name stri
 
 
 
-- How to cache ISR routes: Read [ISR and Caching](./isr-and-caching.en.md)
-- How routing enters the renderer: Read [Rendering Mode Principle](./rendering-modes.en.md)
-- Server-side matching and middleware order: Read [Server and Middleware](./server-and-middleware.en.md)
+- How to cache ISR routes: Read [ISR and Caching](./isr-and-caching.md)
+- How routing enters the renderer: Read [Rendering Mode Principle](./rendering-modes.md)
+- Server-side matching and middleware order: Read [Server and Middleware](./server-and-middleware.md)

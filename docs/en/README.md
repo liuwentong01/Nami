@@ -10,15 +10,15 @@ This documentation set is designed for developer training. Its goal is to help y
 
 | Document | Contents | Best For |
 |------|------|--------|
-| [Quick Start](./quick-start.en.md) | Project creation, configuration, CLI commands, first page | All developers |
-| [Architecture Design](./architecture.en.md) | Monorepo structure, package dependencies, request lifecycle, data flow | Architects, core developers |
-| [Five Rendering Modes](./rendering-modes.en.md) | CSR / SSR / SSG / ISR / Streaming SSR principles and selection | Full-stack developers |
-| [Plugin System](./plugin-system.en.md) | Hook mechanism, writing plugins, official plugins, best practices | Plugin developers |
-| [Routing System](./routing.en.md) | Route configuration, matching algorithm, lazy loading, data prefetching | Frontend developers |
-| [ISR and Caching](./isr-and-caching.en.md) | SWR strategy, three cache backends, on-demand invalidation, cache warming | Backend / Ops |
-| [Server and Middleware](./server-and-middleware.en.md) | Koa middleware pipeline, cluster mode, graceful shutdown | Backend developers / Ops |
-| [Build System](./webpack-build.en.md) | Webpack configuration, Loader, Plugin, code splitting | Build engineers |
-| [Error Handling and Degradation](./error-and-degradation.en.md) | 5-level degradation strategy, Error Boundary, error reporting | Full-stack developers |
+| [Quick Start](./quick-start.md) | Project creation, configuration, CLI commands, first page | All developers |
+| [Architecture Design](./architecture.md) | Monorepo structure, package dependencies, request lifecycle, data flow | Architects, core developers |
+| [Five Rendering Modes](./rendering-modes.md) | CSR / SSR / SSG / ISR / Streaming SSR principles and selection | Full-stack developers |
+| [Plugin System](./plugin-system.md) | Hook mechanism, writing plugins, official plugins, best practices | Plugin developers |
+| [Routing System](./routing.md) | Route configuration, matching algorithm, lazy loading, data prefetching | Frontend developers |
+| [ISR and Caching](./isr-and-caching.md) | SWR strategy, three cache backends, on-demand invalidation, cache warming | Backend / Ops |
+| [Server and Middleware](./server-and-middleware.md) | Koa middleware pipeline, cluster mode, graceful shutdown | Backend developers / Ops |
+| [Build System](./webpack-build.md) | Webpack configuration, Loader, Plugin, code splitting | Build engineers |
+| [Error Handling and Degradation](./error-and-degradation.md) | 5-level degradation strategy, Error Boundary, error reporting | Full-stack developers |
 
 ---
 
@@ -111,24 +111,24 @@ onBuildEnd               onAfterRender             onRouteChange
 
 ### Path 1: Business Developer (1-2 Days)
 
-1. [Quick Start](./quick-start.en.md) — Create a project, write configuration, start development
-2. [Five Rendering Modes](./rendering-modes.en.md) — Understand differences between modes and choose the right mode for each page
-3. [Routing System](./routing.en.md) — Route configuration, data prefetching, lazy loading
-4. [Error Handling and Degradation](./error-and-degradation.en.md) — Understand the framework's fault-tolerance guarantees
+1. [Quick Start](./quick-start.md) — Create a project, write configuration, start development
+2. [Five Rendering Modes](./rendering-modes.md) — Understand differences between modes and choose the right mode for each page
+3. [Routing System](./routing.md) — Route configuration, data prefetching, lazy loading
+4. [Error Handling and Degradation](./error-and-degradation.md) — Understand the framework's fault-tolerance guarantees
 
 ### Path 2: Framework Developer / Plugin Author (3-5 Days)
 
 1. Complete Path 1 first
-2. [Architecture Design](./architecture.en.md) — Understand the overall architecture and data flow
-3. [Plugin System](./plugin-system.en.md) — Master the hook mechanism and write custom plugins
-4. [Server and Middleware](./server-and-middleware.en.md) — Understand the Koa middleware pipeline
-5. [Build System](./webpack-build.en.md) — Understand the build process and outputs
+2. [Architecture Design](./architecture.md) — Understand the overall architecture and data flow
+3. [Plugin System](./plugin-system.md) — Master the hook mechanism and write custom plugins
+4. [Server and Middleware](./server-and-middleware.md) — Understand the Koa middleware pipeline
+5. [Build System](./webpack-build.md) — Understand the build process and outputs
 
 ### Path 3: Ops / SRE (1-2 Days)
 
-1. [Quick Start](./quick-start.en.md) — Understand deployment commands
-2. [Server and Middleware](./server-and-middleware.en.md) — Cluster, graceful shutdown, health checks, K8s/PM2 deployment
-3. [ISR and Caching](./isr-and-caching.en.md) — Cache strategy, Redis configuration, on-demand invalidation
+1. [Quick Start](./quick-start.md) — Understand deployment commands
+2. [Server and Middleware](./server-and-middleware.md) — Cluster, graceful shutdown, health checks, K8s/PM2 deployment
+3. [ISR and Caching](./isr-and-caching.md) — Cache strategy, Redis configuration, on-demand invalidation
 
 ---
 
@@ -141,7 +141,7 @@ Ask yourself three questions:
 2. **Does the data need to be fresh on every request?** Yes → SSR; no → continue
 3. **How often does the data update?** Almost never → SSG; minutes/hours → ISR
 
-See [Five Rendering Modes · Selection Decision Tree](./rendering-modes.en.md)
+See [Five Rendering Modes · Selection Decision Tree](./rendering-modes.md)
 
 ### Q: Can ISR and SSR be mixed?
 
@@ -149,4 +149,4 @@ Yes. Nami supports setting the rendering mode **at route granularity**. In the s
 
 ### Q: Will a plugin error cause page rendering to fail?
 
-No. Plugin hook execution is wrapped in try/catch. A single plugin failure only writes a warn log and does not interrupt the rendering process. See [Plugin System · Error Isolation](./plugin-system.en.md)
+No. Plugin hook execution is wrapped in try/catch. A single plugin failure only writes a warn log and does not interrupt the rendering process. See [Plugin System · Error Isolation](./plugin-system.md)

@@ -759,6 +759,6 @@ No. They are reusable core utilities. Whether reporting is wired depends on plug
 
 ## Next Steps
 
-- To understand how rendering mode failures enter this logic: read [Rendering Modes Internals](./rendering-modes.en.md)
-- To understand ISR cache failure bypass: read [ISR and Caching Internals](./isr-and-caching.en.md)
-- To understand the full middleware order: read [Server and Middleware](./server-and-middleware.en.md)
+- To understand how rendering mode failures enter this logic: read [Rendering Modes Internals](./rendering-modes.md)
+- To understand ISR cache failure bypass: read [ISR and Caching Internals](./isr-and-caching.md)
+- To understand the full middleware order: read [Server and Middleware](./server-and-middleware.md)

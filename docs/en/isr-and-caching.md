@@ -1155,6 +1155,6 @@ No. Redis shares cache entries, but `RevalidationQueue` is a per-Node process lo
 
 
 
-- To understand how ISR routes are matched: read [Principles of Routing Systems](./routing.en.md)
-- To learn how to downgrade when rendering fails: read [Error Handling and Downgrade](./error-and-degradation.en.md)
-- Want to know the order of server-side middleware: read [Server and Middleware](./server-and-middleware.en.md)
+- To understand how ISR routes are matched: read [Principles of Routing Systems](./routing.md)
+- To learn how to downgrade when rendering fails: read [Error Handling and Downgrade](./error-and-degradation.md)
+- Want to know the order of server-side middleware: read [Server and Middleware](./server-and-middleware.md)
