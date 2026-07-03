@@ -57,7 +57,8 @@ export function createStyleRules(options: StyleRuleOptions = {}): RuleSetRule[] 
     localIdentName = isDev ? '[name]__[local]--[hash:base64:5]' : '[hash:base64:8]',
   } = options;
 
-  // 服务端构建：忽略所有样式文件（返回空模块）
+  // 服务端构建：不注入或提取 CSS，仅把 CSS 当作源码字符串资源处理，
+  // 避免页面组件 import 样式文件时导致 Node 侧 webpack 构建失败。
   if (isServer) {
     return [
       {

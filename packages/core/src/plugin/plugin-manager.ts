@@ -225,7 +225,7 @@ export class PluginManager {
       return orderA - orderB;
     });
 
-    // 依次注册（保证顺序）
+    // 依次注册（保证顺序）这里的写法是串行
     for (const plugin of sorted) {
       await this.registerPlugin(plugin);
     }

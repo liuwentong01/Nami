@@ -18,7 +18,7 @@
  * ├── [并行] Client Build → dist/client/
  * ├── [并行] Server Build → dist/server/ (如有 SSR/ISR 路由)
  * │
- * ├── [串行] SSG Generate → dist/static/ (如有 SSG/ISR 路由)
+ * ├── [串行] SSG Generate → dist/static/ (如有 SSG/ISR 路由) // TODO 这里为什么是串行
  * │
  * └── 生成 nami-manifest.json
  * ```
@@ -198,6 +198,12 @@ export class NamiBuilder {
       await this.prepareBuildContext(isDev);
 
       // 1. 分析路由，确定构建任务
+      // tasks 示例（生产模式，路由里同时有 SSR 和 SSG/ISR）：
+      // [
+      //   { type: 'client', config: clientWebpackConfig },
+      //   { type: 'server', config: serverWebpackConfig },
+      //   { type: 'ssg', config: {}, routes: [{ path: '/', renderMode: RenderMode.SSG }] },
+      // ]
       const tasks = await this.determineBuildTasks(isDev, options);
       logger.info(`需要执行 ${tasks.length} 个构建任务`);
 
@@ -293,7 +299,7 @@ export class NamiBuilder {
    *
    * 根据路由表中各路由的 renderMode 决定需要哪些构建产物：
    * - Client Bundle：始终需要（CSR 渲染和 Hydration 都依赖它）
-   * - Server Bundle：仅当存在 SSR 或 ISR 路由时需要（服务端渲染用）
+   * - Server Bundle：仅当存在 SSR,  SSG 或 ISR 路由时需要（服务端渲染用）
    * - SSG 生成：仅当存在 SSG 或 ISR 路由且为生产模式时执行
    *
    * @param isDev - 是否为开发模式（开发模式跳过 SSG）
@@ -379,6 +385,12 @@ export class NamiBuilder {
       [...this.config.routes],
     );
 
+    // modifiedRoutes 示例：插件可能追加路由，或把已有路由改成 SSG/SSR/ISR。
+    // [
+    //   { path: '/', component: 'pages/index.tsx', renderMode: RenderMode.CSR },
+    //   { path: '/docs', component: 'pages/docs.tsx', renderMode: RenderMode.SSG, getStaticProps: 'getStaticProps' },
+    //   { path: '/preview/:id', component: 'pages/preview.tsx', renderMode: RenderMode.SSR, getServerSideProps: 'getServerSideProps' },
+    // ]
     // Builder 是单次使用对象，这里直接更新内部 config，
     // 让后续任务划分、生成模块映射和 manifest 都基于同一份最终路由表。
     this.config = {
