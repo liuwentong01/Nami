@@ -1,0 +1,34 @@
+{
+  "name": "@nami/example-feature-showcase",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Nami 全功能混合渲染示例：CSR、SSR、Streaming、SSG、ISR、客户端运行时与插件",
+  "scripts": {
+    "dev": "nami build && nami start",
+    "dev:hmr": "nami dev --port 3100",
+    "build": "nami build",
+    "start": "nami start",
+    "generate": "nami generate",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@nami/client": "workspace:*",
+    "@nami/core": "workspace:*",
+    "@nami/plugin-error-boundary": "workspace:*",
+    "@nami/plugin-monitor": "workspace:*",
+    "@nami/plugin-request": "workspace:*",
+    "@nami/plugin-skeleton": "workspace:*",
+    "@nami/server": "workspace:*",
+    "@nami/shared": "workspace:*",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@nami/cli": "workspace:*",
+    "@nami/webpack": "workspace:*",
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "typescript": "^5.3.0"
+  }
+}

@@ -10,7 +10,7 @@
  * 在此基础上提供路由注册、批量管理等能力。
  *
  * 匹配优先级：
- * 1. 精确匹配的静态路由优先
+ * 1. 优先精确匹配的静态路由
  * 2. 动态参数路由按注册顺序匹配
  * 3. 通配符路由最后匹配
  */
@@ -34,14 +34,14 @@ const logger = createLogger('@nami/core:route-manager');
  *   { path: '/about', component: './pages/about', renderMode: 'ssg' },
  * ]);
  *
- * // 匹配路由
+ * 匹配路由
  * const result = manager.match('/user/123');
- * // { route: { path: '/user/:id', ... }, params: { id: '123' }, isExact: true }
+ * { route: { path: '/user/:id', ... }, params: { id: '123' }, isExact: true }
  *
- * // 动态注册
+ * 动态注册
  * manager.register({ path: '/new-page', component: './pages/new', renderMode: 'csr' });
  *
- * // 获取所有路由
+ * 获取所有路由
  * const allRoutes = manager.getRoutes();
  * ```
  */
@@ -107,10 +107,7 @@ export class RouteManager {
     // 尝试匹配子路由（嵌套路由也按优先级排序）
     for (const route of ranked) {
       if (route.children && route.children.length > 0) {
-        const childResult = this.matchChildren(
-          rankRoutes(route.children),
-          cleanPath,
-        );
+        const childResult = this.matchChildren(rankRoutes(route.children), cleanPath);
         if (childResult) {
           return childResult;
         }
@@ -234,10 +231,7 @@ export class RouteManager {
    * @param path - 请求路径
    * @returns 匹配结果或 null
    */
-  private matchChildren(
-    children: NamiRoute[],
-    path: string,
-  ): RouteMatchResult | null {
+  private matchChildren(children: NamiRoute[], path: string): RouteMatchResult | null {
     for (const child of children) {
       const exact = child.exact !== false;
       const result = this.matcher.match(child.path, path, exact);

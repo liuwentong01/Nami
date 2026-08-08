@@ -135,10 +135,7 @@ function normalizePath(pathname: string): string {
  * - (.*) → 正则分组
  * - 其他 → 静态段，字面匹配
  */
-function compilePattern(
-  pattern: string,
-  options: CompileOptions = {},
-): CompiledRule {
+function compilePattern(pattern: string, options: CompileOptions = {}): CompiledRule {
   const { exact = true, sensitive = false } = options;
   const cacheKey = `${pattern}|exact=${exact}|sensitive=${sensitive}`;
 
@@ -219,16 +216,13 @@ function compilePattern(
   const flags = sensitive ? '' : 'i';
   const regexp = exact
     ? new RegExp(`^${regexpStr}\\/?$`, flags) // 精确匹配（允许尾部可选 /）
-    : new RegExp(`^${regexpStr}`, flags);       // 前缀匹配
+    : new RegExp(`^${regexpStr}`, flags); // 前缀匹配
 
   const rule: CompiledRule = { pattern, regexp, paramNames, score };
 
   // 写入缓存（达到上限时清除旧缓存的一半）
   if (ruleCache.size >= MAX_CACHE_SIZE) {
-    const keysToDelete = Array.from(ruleCache.keys()).slice(
-      0,
-      Math.floor(MAX_CACHE_SIZE / 2),
-    );
+    const keysToDelete = Array.from(ruleCache.keys()).slice(0, Math.floor(MAX_CACHE_SIZE / 2));
     for (const key of keysToDelete) {
       ruleCache.delete(key);
     }
@@ -266,10 +260,7 @@ function compilePattern(
  * // null
  * ```
  */
-export function compilePath(
-  pattern: string,
-  options?: CompileOptions,
-): CompiledMatcher {
+export function compilePath(pattern: string, options?: CompileOptions): CompiledMatcher {
   const rule = compilePattern(pattern, options);
 
   return (pathname: string): PathMatchResult | null => {
@@ -356,11 +347,11 @@ export function matchPath(
  * ];
  *
  * const sorted = rankRoutes(routes);
- * // [
- * //   { path: '/user/profile' },   // 分数最高（静态 + 静态 + 精确匹配）
- * //   { path: '/user/:id' },       // 分数中等（静态 + 参数 + 精确匹配）
- * //   { path: '/user/*' },         // 分数最低（静态 + 通配符）
- * // ]
+ * [
+ *    { path: '/user/profile' },   // 分数最高（静态 + 静态 + 精确匹配）
+ *    { path: '/user/:id' },       // 分数中等（静态 + 参数 + 精确匹配）
+ *    { path: '/user/*' },         // 分数最低（静态 + 通配符）
+ * ]
  * ```
  */
 export function rankRoutes<T extends RankableRoute>(routes: T[]): T[] {

@@ -60,25 +60,25 @@ export interface MatchResultWithScore extends MatchResult {
  * ```typescript
  * const matcher = new RouteMatcher();
  *
- * // 静态路径匹配
+ * 静态路径匹配
  * matcher.match('/about', '/about');
- * // { matched: true, params: {} }
+ * { matched: true, params: {} }
  *
- * // 动态参数匹配
+ * 动态参数匹配
  * matcher.match('/user/:id', '/user/123');
- * // { matched: true, params: { id: '123' } }
+ * { matched: true, params: { id: '123' } }
  *
- * // 通配符匹配
+ * 通配符匹配
  * matcher.match('/docs/*', '/docs/getting-started/install');
- * // { matched: true, params: { '*': 'getting-started/install' } }
+ * { matched: true, params: { '*': 'getting-started/install' } }
  *
- * // 不匹配
+ * 不匹配
  * matcher.match('/user/:id', '/post/123');
- * // { matched: false, params: {} }
+ * { matched: false, params: {} }
  *
- * // 带分数的匹配
+ * 带分数的匹配
  * matcher.matchWithScore('/user/:id', '/user/123');
- * // { matched: true, params: { id: '123' }, score: 4 }
+ * { matched: true, params: { id: '123' }, score: 4 }
  * ```
  */
 export class RouteMatcher {
@@ -119,11 +119,7 @@ export class RouteMatcher {
    * @param exact - 是否精确匹配，默认 true
    * @returns 带分数的匹配结果
    */
-  matchWithScore(
-    pattern: string,
-    path: string,
-    exact: boolean = true,
-  ): MatchResultWithScore {
+  matchWithScore(pattern: string, path: string, exact: boolean = true): MatchResultWithScore {
     // 特殊情况：空模式或空路径
     if (!pattern || !path) {
       return { matched: false, params: {}, score: 0 };

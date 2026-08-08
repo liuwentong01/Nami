@@ -13,23 +13,23 @@
  * ```typescript
  * import { RendererFactory, RenderMode } from '@nami/core';
  *
- * // 方式一：通过工厂创建渲染器
+ * 方式一：通过工厂创建渲染器
  * const renderer = RendererFactory.create({
  *   mode: RenderMode.SSR,
  *   config: namiConfig,
  *   appElementFactory: (ctx) => <App {...ctx} />,
  * });
  *
- * // 方式二：直接实例化特定渲染器
+ * 方式二：直接实例化特定渲染器
  * const ssrRenderer = new SSRRenderer({
  *   config: namiConfig,
  *   appElementFactory: (ctx) => <App {...ctx} />,
  * });
  *
- * // 执行渲染
+ * 执行渲染
  * const result = await renderer.render(context);
  *
- * // 降级处理
+ * 降级处理
  * try {
  *   const result = await renderer.render(context);
  * } catch (error) {
@@ -95,7 +95,7 @@ export { StreamingSSRRenderer } from './streaming-ssr-renderer';
  *
  * @example
  * ```typescript
- * // 创建 SSR 渲染器
+ * 创建 SSR 渲染器
  * const renderer = RendererFactory.create({
  *   mode: RenderMode.SSR,
  *   config: namiConfig,
@@ -103,7 +103,7 @@ export { StreamingSSRRenderer } from './streaming-ssr-renderer';
  *   appElementFactory: (ctx) => <App {...ctx} />,
  * });
  *
- * // 创建 ISR 渲染器（需要额外的 ISRManager）
+ * 创建 ISR 渲染器（需要额外的 ISRManager）
  * const isrRenderer = RendererFactory.create({
  *   mode: RenderMode.ISR,
  *   config: namiConfig,
@@ -217,14 +217,10 @@ export class RendererFactory {
         // 利用 TypeScript 的 exhaustive check 确保处理了所有枚举值
         // 如果后续新增渲染模式但忘记在此处添加分支，编译时会报错
         const exhaustiveCheck: never = mode;
-        throw new RenderError(
-          `未知的渲染模式: ${exhaustiveCheck}`,
-          ErrorCode.RENDER_SSR_FAILED,
-          {
-            mode: String(mode),
-            supportedModes: Object.values(RenderModeEnum),
-          },
-        );
+        throw new RenderError(`未知的渲染模式: ${exhaustiveCheck}`, ErrorCode.RENDER_SSR_FAILED, {
+          mode: String(mode),
+          supportedModes: Object.values(RenderModeEnum),
+        });
       }
     }
   }
