@@ -58,7 +58,6 @@ export type {
   RendererOptions,
   CreateRendererOptions,
   AppElementFactory,
-  HTMLRenderer,
   PluginManagerLike,
   ISRManagerLike,
   StaticFileReader,
@@ -126,7 +125,6 @@ export class RendererFactory {
       config,
       pluginManager,
       appElementFactory,
-      htmlRenderer,
       moduleLoader,
       assetManifest,
       preferStreaming,
@@ -143,21 +141,19 @@ export class RendererFactory {
 
       // ==================== SSR ====================
       case RenderModeEnum.SSR: {
-        // SSR 至少需要一种可用的服务端渲染入口：
-        // 1. appElementFactory：新的 React 元素工厂协议
-        // 2. htmlRenderer：兼容已有 entry-server.renderToHTML() 协议
-        if (!appElementFactory && !htmlRenderer) {
+        // SSR 统一使用 React 元素工厂协议，框架负责字符串或流式渲染。
+        if (!appElementFactory) {
           throw new RenderError(
-            '创建 SSR 渲染器需要提供 appElementFactory 或 htmlRenderer 参数',
+            '创建 SSR 渲染器需要提供 appElementFactory 参数',
             ErrorCode.RENDER_SSR_FAILED,
             {
               mode,
-              hint: '请提供 React 元素工厂，或提供兼容 entry-server 的 HTML 渲染入口',
+              hint: '请在 entry-server 中导出 createAppElement(context)',
             },
           );
         }
 
-        if (preferStreaming && appElementFactory) {
+        if (preferStreaming) {
           return new StreamingSSRRenderer({
             config,
             pluginManager,
@@ -171,7 +167,6 @@ export class RendererFactory {
           config,
           pluginManager,
           appElementFactory,
-          htmlRenderer,
           moduleLoader,
           assetManifest,
         });
@@ -191,13 +186,13 @@ export class RendererFactory {
       // ==================== ISR ====================
       case RenderModeEnum.ISR: {
         // ISR 缓存未命中时同样需要一个真正可执行的服务端渲染入口。
-        if (!appElementFactory && !htmlRenderer) {
+        if (!appElementFactory) {
           throw new RenderError(
-            '创建 ISR 渲染器需要提供 appElementFactory 或 htmlRenderer 参数',
+            '创建 ISR 渲染器需要提供 appElementFactory 参数',
             ErrorCode.RENDER_ISR_REVALIDATE_FAILED,
             {
               mode,
-              hint: 'ISRRenderer 在缓存未命中时需要执行 React 渲染或 HTML 渲染',
+              hint: '请在 entry-server 中导出 createAppElement(context)',
             },
           );
         }
@@ -206,7 +201,6 @@ export class RendererFactory {
           config,
           pluginManager,
           appElementFactory,
-          htmlRenderer,
           moduleLoader,
           assetManifest,
         });

@@ -163,9 +163,19 @@ export interface PluginAPI {
   onHydrated: (fn: HydratedHook) => void;
 
   /**
-   * 包裹根组件
+   * 路由变化回调
+   * 钩子类型: parallel
+   * 客户端路由切换时触发
+   */
+  onRouteChange: (fn: RouteChangeHook) => void;
+
+  // ==================== 通用钩子 ====================
+
+  /**
+   * 同构地包裹根组件
    * 钩子类型: waterfall
-   * 允许插件用 Provider 等组件包裹应用根节点
+   * 服务端渲染和客户端 Hydration 都会执行，插件必须在两端使用相同定义、
+   * 配置和注册顺序，且 wrapper 的 render 阶段不能依赖仅浏览器可用的全局对象。
    *
    * @example
    * ```typescript
@@ -175,15 +185,6 @@ export interface PluginAPI {
    * ```
    */
   wrapApp: (fn: AppWrapper) => void;
-
-  /**
-   * 路由变化回调
-   * 钩子类型: parallel
-   * 客户端路由切换时触发
-   */
-  onRouteChange: (fn: RouteChangeHook) => void;
-
-  // ==================== 通用钩子 ====================
 
   /**
    * 统一错误处理

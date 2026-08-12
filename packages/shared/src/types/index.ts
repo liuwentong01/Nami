@@ -46,6 +46,7 @@ export type {
   KoaContextSubset,
   RenderTiming,
   RenderContext,
+  HydrationPayload,
   RenderResult,
   RenderMeta,
   ClientOptions,

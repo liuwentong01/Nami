@@ -9,12 +9,12 @@
  *
  * 2. onRenderError: 应用渐进降级策略
  *    - 根据错误类型和严重程度决定降级等级
- *    - 从 CSR 降级 → 骨架屏 → 静态页面 → 503 逐级降级
+ *    - 从带 loading 的 CSR Shell → 静态应急页面 → 503 逐级降级
  *    - 记录完整的降级链路，便于事后分析
  *
  * 错误处理哲学：
  * - 永远不要给用户看白屏（即使后端完全不可用也有静态兜底）
- * - 尽可能保留功能（能 CSR 就不降级到骨架屏）
+ * - 尽可能保留功能（能由 CSR 恢复就不进入静态应急页）
  * - 错误信息对开发者友好，对用户友善
  */
 
@@ -193,8 +193,8 @@ export class NamiErrorBoundaryPlugin implements NamiPlugin {
       api.onRenderError(async (context: RenderContext, error: Error) => {
         try {
           // 获取当前降级等级（可能已经被其他插件触发了降级）
-          const currentLevel = (context.extra['__degradation_level'] as DegradationLevel) ??
-            DegradationLevel.None;
+          const currentLevel =
+            (context.extra['__degradation_level'] as DegradationLevel) ?? DegradationLevel.None;
 
           // 先尝试重试（如果启用了重试策略且错误是可恢复的）
           if (this.retryStrategy && this.retryStrategy.shouldRetry(error)) {
@@ -243,7 +243,8 @@ export class NamiErrorBoundaryPlugin implements NamiPlugin {
           logger.error(`${this.logPrefix} 降级过程出错，返回 503`, {
             url: context.url,
             originalError: error.message,
-            degradeError: degradeError instanceof Error ? degradeError.message : String(degradeError),
+            degradeError:
+              degradeError instanceof Error ? degradeError.message : String(degradeError),
           });
         }
       });

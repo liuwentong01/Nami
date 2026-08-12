@@ -4,7 +4,7 @@
     "jsx": "react-jsx",
     "baseUrl": ".",
     "outDir": "dist",
-    "rootDir": "src",
+    "rootDir": ".",
     "composite": false,
     "incremental": false,
     "declaration": false,
@@ -13,6 +13,6 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src"],
+  "include": ["nami.config.ts", "src"],
   "exclude": ["node_modules", "dist"]
 }

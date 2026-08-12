@@ -22,14 +22,9 @@ import type {
   GetStaticPropsResult,
   NamiRoute,
 } from '@nami/shared';
+import { assertValidStaticPropsResult } from './static-props-result';
 
-import {
-  DataFetchError,
-  ErrorCode,
-  createLogger,
-  measureAsync,
-  createTimer,
-} from '@nami/shared';
+import { DataFetchError, ErrorCode, createLogger, measureAsync, createTimer } from '@nami/shared';
 
 /**
  * 数据预取函数的类型签名
@@ -39,9 +34,7 @@ type ServerSidePropsFunction = (
   context: GetServerSidePropsContext,
 ) => Promise<GetServerSidePropsResult>;
 
-type StaticPropsFunction = (
-  context: GetStaticPropsContext,
-) => Promise<GetStaticPropsResult>;
+type StaticPropsFunction = (context: GetStaticPropsContext) => Promise<GetStaticPropsResult>;
 
 /** 预取管理器内部使用的日志实例 */
 const logger = createLogger('@nami/core:prefetch');
@@ -203,6 +196,8 @@ export class PrefetchManager {
         'getStaticProps',
       );
 
+      assertValidStaticPropsResult(result);
+
       const duration = timer.total();
 
       logger.debug('SSG/ISR 数据预取完成', {
@@ -215,6 +210,9 @@ export class PrefetchManager {
         errors: [],
         degraded: false,
         duration,
+        redirect: result.redirect,
+        notFound: result.notFound,
+        revalidate: result.revalidate,
         details: [
           {
             key: 'getStaticProps',
@@ -284,7 +282,13 @@ export class PrefetchManager {
         return { key, success: true, data, error: undefined, duration };
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
-        return { key, success: false, data: undefined, error: err.message, duration: timer.total() };
+        return {
+          key,
+          success: false,
+          data: undefined,
+          error: err.message,
+          duration: timer.total(),
+        };
       }
     });
 
@@ -310,11 +314,13 @@ export class PrefetchManager {
         data[result.key] = result.data;
       } else {
         degraded = true;
-        errors.push(new DataFetchError(
-          `数据源 "${result.key}" 预取失败: ${result.error ?? '未知错误'}`,
-          ErrorCode.DATA_FETCH_FAILED,
-          { key: result.key },
-        ));
+        errors.push(
+          new DataFetchError(
+            `数据源 "${result.key}" 预取失败: ${result.error ?? '未知错误'}`,
+            ErrorCode.DATA_FETCH_FAILED,
+            { key: result.key },
+          ),
+        );
 
         // 如果不允许部分失败，将 data[key] 设为 null 以标记
         if (!allowPartialFailure) {
@@ -344,21 +350,16 @@ export class PrefetchManager {
    * @param label - 标签名称，用于错误信息
    * @returns 执行函数的返回值
    */
-  private executeWithTimeout<T>(
-    fn: () => Promise<T>,
-    timeout: number,
-    label: string,
-  ): Promise<T> {
+  private executeWithTimeout<T>(fn: () => Promise<T>, timeout: number, label: string): Promise<T> {
     return Promise.race([
       fn(),
       new Promise<never>((_, reject) => {
         setTimeout(() => {
           reject(
-            new DataFetchError(
-              `${label} 执行超时（${timeout}ms）`,
-              ErrorCode.DATA_FETCH_TIMEOUT,
-              { timeout, label },
-            ),
+            new DataFetchError(`${label} 执行超时（${timeout}ms）`, ErrorCode.DATA_FETCH_TIMEOUT, {
+              timeout,
+              label,
+            }),
           );
         }, timeout);
       }),
@@ -391,11 +392,7 @@ export class PrefetchManager {
    * @param key - 数据源标识
    * @returns 降级后的预取结果
    */
-  private createDegradedResult(
-    error: Error,
-    duration: number,
-    key: string,
-  ): PrefetchResult {
+  private createDegradedResult(error: Error, duration: number, key: string): PrefetchResult {
     return {
       data: {},
       errors: [error],

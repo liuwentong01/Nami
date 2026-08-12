@@ -83,8 +83,8 @@ export default function SSRRequestPage(props: SSRRequestPageProps = {}) {
         </pre>
         <p>观察 HTML、X-Nami-Showcase、X-Nami-Request-Id 与 Cache-Control。</p>
         <p>
-          当前 staticServe 中间件会在下游任意 2xx 返回后把 Cache-Control 改成
-          <code> public, no-cache</code>；这不是 GSSP 的推荐缓存策略，详见 README 的实现边界。
+          <code>staticServe</code> 只会为实际命中的静态文件补缓存头，不会覆盖 SSR
+          的响应策略；本页应保留 GSSP 渲染结果的 <code>private, no-cache</code>。
         </p>
       </section>
     </main>

@@ -42,17 +42,12 @@ import type {
   RouteMatchResult,
   Logger,
 } from '@nami/shared';
-import {
-  RenderMode,
-  createLogger,
-  createTimer,
-} from '@nami/shared';
+import { DegradationLevel, RenderMode, createLogger, createTimer } from '@nami/shared';
 import { RendererFactory } from '@nami/core';
 import type {
   BaseRenderer,
   PluginManagerLike,
   AppElementFactory,
-  HTMLRenderer,
   ModuleLoaderLike,
   ISRManagerLike,
   AssetManifest,
@@ -81,14 +76,6 @@ export interface RenderMiddlewareOptions {
   appElementFactory?: AppElementFactory;
 
   /**
-   * 兼容 entry-server.renderToHTML() 的 HTML 渲染函数
-   *
-   * 这是对 `appElementFactory` 的补充兼容，
-   * 用于打通默认 CLI / server bundle 的 SSR、ISR 渲染链路。
-   */
-  htmlRenderer?: HTMLRenderer;
-
-  /**
    * 页面模块加载器
    *
    * 用于解析 getServerSideProps / getStaticProps / getStaticPaths，
@@ -114,7 +101,6 @@ export interface RenderMiddlewareOptions {
    */
   runtimeProvider?: () => Promise<{
     appElementFactory?: AppElementFactory;
-    htmlRenderer?: HTMLRenderer;
     moduleLoader?: ModuleLoaderLike;
     assetManifest?: AssetManifest;
   }>;
@@ -247,15 +233,12 @@ function parseCookies(cookieHeader: string): Record<string, string> {
  * @param options - 渲染中间件配置
  * @returns Koa 中间件函数
  */
-export function renderMiddleware(
-  options: RenderMiddlewareOptions,
-): Koa.Middleware {
+export function renderMiddleware(options: RenderMiddlewareOptions): Koa.Middleware {
   const {
     config,
     pluginManager,
     degradationManager,
     appElementFactory,
-    htmlRenderer,
     moduleLoader,
     isrManager,
     assetManifest,
@@ -307,64 +290,93 @@ export function renderMiddleware(
 
     // ===== 3. 选择渲染器 =====
     const renderMode = matchResult.route.renderMode || config.defaultRenderMode;
-    let renderer: BaseRenderer;
+    let renderer: BaseRenderer | undefined;
 
-    try {
-      // 开发模式下 runtimeProvider 会在请求前重新读取最新的 server bundle，
-      // 避免 SSR 仍然使用上一次编译的入口函数或页面模块。
-      const runtime = runtimeProvider ? await runtimeProvider() : undefined;
+    const resolveRenderer = async (): Promise<BaseRenderer> => {
+      if (renderer) return renderer;
 
-      renderer = RendererFactory.create({
-        mode: renderMode,
-        config,
-        pluginManager: pluginManager as unknown as PluginManagerLike,
-        appElementFactory: runtime?.appElementFactory ?? appElementFactory,
-        htmlRenderer: runtime?.htmlRenderer ?? htmlRenderer,
-        moduleLoader: runtime?.moduleLoader ?? moduleLoader,
-        assetManifest: runtime?.assetManifest ?? assetManifest,
-        isrManager,
-        preferStreaming:
-          renderMode === RenderMode.SSR && matchResult.route.meta?.streaming === true,
-      });
-    } catch (error) {
-      requestLogger.error('创建渲染器失败，降级处理', {
-        requestId,
-        renderMode,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      try {
+        // 创建失败后的 Level 1 重试会重新读取 runtimeProvider，开发态可在
+        // server bundle 刚编译完成时自愈，而不是重复抛出同一个旧错误。
+        const runtime = runtimeProvider ? await runtimeProvider() : undefined;
+        renderer = RendererFactory.create({
+          mode: renderMode,
+          config,
+          pluginManager: pluginManager as unknown as PluginManagerLike,
+          appElementFactory: runtime?.appElementFactory ?? appElementFactory,
+          moduleLoader: runtime?.moduleLoader ?? moduleLoader,
+          assetManifest: runtime?.assetManifest ?? assetManifest,
+          isrManager,
+          preferStreaming:
+            renderMode === RenderMode.SSR && matchResult.route.meta?.streaming === true,
+        });
+        return renderer;
+      } catch (error) {
+        const creationError = error instanceof Error ? error : new Error(String(error));
+        requestLogger.error('创建渲染器失败，交由统一降级管线处理', {
+          requestId,
+          renderMode,
+          error: creationError.message,
+        });
 
-      // 创建渲染器失败时，尝试使用 CSR 降级
-      renderer = RendererFactory.create({
-        mode: RenderMode.CSR,
-        config,
-        pluginManager: pluginManager as unknown as PluginManagerLike,
-        assetManifest,
-      });
-    }
+        // 此时还没有 BaseRenderer，需由中间件补发 renderError hook，
+        // 让骨架插件等仍可提供 Level 3 候选；真正 render() 的错误由 Renderer 自己通知。
+        try {
+          await pluginManager.callHook('renderError', renderContext, creationError);
+        } catch (hookError) {
+          requestLogger.warn('渲染器创建失败后的 renderError hook 执行异常', {
+            requestId,
+            error: hookError instanceof Error ? hookError.message : String(hookError),
+          });
+        }
 
-    try {
-      // ===== 4. 执行渲染 =====
-      // 插件钩子统一由具体 renderer 内部触发。
-      // 这里不再额外执行 onBeforeRender / onAfterRender / onRenderError，
-      // 避免中间件层和渲染器层双重触发同一生命周期。
-      const streamingRenderer = renderer as BaseRenderer & {
-        renderToStream?: (context: RenderContext) => Promise<RenderResult>;
+        throw creationError;
+      }
+    };
+
+    // ===== 4. 执行渲染与统一降级 =====
+    // DegradationManager 从第一次渲染开始接管，保证 maxRetries 精确表示
+    // “首次失败后的重试次数”，同时让插件骨架屏只作为 Level 3 候选。
+    const performRender = async (context: RenderContext): Promise<RenderResult> => {
+      const activeRenderer = await resolveRenderer();
+      const streamingRenderer = activeRenderer as BaseRenderer & {
+        renderToStream?: (renderContext: RenderContext) => Promise<RenderResult>;
       };
-      const result: RenderResult = (
-        renderMode === RenderMode.SSR
-          && matchResult.route.meta?.streaming === true
-          && ctx.method !== 'HEAD'
-          && typeof streamingRenderer.renderToStream === 'function'
-      )
-        ? await streamingRenderer.renderToStream!(renderContext)
-        : await renderer.render(renderContext);
 
-      // ===== 5. 消费插件写入的 extra 字段 =====
-      applyPluginExtras(ctx, renderContext, result, requestLogger);
+      return renderMode === RenderMode.SSR &&
+        matchResult.route.meta?.streaming === true &&
+        ctx.method !== 'HEAD' &&
+        typeof streamingRenderer.renderToStream === 'function'
+        ? streamingRenderer.renderToStream(context)
+        : activeRenderer.render(context);
+    };
 
-      // ===== 6. 设置响应 =====
-      setResponse(ctx, result, requestLogger);
+    const degradationResult = await degradationManager.executeWithDegradation(
+      performRender,
+      renderContext,
+      config.fallback,
+    );
+    const result = degradationResult.result;
 
+    // ===== 5. 消费插件写入的 extra 字段 =====
+    // 正常、重试与所有降级结果都经过同一响应协议，避免某条错误分支丢失响应头。
+    applyPluginExtras(ctx, renderContext, result);
+
+    // ISR 缓存层在 await next() 返回后读取该标记。
+    // 完整渲染或重试成功可以缓存；CSR/骨架/静态页/503 以及数据降级结果不可缓存。
+    ctx.state.namiDegradationLevel = degradationResult.level;
+    ctx.state.namiRenderResult = result;
+    ctx.state.namiCacheable =
+      result.statusCode >= 200 &&
+      result.statusCode < 300 &&
+      ((degradationResult.level === DegradationLevel.Retry &&
+        renderContext.extra.__retry_result_cacheable !== false) ||
+        (degradationResult.level === DegradationLevel.None && result.meta.degraded === false));
+
+    // ===== 6. 设置响应 =====
+    setResponse(ctx, result, requestLogger);
+
+    if (degradationResult.level === DegradationLevel.None) {
       requestLogger.info('渲染完成', {
         requestId,
         renderMode: result.meta.renderMode,
@@ -372,69 +384,37 @@ export function renderMiddleware(
         degraded: result.meta.degraded,
         statusCode: result.statusCode,
       });
-    } catch (renderError) {
-      /**
-       * ===== 8. 渲染异常处理 =====
-       *
-       * 渲染过程中发生错误时：
-       * 1. 执行 onRenderError 钩子通知插件
-       * 2. 使用 DegradationManager 执行降级策略
-       * 3. 将降级结果写入响应
-       */
-      const normalizedError = renderError instanceof Error
-        ? renderError
-        : new Error(String(renderError));
-
-      requestLogger.error('渲染异常，启动降级流程', {
-        requestId,
-        path: ctx.path,
-        renderMode,
-        error: normalizedError.message,
-        stack: normalizedError.stack,
-      });
-
-      // 如果插件提供了骨架屏 fallback，优先使用
-      if (typeof renderContext.extra.__skeleton_fallback === 'string') {
-        const skeletonHtml = renderContext.extra.__skeleton_fallback;
-        ctx.status = 200;
-        ctx.set('Content-Type', 'text/html; charset=utf-8');
-        ctx.set('X-Nami-Render-Mode', 'skeleton-fallback');
-        ctx.body = skeletonHtml;
-        requestLogger.info('使用插件骨架屏降级', { requestId, path: ctx.path });
-        return;
-      }
-
-      // 执行降级策略
-      const degradationResult = await degradationManager.executeWithDegradation(
-        async (ctx: RenderContext) => renderer.render(ctx),
-        renderContext,
-        config.fallback,
-      );
-
-      // 设置降级响应
-      setResponse(ctx, degradationResult.result, requestLogger);
-
-      requestLogger.warn('降级渲染完成', {
-        requestId,
-        degradationLevel: degradationResult.level,
-        duration: timer.total(),
-        errorCount: degradationResult.errors.length,
-      });
+      return;
     }
+
+    const firstError = degradationResult.errors[0];
+    requestLogger.error('渲染异常，已执行降级流程', {
+      requestId,
+      path: ctx.path,
+      renderMode,
+      error: firstError?.message,
+      stack: firstError?.stack,
+    });
+
+    requestLogger.warn('降级渲染完成', {
+      requestId,
+      degradationLevel: degradationResult.level,
+      duration: timer.total(),
+      errorCount: degradationResult.errors.length,
+    });
   };
 }
 
 /**
  * 消费插件通过 context.extra 传递的协议字段
  *
- * 插件（cache / skeleton / error-boundary 等）在 onBeforeRender 阶段
- * 向 context.extra 写入约定字段，render-middleware 在渲染完成后统一读取，
- * 将插件意图映射到 HTTP 响应上，形成完整的「写入 → 消费」闭环。
+ * 插件可通过 context.extra 写入响应期协议字段，render-middleware 在得到最终
+ * RenderResult 后将它们映射到 HTTP 响应。页面缓存命中不在这里处理：
+ * BaseRenderer 已在数据预取和 React 渲染前完成短路。
  *
  * 约定字段：
- * - __cache_hit: boolean      — 插件级缓存命中标记
- * - __cache_content: string   — 插件级缓存内容（命中时直接替换 html）
- * - __skeleton_fallback: string — 骨架屏 HTML（渲染降级时使用）
+ * - __csr_shell_skeleton: string — 正常/降级 CSR Shell 的临时 loading 片段
+ * - __skeleton_fallback: string — Level 3 使用的被动静态应急 HTML（兼容字段名）
  * - __retry_attempted: boolean — 插件已触发重试标记
  * - __custom_headers: Record<string, string> — 插件注入的自定义响应头
  */
@@ -442,23 +422,13 @@ function applyPluginExtras(
   ctx: Koa.Context,
   renderContext: RenderContext,
   result: RenderResult,
-  logger: Logger,
 ): void {
   const { extra } = renderContext;
   if (!extra || Object.keys(extra).length === 0) return;
 
-  // 插件缓存命中 — 直接使用缓存内容替换渲染结果
-  if (extra.__cache_hit === true && typeof extra.__cache_content === 'string') {
-    result.html = extra.__cache_content;
-    result.headers['X-Nami-Plugin-Cache'] = 'HIT';
-    logger.debug('插件缓存命中，使用缓存内容', { path: renderContext.path });
-  }
-
   // 插件注入的自定义响应头
   if (extra.__custom_headers && typeof extra.__custom_headers === 'object') {
-    for (const [key, value] of Object.entries(
-      extra.__custom_headers as Record<string, string>,
-    )) {
+    for (const [key, value] of Object.entries(extra.__custom_headers as Record<string, string>)) {
       if (typeof value === 'string') {
         result.headers[key] = value;
       }
@@ -481,13 +451,16 @@ function applyPluginExtras(
  * @param result - 渲染结果
  * @param logger - 日志实例
  */
-function setResponse(
-  ctx: Koa.Context,
-  result: RenderResult,
-  _logger: Logger,
-): void {
+function setResponse(ctx: Koa.Context, result: RenderResult, _logger: Logger): void {
   // 设置 HTTP 状态码
   ctx.status = result.statusCode;
+
+  if (result.meta.degraded) {
+    // 同时写回 RenderResult，确保外层 ISR singleflight 的跟随请求也能恢复
+    // 同一份不可缓存协议，而不只是在当前 Koa Context 上看到该响应头。
+    result.headers['X-Nami-Degraded'] ??= '1';
+    result.headers['Cache-Control'] = 'private, no-store, max-age=0';
+  }
 
   // 设置响应头
   for (const [key, value] of Object.entries(result.headers)) {
@@ -500,7 +473,15 @@ function setResponse(
    * 如果渲染结果包含 cacheControl 配置（通常来自 ISR 路由），
    * 则设置对应的 Cache-Control 头部。
    */
-  if (result.cacheControl) {
+  if (result.meta.degraded) {
+    // 数据预取失败后继续渲染得到的页面只能服务当前请求，不能进入 CDN/ISR。
+    // 该显式协议也供绕过 ISR cache 的后台重验证请求识别失败结果，避免
+    // 用空 props 的降级 HTML 覆盖仍然可用的 stale 缓存。
+    const degradedCacheControl = 'private, no-store, max-age=0';
+    ctx.state.namiCacheControl = degradedCacheControl;
+    ctx.set('X-Nami-Degraded', result.headers['X-Nami-Degraded'] ?? '1');
+    ctx.set('Cache-Control', degradedCacheControl);
+  } else if (result.cacheControl) {
     const { revalidate, staleWhileRevalidate, tags } = result.cacheControl;
     let cacheValue = `s-maxage=${revalidate}`;
 

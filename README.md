@@ -25,7 +25,7 @@ Nami 是一个面向大规模前端团队的企业级框架，提供从开发、
 - **智能路由匹配** — PathMatcher 支持优先级评分（静态 > 约束参数 > 动态参数 > 通配符）、正则约束、可选参数
 - **Koa 中间件管线** — shutdownAware → timing → security → requestContext → healthCheck → staticServe → dataPrefetch → 用户/插件中间件 → errorIsolation → isrCache → render
 - **集群模式** — Master/Worker 进程管理，崩溃自动重启，优雅停机
-- **构建系统** — Client / Server / SSG / Dev 四套 Webpack 配置，持久化文件系统缓存，自定义 Loader 与 Plugin
+- **构建系统** — Client / Server 双 Bundle 编译，构建后由 `SSGRenderer` 统一预生成 SSG/ISR HTML，并提供文件系统缓存、自定义 Loader 与 Plugin
 - **CLI 工具** — `nami dev` / `build` / `start` / `generate` / `analyze` / `info` 一站式命令
 - **脚手架** — `create-nami-app` 交互式项目初始化
 - **测试体系** — Vitest 单元测试，覆盖渲染器、路由匹配、插件系统等核心模块
@@ -178,6 +178,33 @@ routes: [
 ]
 ```
 
+SSR、SSG 或 ISR 项目使用同一个服务端应用入口。业务代码只根据框架提供的
+`RenderContext` 创建 React 元素树：
+
+```tsx
+import React from 'react';
+import type { RenderContext } from '@nami/core';
+
+export function createAppElement(context: RenderContext): React.ReactElement {
+  // pageRegistry 由应用维护，key 与 route.component 一致。
+  const Page = pageRegistry[context.route.component];
+  if (!Page) {
+    throw new Error(`未注册服务端页面组件: ${context.route.component}`);
+  }
+  return (
+    <React.Suspense fallback={null}>
+      <Page {...(context.initialData ?? {})} />
+    </React.Suspense>
+  );
+}
+```
+
+CLI 会把 `createAppElement(context)` 解析为框架内部的 `appElementFactory`。
+普通 SSR/ISR、构建期 SSG 和 Streaming SSR 都消费这一个元素工厂；React
+字符串/流式渲染、完整 Document、manifest 资源和 Hydration 数据由 Nami 统一处理。
+客户端路由同样使用 Suspense + lazy page，因此服务端入口应保留对应的 Suspense
+边界；若使用 `wrapApp`，正常可渲染页面会在服务端与客户端按相同顺序执行 waterfall（各环境独立实例）。稳定静态 404 在业务树之前短路，不执行 `wrapApp`。
+
 ### Streaming SSR
 
 Nami 支持 React 18 的流式 SSR，通过 `renderToPipeableStream` 实现边渲染边传输：
@@ -222,7 +249,7 @@ export default defineConfig({
 
 说明：
 - `Streaming SSR` 仍归属 `RenderMode.SSR`，通过路由级 `meta.streaming = true` 开启
-- 仅在存在可执行的服务端渲染入口时生效（如 `entry-server.tsx`）
+- `entry-server.tsx` 必须导出 `createAppElement(context)`；缺少入口时构建或生产启动直接报错
 - `HEAD` 请求仍走普通 SSR 响应头路径，不启用流式输出
 
 ---
@@ -446,7 +473,7 @@ nami info       # 输出环境信息
 
 - **Chunk 预取** — 直接复用构建阶段生成的静态 import 工厂，支持动态路由匹配
 - **数据预取** — 通过 `/_nami/data/*` 调用对应页面的 `getServerSideProps / getStaticProps`
-- **数据注水** — 首屏 HTML 中的服务端数据写入 `window.__NAMI_DATA__`，这和上面的 HTTP 数据预取接口不是同一件事
+- **数据注水** — 正常可注水首屏 HTML 统一写入 `{ version: 1, props, degraded, renderMode, routePath }` 到 `window.__NAMI_DATA__`；它和上面的 HTTP 数据预取接口不是同一条链路。稳定静态 404 是例外，不注入 payload 或客户端 Bundle
 
 例如：
 

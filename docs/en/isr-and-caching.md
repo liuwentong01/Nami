@@ -136,12 +136,14 @@ Configuration verification is done in `packages/core/src/config/config-validator
 | Project | Rules |
 |------|------|
 | When `isr.enabled === true` | Verify `isr.defaultRevalidate` |
-| `defaultRevalidate` | Must be between `1` and `604800` seconds |
+| `defaultRevalidate` | Must be a finite integer between `1` and `604800` seconds |
+| `route.revalidate` | Must be a non-negative finite integer in seconds; `0` is valid |
+| `getStaticProps().revalidate` | The runtime contract is also a non-negative finite integer; `0` is valid |
 | `cacheAdapter: 'redis'` | Redis configuration needs to meet required fields |
 
-
-
-`route.revalidate` is configured by the route consumer and currently does not see the exact same range verification logic as `defaultRevalidate`.
+`defaultRevalidate` remains at least one second because it is the global fallback.
+Route values and dynamic GSP results may explicitly use `0`, but `NaN`, `Infinity`,
+negative numbers, and fractional seconds are invalid.
 
 
 
@@ -265,13 +267,13 @@ Default cache key:
 
 ```typescript
 function defaultGenerateCacheKey(ctx: Koa.Context): string {
-  return ctx.path;
+  return ctx.url;
 }
 ```
 
 
 
-Query, Cookie, and Header are not included by default. If the page content depends on these factors, `generateCacheKey(ctx)` needs to be customized at the middleware layer. Otherwise different queries may share the same ISR HTML.
+The default includes pathname and the raw query string, but not cookies, headers, or tenant identity; query ordering is not canonicalized. Customize `generateCacheKey(ctx)` when content depends on additional dimensions or when marketing parameters should be ignored.
 
 
 
@@ -284,11 +286,22 @@ const cacheResult = await isrManager.getOrRevalidate(
   cacheKey,
   async () => {
     await next();
+    const renderResult = ctx.state.namiRenderResult as RenderResult | undefined;
+    const statusCode = renderResult?.statusCode ?? ctx.status;
     return {
       html: typeof ctx.body === 'string' ? ctx.body : String(ctx.body || ''),
       tags: Array.isArray(ctx.state.namiCacheTags)
         ? ctx.state.namiCacheTags
         : undefined,
+      cacheable:
+        ctx.state.namiCacheable === true
+        && renderResult?.meta.renderMode === RenderMode.ISR,
+      statusCode,
+      headers: renderResult ? { ...renderResult.headers } : undefined,
+      revalidate: renderResult?.cacheControl?.revalidate,
+      invalidate:
+        renderResult?.meta.degraded !== true
+        && (statusCode === 404 || [301, 302, 303, 307, 308].includes(statusCode)),
     };
   },
   revalidateSeconds,
@@ -306,7 +319,8 @@ Hit response header:
 |------|--------|
 | Fresh | `X-Nami-Cache: HIT` |
 | Stale | `X-Nami-Cache: STALE` |
-| Miss | `X-Nami-Cache: MISS` |
+| Cacheable miss | `X-Nami-Cache: MISS` |
+| Uncacheable miss | `X-Nami-Cache: SKIP` with `private, no-store, max-age=0` |
 | Cache fault bypass | `X-Nami-Cache: BYPASS` |
 
 
@@ -383,7 +397,9 @@ revalidate = 60s
 
 
 
-NOTE: Storage layer TTL is written using `effectiveRevalidate * 2`. This ensures that the cache within the Stale window still exists, and the old HTML can be returned first and then updated in the background.
+The storage TTL uses twice the revalidation interval that actually won for that
+render. A dynamic `revalidate` returned by `getStaticProps` takes precedence over
+the route/global default, so each entry may have a different Fresh/Stale window.
 
 
 
@@ -419,12 +435,21 @@ Valid revalidation intervals:
 
 
 ```typescript
-const effectiveRevalidate = revalidateSeconds || this.config.defaultRevalidate;
+const effectiveRevalidate = normalizeRevalidate(
+  revalidateSeconds,
+  this.config.defaultRevalidate,
+);
 ```
 
 
 
-Therefore `revalidate: 0` does not mean never reauthenticate, but falls back to `defaultRevalidate`.
+`normalizeRevalidate()` falls back only for an undefined or invalid value. `0` is
+valid, but it does not mean “persist an immediately expired entry.” When the effective
+value is known to be `0` before lookup, Nami skips `cacheStore.get()` / `set()`, deletes
+any historical entry for the key on a best-effort basis, and retains only same-process
+coalescing through the active `inFlightRenders` Promise. If GSP dynamically returns
+`0` after rendering, Nami likewise deletes the old entry and returns this response as
+`SKIP + private, no-store`.
 
 
 
@@ -433,7 +458,8 @@ Process:
 
 
 ```text
-Read cacheStore.get(key)
+effectiveRevalidate === 0 ? delete the old entry and skip cacheStore.get(key)
+  : read cacheStore.get(key)
   │
   ├── Hit Fresh
   │ -> return cached.content
@@ -449,15 +475,23 @@ Read cacheStore.get(key)
   └── Missed or Expired
         -> Reuse in-flight rendering with the same key, or create a new renderAndCache()
         -> await renderFn()
-        -> generateETag(html)
-        -> cacheStore.set(key, entry, effectiveRevalidate * 2)
+        -> resolve payload.revalidate (dynamic GSP value wins)
+        -> redirect/notFound? delete the old key; do not cache the control response
+        -> renderedRevalidate === 0? delete the old key; do not write CacheStore
+        -> otherwise generateETag(html)
+        -> await cacheStore.set(key, entry, renderedRevalidate * 2)
         -> Return new HTML
         -> isCacheMiss: true
 ```
 
 
 
-Missed and Expired synchronous rendering paths will merge requests based on the cache key: when the same key is already being rendered, subsequent requests will wait for and reuse the same Promise, and multiple SSR/data requests will not be triggered concurrently. This merger only affects the current Node process; multi-process or multi-machine deployment still requires a shared cache backend and upstream throttling policy.
+Miss and Expired synchronous rendering paths coalesce by cache key: if the same key is
+already rendering, later requests await and reuse that Promise instead of starting
+duplicate SSR/data work. `revalidate = 0` reuses only this transient result and never
+creates a persistent HIT/STALE entry. Coalescing is local to one Node process;
+multi-process or multi-machine deployments still need a shared cache backend and
+upstream throttling.
 
 
 
@@ -469,15 +503,38 @@ Missed and Expired synchronous rendering paths will merge requests based on the 
 {
   content: html,
   createdAt: Date.now(),
-  revalidateAfter: effectiveRevalidate,
+  revalidateAfter: renderedRevalidate,
   tags: tags ?? [],
   etag,
+  statusCode,
+  headers: cachedHeaders,
 }
 ```
 
+`headers` contains only end-to-end fields that are safe to replay. Nami removes
+hop-by-hop fields, `Content-Length` / `Content-Encoding`, `Set-Cookie`,
+`Cache-Control`, ETag, and its cache-diagnostic headers; the cache layer regenerates
+the ETag from HTML. Fresh/STALE hits restore the entry's `statusCode` and safe headers,
+then apply request-specific `X-Nami-Cache`, `Cache-Control`, ETag, and age headers.
 
 
-The write cache is asynchronous fire-and-forget and does not block response returns. If the write fails, just log.
+
+Synchronous cold rendering first resolves the dynamic `revalidate` returned by this
+GSP execution, then awaits the cache write, and only then releases the same-key
+in-flight Promise. Waiting requests therefore receive the complete HTML, status,
+and headers and cannot create a second cold MISS while the first write is pending.
+A cache-backend write failure is logged without replacing the current response.
+
+A render result is cached only when its status is 2xx, its actual render mode is still
+ISR, its final `revalidate` is greater than zero, and the degradation chain has not
+marked it as uncacheable. An explicit GSP redirect status is limited to
+`301/302/303/307/308` (otherwise permanent defaults to `308` and temporary to `307`);
+redirect and `notFound` delete the old key and return as uncached control responses.
+Every response whose
+`RenderResult.meta.degraded` is `true` explicitly carries `X-Nami-Degraded` (preserving an existing semantic value, or `1` when absent) and
+`Cache-Control: private, no-store, max-age=0`; degraded CSR shells with temporary
+skeletons, Level 3 static emergency pages, static fallbacks, 503 responses, and other uncacheable results also return
+`X-Nami-Cache: SKIP`.
 
 
 
@@ -514,9 +571,9 @@ Queue capabilities:
 
 | Capability | Implementation |
 |------|------|
-| Deduplication | `pendingKeys` + `activeKeys`, only one task is allowed for the same key |
+| Deduplication | `pendingKeys` + `activeKeys`; one queue-tracked task per key at a time, while an underlying timed-out task may still be running |
 | Concurrency control | `activeCount < maxConcurrency` takes task execution |
-| Timeout protection | `Promise.race([renderFn(), timeout])` |
+| Timeout protection | `Promise.race([renderFn(), timeout])`; it stops waiting but does not cancel the underlying render/fetch |
 | Failure isolation | Failures are only logged and do not affect the old cache |
 | Close | `close()` Stop accepting new tasks, clear pending, and clear timer |
 
@@ -530,14 +587,35 @@ Cache entry written after success:
 {
   content: normalized.html,
   createdAt: Date.now(),
-  revalidateAfter: job.revalidateSeconds,
+  revalidateAfter: normalized.revalidate,
   tags: normalized.tags,
+  etag: generateETag(normalized.html),
+  statusCode: normalized.statusCode,
+  headers: normalized.headers,
 }
 ```
 
 
 
-Note: The background revalidation success path currently does not write the `etag` field; synchronous cold rendering paths will generate `etag`.
+The internal background request parses `s-maxage` from the new response's
+`Cache-Control` as `normalized.revalidate`. A new dynamic GSP value therefore updates
+both `revalidateAfter` and the storage TTL; only a response without a new value falls
+back to the queued entry's previous interval.
+
+If the internal request receives a degradation marker or an ordinary failing
+`private/no-store` response, it rejects the result. The queue enters its
+failure-isolation path, does not call `cacheStore.set()`, and keeps the old stale
+content. A redirect (only `301/302/303/307/308`) or `404 notFound` is instead a
+business control response: the queue deletes the old key but does not cache that
+response as a successful page. A dynamic `revalidate = 0` also deletes the old key
+without writing a replacement.
+
+A normal background success generates an ETag and stores the safely filtered status
+and headers in `CacheEntry`, just like synchronous cold rendering. The queue's
+`pendingKeys` / `activeKeys` deduplication is also process-local. A
+`Promise.race()` timeout merely ignores the result and releases the queue slot; it
+cannot cancel an already-started render or internal fetch. Business data functions
+therefore need their own timeout/cancellation support and re-entrant-safe side effects.
 
 
 
@@ -553,7 +631,11 @@ Source code location: `packages/server/src/middleware/isr-cache-middleware.ts`
 
 
 
-Background revalidation defaults to rerendering via an internal HTTP request. The internal request target is fixed to the local listening address, and `Host` for inbound requests is not used; if the environment variable `NAMI_ISR_REVALIDATE_TOKEN` is configured, the request will also carry a matching token header:
+Background revalidation defaults to rerendering through an internal HTTP request. The
+internal URL's network target is fixed to the local listening address and does not use
+the inbound request's `Host` to select that target. If
+`NAMI_ISR_REVALIDATE_TOKEN` is configured, the request also carries the matching token
+header:
 
 
 
@@ -561,6 +643,7 @@ Background revalidation defaults to rerendering via an internal HTTP request. Th
 fetch(`http://${serverHost}:${serverPort}${ctx.path}${querystring}`, {
   method: 'GET',
   headers: {
+    ...buildInternalRevalidateHeaders(ctx),
     [NAMI_ISR_REVALIDATE_HEADER]: '1',
     'x-nami-isr-revalidate-token': process.env.NAMI_ISR_REVALIDATE_TOKEN,
     'X-Requested-With': 'nami-isr-revalidate',
@@ -581,6 +664,14 @@ NAMI_ISR_REVALIDATE_HEADER = 'x-nami-isr-revalidate'
 
 
 When `isrCacheMiddleware` detects that the header value is `'1'`, it will also verify that the request source is a trusted local address; when `NAMI_ISR_REVALIDATE_TOKEN` is configured, the token will also be verified. Directly call `next()` after passing the verification, without reading the cache, to avoid background re-verification hitting the old cache again and repeatedly enqueuing.
+
+Although the network target is loopback, headers from the request that observed stale
+are forwarded end to end, including `Cookie`, `Authorization`, the original `Host`,
+and application-specific tenant/locale headers. Only hop-by-hop fields,
+`Content-Length`, conditional headers, and `Range` are removed because they cannot be
+safely replayed. This preserves identity, tenant, locale, and other vary semantics of
+a custom `generateCacheKey()`, so the rebuilt HTML still belongs to the cache variant
+that triggered the task.
 
 
 
@@ -620,10 +711,11 @@ In standard server links, ISR cache hits are handled by upstream middleware. Whe
 
 1. Call the `beforeRender` plug-in hook.
 2. Execute `prefetchData()` and read `getStaticProps`.
-3. Write the result to `context.initialData`.
-4. Execute React/HTML rendering.
-5. Assemble the complete HTML and inject data through `generateDataScript()`.
-6. Return `RenderResult` with ISR cache semantics.
+3. Short-circuit `redirect` / `notFound` before React as 30x / stable static 404
+   with `no-store`.
+4. For normal props, write `context.initialData` and render React/HTML.
+5. Assemble the complete HTML and hydration envelope.
+6. Return a `RenderResult` with dynamic `revalidate` and tags.
 
 
 
@@ -649,8 +741,8 @@ Currently, query, headers, and cookies are not passed.
 
 ```typescript
 {
-  revalidate,
-  staleWhileRevalidate: revalidate * 2,
+  revalidate: effectiveRevalidate,
+  staleWhileRevalidate: effectiveRevalidate * 2,
   tags: extractCacheTags(context),
 }
 ```
@@ -684,16 +776,16 @@ This is where ISR is most likely to get into trouble.
 
 | location | default cache key |
 |------|------------|
-| `isrCacheMiddleware` | `ctx.path` |
-| `ISRRenderer.buildCacheKey()` | `context.path` + sorted query |
+| `isrCacheMiddleware` | `ctx.url` (pathname + query) |
+| `ISRRenderer.buildCacheKey()` | `context.url` (pathname + query) |
 
 
 
-The standard server link actually reads and writes `CacheStore` to `isrCacheMiddleware`, so by default the ISR HTML cache key only contains pathname and does not contain query.
+The standard server path reads and writes `CacheStore` through `isrCacheMiddleware`. The outer middleware, core renderer, and Hydration `routePath` now all use the full URL, so query variants cannot accidentally share HTML or initial props.
 
 
 
-`ISRRenderer.buildCacheKey()` will sort the query and spell it into the key, but in the standard link it is mainly used for logging and rendering semantics; the judgment of hit, Stale, and Expired is completed by the upstream middleware.
+Hit, stale, and expired decisions are still made by the upstream middleware. The core key keeps the same behavior when the renderer is used directly. Query order is part of the key, so `?a=1&b=2` and `?b=2&a=1` are separate entries by default.
 
 
 
@@ -708,7 +800,7 @@ If the page content depends on query, for example:
 
 
 
-The same ISR HTML is shared by default. Custom `generateCacheKey(ctx)` should be provided for `isrCacheMiddleware` at the server-side integration layer, and the query or other factors that affect the content should be included in the key.
+These URLs produce separate ISR entries by default. Use `generateCacheKey(ctx)` when the application intentionally ignores marketing parameters or needs to include additional dimensions such as cookies or tenant identity; the rendered output must not depend on anything outside that key.
 
 
 
@@ -846,8 +938,15 @@ export interface CacheEntry {
   tags: string[];
   meta?: Record<string, unknown>;
   etag?: string;
+  statusCode?: number;
+  headers?: Record<string, string>;
 }
 ```
+
+`statusCode` and `headers` let Fresh/STALE hits replay the complete safe response
+semantics produced by a cold MISS. Background rebuilds write the same fields and a
+new ETag. The cache never persists hop-by-hop fields, `Set-Cookie`, compression or
+length fields, cache-control fields, or Nami's diagnostic headers.
 
 
 
@@ -862,13 +961,15 @@ Label source:
 
 
 
-Failed by path:
+Invalidate one full URL exactly:
 
 
 
 ```typescript
-await isrManager.invalidate('/products/iphone-15');
+await isrManager.invalidate('/products/iphone-15?locale=zh');
 ```
+
+This removes one full-URL key only; it does not delete other query variants of the same pathname. Give all variants a shared tag and call `invalidateByTag(tag)` when they must be invalidated together.
 
 
 
@@ -1027,6 +1128,8 @@ Nami also has a plugin caching system that provides LRU/TTL policy and CDN Heade
 | Failure mode | path/tag | Plug-in policy |
 | CDN Header | ISR Middleware/Renderer | `CDNCacheManager` |
 
+The cache plugin reads in `onBeforeRender`; on a hit, `BaseRenderer` returns before data prefetch and React rendering. `onAfterRender` only writes responses that are safe to reuse. ISR routes bypass the plugin cache to avoid two cache layers with conflicting invalidation semantics. By default, requests carrying `Cookie` or `Authorization` are also bypassed, and non-2xx, degraded, streaming, `private/no-store`, or `Set-Cookie` responses are not cached.
+
 
 
 Do not treat the default value of `CDNCacheManager` as the ISR's runtime cache header. ISR default `stale-while-revalidate` is `revalidate * 2`.
@@ -1051,7 +1154,7 @@ Possible reasons:
 
 1. The cache is still in Fresh state.
 2. Stale background re-validation fails and the old cache is retained.
-3. The page depends on query, but the default cache key is only `ctx.path`.
+3. The page depends on cookies, headers, or tenant identity, but the default key only contains the full URL.
 4. The `memory` backend is used, and the cache is not shared between multiple processes/multiple machines.
 
 
@@ -1062,7 +1165,7 @@ Suggestions:
 
 1. Observe `X-Nami-Cache` and `X-Nami-Cache-Age`.
 2. Check the log for "ISR background reauthentication failed".
-3. Customize `generateCacheKey` for query-sensitive pages.
+3. Customize `generateCacheKey` for any additional request dimensions.
 4. Use Redis for multi-machine deployment.
 
 
@@ -1083,11 +1186,13 @@ This is design behavior. The Stale state immediately returns the old HTML and up
 
 
 
-### ETag sometimes does not exist
+### A HIT/STALE status or business header differs from the cold MISS
 
-
-
-Synchronous cold rendering paths generate ETags; paths that the background revalidation queue successfully writes to the cache do not currently have ETags written to them.
+Both synchronous cold rendering and background rebuilds now store safely filtered
+`statusCode` / headers and generate an ETag; HIT/STALE restores them. If a difference
+remains, first check for a legacy entry created before those fields existed, or whether
+the header is intentionally excluded (`Set-Cookie`, hop-by-hop, compression/length,
+cache-control, and similar fields). Invalidate the key to regenerate a current entry.
 
 
 
@@ -1107,19 +1212,24 @@ This is not the case with standard server links. Cache hit, Stale judgment, and 
 
 
 
-### Misunderstanding 2: The default cache key contains query
+### Misunderstanding 2: The default cache key canonicalizes query or includes every request dimension
 
 
 
-Not included. The default key is `ctx.path`. `ISRRenderer.buildCacheKey()` contains query, but the standard link to read and write the Store key comes from the middleware.
+It does not. The default key is the raw `ctx.url`, so it includes pathname and query, but `?a=1&b=2` and `?b=2&a=1` are separate entries. Cookies, headers, and tenant identity are not included; customize `generateCacheKey()` when those semantics are required.
 
 
 
-### Misunderstanding 3: `revalidate: 0` means never expires
+### Misunderstanding 3: `revalidate: 0` falls back to the global default
 
 
 
-No. `getOrRevalidate()` uses `revalidateSeconds || defaultRevalidate`, `0` falls back to the global default.
+It does not. `0` is a valid dynamic or route value, but it means “do not use the
+persistent ISR CacheStore”: skip lookup and writes, clear the old key, and let only
+same-process concurrent requests reuse the active singleflight. It is neither a
+TTL-zero permanent entry nor a persistent entry that enters STALE on every request.
+Only `undefined`, or defensive normalization of an invalid internal value, falls back
+to the upstream interval.
 
 
 
@@ -1143,7 +1253,11 @@ Currently, we only see the constant `ISR_REVALIDATE_PATH`, but not the correspon
 
 
 
-No. Redis shares cache entries, but `RevalidationQueue` is a per-Node process local object.
+No. Redis shares cache entries, but synchronous `inFlightRenders` and the background
+`RevalidationQueue` are both local to each Node process, so multiple instances can
+still rebuild the same key. Also, the queue's `Promise.race()` timeout does not abort
+the underlying render/fetch; it only stops awaiting its result. True cancellation
+requires the business call chain to propagate an `AbortSignal` or equivalent.
 
 
 

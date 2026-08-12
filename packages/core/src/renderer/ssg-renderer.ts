@@ -12,7 +12,7 @@
  *
  * 2. **运行阶段**（render 方法）
  *    服务端收到请求后，直接从文件系统读取预生成的 HTML 返回。
- *    文件不存在时降级到 CSR。
+ *    `fallback=false` 的动态路由文件不存在时返回稳定 404；其他读取失败交给上层降级。
  *
  * 适用场景：
  * - 博客、文档、营销页等内容相对固定的页面
@@ -20,7 +20,8 @@
  * - 不需要实时数据的页面
  *
  * 降级策略：
- * SSG 文件不存在时降级到 CSR（createFallbackRenderer 返回 CSRRenderer）
+ * SSG 读取/产物异常时可降级到 CSR（createFallbackRenderer 返回 CSRRenderer）；
+ * `fallback=false` 的动态路径缺失是正常 404，不属于异常降级。
  *
  * 性能特征：
  * - TTFB 极快（直接返回静态文件，可被 CDN 缓存）
@@ -31,6 +32,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import type { ReactElement } from 'react';
 
 import type {
   RenderMode,
@@ -43,16 +45,21 @@ import type {
   GetStaticPathsResult,
   NamiRoute,
 } from '@nami/shared';
-import {
-  RenderMode as RenderModeEnum,
-  RenderError,
-  ErrorCode,
-  generateDataScript,
-} from '@nami/shared';
+import { RenderMode as RenderModeEnum, RenderError, ErrorCode } from '@nami/shared';
 
 import { BaseRenderer } from './base-renderer';
 import { CSRRenderer } from './csr-renderer';
-import type { RendererOptions, AppElementFactory, StaticFileReader } from './types';
+import {
+  assertValidStaticPropsResult,
+  resolveStaticRedirectStatus,
+} from '../data/static-props-result';
+import { matchPath } from '../router/path-matcher';
+import type {
+  RendererOptions,
+  AppElementFactory,
+  StaticFileReader,
+  ModuleLoaderLike,
+} from './types';
 
 function isOutsideDirectory(relativePath: string): boolean {
   return relativePath === '..' || relativePath.startsWith(`..${path.sep}`);
@@ -68,18 +75,239 @@ function assertStaticFileInsideDirectory(
   const relative = path.relative(resolvedStaticDir, resolvedFilePath);
 
   if (isOutsideDirectory(relative) || path.isAbsolute(relative)) {
-    throw new RenderError(
-      `SSG 静态文件路径非法: ${requestPath}`,
-      ErrorCode.RENDER_SSG_FAILED,
-      {
-        requestPath,
-        staticDir: resolvedStaticDir,
-        filePath: resolvedFilePath,
-      },
-    );
+    throw new RenderError(`SSG 静态文件路径非法: ${requestPath}`, ErrorCode.RENDER_SSG_FAILED, {
+      requestPath,
+      staticDir: resolvedStaticDir,
+      filePath: resolvedFilePath,
+    });
   }
 
   return resolvedFilePath;
+}
+
+type StaticRouteSegment = {
+  kind: 'static';
+  value: string;
+};
+
+type DynamicRouteSegment = {
+  kind: 'dynamic';
+  name: string;
+  optional: boolean;
+  multiSegment: boolean;
+  allowEmpty: boolean;
+};
+
+type ParsedRouteSegment = StaticRouteSegment | DynamicRouteSegment;
+
+interface ParsedRoutePattern {
+  segments: ParsedRouteSegment[];
+  isDynamic: boolean;
+}
+
+/**
+ * 按与 path-matcher 相同的“路径段”语法解析路由模式。
+ *
+ * SSG 不可以只用 `path.includes(':')` 判断动态路由：Nami 还支持 `*` 与 `(.*)`；
+ * 也不可以直接替换 `:key`：否则 `:id?`、`:id(\\d+)`、`:path+` 会把修饰符残留
+ * 在输出文件名中。这里把构建期 URL 生成和运行期文件定位收敛到同一份解析结果。
+ */
+function parseRoutePattern(routePath: string): ParsedRoutePattern {
+  const segments: ParsedRouteSegment[] = [];
+  const parameterNames = new Set<string>();
+  let parameterIndex = 0;
+
+  for (const segment of routePath.split('/').filter(Boolean)) {
+    let parsedSegment: ParsedRouteSegment;
+
+    if (segment === '*') {
+      parsedSegment = {
+        kind: 'dynamic',
+        name: '*',
+        optional: false,
+        multiSegment: true,
+        allowEmpty: false,
+      };
+    } else {
+      const groupMatch = segment.match(/^\((.+)\)$/);
+      if (groupMatch) {
+        parsedSegment = {
+          kind: 'dynamic',
+          // path-matcher 也按“此前已经出现的动态参数数量”命名正则分组。
+          name: `$${parameterIndex}`,
+          optional: false,
+          multiSegment: true,
+          allowEmpty: groupMatch[1] === '.*',
+        };
+      } else if (segment.startsWith(':')) {
+        let parameterExpression = segment.slice(1);
+        const optional = parameterExpression.endsWith('?');
+        if (optional) {
+          parameterExpression = parameterExpression.slice(0, -1);
+        }
+
+        const constraintMatch = parameterExpression.match(/^(\w+)\((.+)\)$/);
+        const multiSegment = !constraintMatch && parameterExpression.endsWith('+');
+        const name = constraintMatch
+          ? constraintMatch[1]
+          : multiSegment
+            ? parameterExpression.slice(0, -1)
+            : parameterExpression;
+
+        if (!name) {
+          throw new RenderError(`SSG 路由参数名称为空: ${routePath}`, ErrorCode.RENDER_SSG_FAILED, {
+            route: routePath,
+            segment,
+          });
+        }
+
+        parsedSegment = {
+          kind: 'dynamic',
+          name,
+          optional,
+          multiSegment,
+          allowEmpty: false,
+        };
+      } else {
+        parsedSegment = { kind: 'static', value: segment };
+      }
+    }
+
+    segments.push(parsedSegment);
+    if (parsedSegment.kind === 'dynamic') {
+      if (parameterNames.has(parsedSegment.name)) {
+        throw new RenderError(
+          `SSG 路由包含重复参数名: ${routePath}#${parsedSegment.name}`,
+          ErrorCode.RENDER_SSG_FAILED,
+          { route: routePath, parameter: parsedSegment.name },
+        );
+      }
+      parameterNames.add(parsedSegment.name);
+      parameterIndex++;
+    }
+  }
+
+  return {
+    segments,
+    isDynamic: parameterIndex > 0,
+  };
+}
+
+function encodeStaticPathSegment(value: string, routePath: string, parameterName: string): string {
+  if (value === '.' || value === '..') {
+    throw new RenderError(
+      `SSG 路由参数不能是点路径段: ${routePath}#${parameterName}`,
+      ErrorCode.RENDER_SSG_FAILED,
+      { route: routePath, parameter: parameterName, value },
+    );
+  }
+
+  return encodeURIComponent(value);
+}
+
+/**
+ * 将路由模式和 getStaticPaths / 路由匹配参数安全地反向生成为具体 URL。
+ * 生成后再交给正式 matchPath 做 round-trip 校验，避免两套语法日后漂移时静默写错文件。
+ */
+function materializeStaticRoutePath(
+  routePath: string,
+  params: Record<string, string>,
+  parsedPattern = parseRoutePattern(routePath),
+): string {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) {
+    throw new RenderError(
+      `getStaticPaths.params 必须是对象: ${routePath}`,
+      ErrorCode.RENDER_SSG_FAILED,
+      { route: routePath },
+    );
+  }
+
+  const concreteSegments: string[] = [];
+  const expectedValues = new Map<string, string>();
+
+  for (const segment of parsedPattern.segments) {
+    if (segment.kind === 'static') {
+      concreteSegments.push(segment.value);
+      continue;
+    }
+
+    const rawValue = params[segment.name];
+    if (rawValue === undefined || (rawValue === '' && !segment.allowEmpty)) {
+      if (segment.optional) {
+        continue;
+      }
+
+      throw new RenderError(
+        `getStaticPaths 缺少必需参数: ${routePath}#${segment.name}`,
+        ErrorCode.RENDER_SSG_FAILED,
+        { route: routePath, parameter: segment.name, params },
+      );
+    }
+
+    if (typeof rawValue !== 'string') {
+      throw new RenderError(
+        `getStaticPaths 参数必须是字符串: ${routePath}#${segment.name}`,
+        ErrorCode.RENDER_SSG_FAILED,
+        { route: routePath, parameter: segment.name, value: rawValue },
+      );
+    }
+
+    let encodedValue: string;
+    if (segment.multiSegment) {
+      const pathSegments = rawValue.split('/');
+      if (rawValue !== '' && pathSegments.some((value) => value.length === 0)) {
+        throw new RenderError(
+          `getStaticPaths 多段参数包含空路径段: ${routePath}#${segment.name}`,
+          ErrorCode.RENDER_SSG_FAILED,
+          { route: routePath, parameter: segment.name, value: rawValue },
+        );
+      }
+      encodedValue = pathSegments
+        .map((value) => encodeStaticPathSegment(value, routePath, segment.name))
+        .join('/');
+    } else {
+      if (rawValue.includes('/')) {
+        throw new RenderError(
+          `getStaticPaths 单段参数不能包含斜杠: ${routePath}#${segment.name}`,
+          ErrorCode.RENDER_SSG_FAILED,
+          { route: routePath, parameter: segment.name, value: rawValue },
+        );
+      }
+      encodedValue = encodeStaticPathSegment(rawValue, routePath, segment.name);
+    }
+
+    concreteSegments.push(encodedValue);
+    expectedValues.set(segment.name, rawValue);
+  }
+
+  const concretePath = concreteSegments.length > 0 ? `/${concreteSegments.join('/')}` : '/';
+  const matchResult = matchPath(routePath, concretePath, { exact: true });
+
+  if (!matchResult) {
+    throw new RenderError(
+      `getStaticPaths 参数无法生成匹配路由的 URL: ${routePath}`,
+      ErrorCode.RENDER_SSG_FAILED,
+      { route: routePath, params, concretePath },
+    );
+  }
+
+  for (const [name, expectedValue] of expectedValues) {
+    if (matchResult.params[name] !== expectedValue) {
+      throw new RenderError(
+        `getStaticPaths 参数与路由约束不匹配: ${routePath}#${name}`,
+        ErrorCode.RENDER_SSG_FAILED,
+        {
+          route: routePath,
+          parameter: name,
+          value: expectedValue,
+          matchedValue: matchResult.params[name],
+          concretePath,
+        },
+      );
+    }
+  }
+
+  return concretePath;
 }
 
 /**
@@ -93,6 +321,14 @@ export interface SSGRendererOptions extends RendererOptions {
    * 仅在 generateStatic() 构建时需要。
    */
   appElementFactory?: AppElementFactory;
+
+  /**
+   * 静态 HTML 输出/读取目录。
+   *
+   * 默认解析为 `${config.outDir}/static`；构建器可传入绝对路径，
+   * 避免其执行目录与项目根目录不一致时把产物写到错误位置。
+   */
+  staticDir?: string;
 
   /**
    * 静态文件读取器
@@ -117,6 +353,18 @@ export interface StaticGenerationResult {
   duration: number;
 }
 
+const STATIC_PAGE_METADATA_VERSION = 1;
+const STATIC_PAGE_METADATA_SUFFIX = '.nami.json';
+
+interface StaticPageMetadata {
+  version: typeof STATIC_PAGE_METADATA_VERSION;
+  kind: 'page' | 'redirect' | 'not-found';
+  statusCode: number;
+  headers: Record<string, string>;
+  /** getStaticProps 为该页面动态声明的重验证间隔 */
+  revalidate?: number;
+}
+
 /**
  * SSG 渲染器
  *
@@ -135,13 +383,13 @@ export class SSGRenderer extends BaseRenderer {
   private readonly staticDir: string;
 
   /** 模块加载器（用于解析数据预取函数） */
-  private readonly moduleLoader?: import('./types').ModuleLoaderLike;
+  private readonly moduleLoader?: ModuleLoaderLike;
 
   constructor(options: SSGRendererOptions) {
     super(options);
     this.appElementFactory = options.appElementFactory;
     this.fileReader = options.staticFileReader ?? this.createDefaultFileReader();
-    this.staticDir = path.join(options.config.outDir, 'static');
+    this.staticDir = path.resolve(options.staticDir ?? path.join(options.config.outDir, 'static'));
     this.moduleLoader = options.moduleLoader;
 
     this.logger.debug('SSG 渲染器已初始化', {
@@ -182,29 +430,65 @@ export class SSGRenderer extends BaseRenderer {
     // 触发渲染前钩子
     await this.callPluginHook('beforeRender', context);
 
+    const cachedResult = await this.resolvePluginCacheHit(context, timing);
+    if (cachedResult) {
+      return cachedResult;
+    }
+
     timing.renderStart = Date.now();
 
     try {
-      // 计算静态文件路径
-      const filePath = this.resolveStaticFilePath(context.path);
+      // 构建和运行必须用同一条“路由模式 + 参数 → canonical URL”链路。
+      // 这也让 `/about/`、编码形式不同但参数相同的请求稳定定位到同一份静态产物。
+      const routePattern = parseRoutePattern(context.route.path);
+      const canonicalPath = materializeStaticRoutePath(
+        context.route.path,
+        context.params,
+        routePattern,
+      );
+      const filePath = this.resolveStaticFilePath(canonicalPath);
 
       // 读取预生成的 HTML 文件
       const html = await this.fileReader.readFile(filePath);
 
       if (html === null) {
-        throw new RenderError(
-          `SSG 静态文件不存在: ${filePath}`,
-          ErrorCode.RENDER_SSG_FAILED,
-          {
-            url: context.url,
-            path: context.path,
-            filePath,
-          },
-        );
+        if (
+          context.route.renderMode === RenderModeEnum.SSG &&
+          routePattern.isDynamic &&
+          (context.route.fallback ?? false) === false
+        ) {
+          context.initialData = {};
+          context.extra.__nami_data_degraded = false;
+          timing.renderEnd = Date.now();
+          timing.htmlEnd = Date.now();
+
+          const notFoundResult = this.createDefaultResult(
+            this.assembleHTML(this.createNotFoundAppHTML(), context, { hydrate: false }),
+            404,
+            RenderModeEnum.SSG,
+            timing,
+            {
+              headers: {
+                'Cache-Control': 'private, no-store, max-age=0',
+              },
+            },
+          );
+          await this.callPluginHook('afterRender', context, notFoundResult);
+          return notFoundResult;
+        }
+
+        throw new RenderError(`SSG 静态文件不存在: ${filePath}`, ErrorCode.RENDER_SSG_FAILED, {
+          url: context.url,
+          path: context.path,
+          canonicalPath,
+          filePath,
+        });
       }
 
       timing.renderEnd = Date.now();
       timing.htmlEnd = Date.now();
+
+      const metadata = await this.readStaticPageMetadata(filePath);
 
       this.logger.debug('SSG 渲染完成（静态文件读取成功）', {
         url: context.url,
@@ -214,11 +498,11 @@ export class SSGRenderer extends BaseRenderer {
 
       const result = this.createDefaultResult(
         html,
-        200,
+        metadata?.statusCode ?? 200,
         RenderModeEnum.SSG,
         timing,
         {
-          headers: {
+          headers: metadata?.headers ?? {
             // SSG 页面可以长时间缓存，通过 CDN 分发
             // s-maxage 控制 CDN 缓存时间，max-age 控制浏览器缓存时间
             'Cache-Control': 'public, max-age=3600, s-maxage=86400',
@@ -293,6 +577,7 @@ export class SSGRenderer extends BaseRenderer {
       }
 
       const result = await gspFn(gspContext);
+      assertValidStaticPropsResult(result);
       const duration = Date.now() - startTime;
 
       this.logger.debug('SSG 数据预取完成', {
@@ -307,6 +592,9 @@ export class SSGRenderer extends BaseRenderer {
         errors: [],
         degraded: false,
         duration,
+        redirect: result.redirect,
+        notFound: result.notFound,
+        revalidate: result.revalidate,
         details: [
           {
             key: 'getStaticProps',
@@ -378,13 +666,12 @@ export class SSGRenderer extends BaseRenderer {
     const startTime = Date.now();
     const generatedPaths: string[] = [];
     const errors: Array<{ path: string; error: string }> = [];
+    const claimedOutputPaths = new Map<string, { pagePath: string; routePath: string }>();
 
     if (!this.appElementFactory) {
-      throw new RenderError(
-        'SSG 构建需要提供 appElementFactory',
-        ErrorCode.RENDER_SSG_FAILED,
-        { message: '请在 SSGRendererOptions 中配置 appElementFactory' },
-      );
+      throw new RenderError('SSG 构建需要提供 appElementFactory', ErrorCode.RENDER_SSG_FAILED, {
+        message: '请在 SSGRendererOptions 中配置 appElementFactory',
+      });
     }
 
     this.logger.info('开始 SSG 静态生成', { routeCount: routes.length });
@@ -396,13 +683,33 @@ export class SSGRenderer extends BaseRenderer {
       try {
         // 获取需要预生成的路径列表
         const pathsToGenerate = await this.getPathsForRoute(route);
+        const routePattern = parseRoutePattern(route.path);
 
         for (const pathInfo of pathsToGenerate) {
+          let pagePath = route.path;
           try {
-            await this.generateSinglePage(route, pathInfo.params);
-            const outputPath = this.resolveStaticFilePath(
-              this.interpolatePath(route.path, pathInfo.params),
-            );
+            pagePath = materializeStaticRoutePath(route.path, pathInfo.params, routePattern);
+            const outputPath = this.resolveStaticFilePath(pagePath);
+            const existingOwner = claimedOutputPaths.get(outputPath);
+            if (existingOwner) {
+              throw new RenderError(
+                `SSG 输出路径冲突: ${existingOwner.pagePath} 与 ${pagePath} 都映射到 ${outputPath}`,
+                ErrorCode.RENDER_SSG_FAILED,
+                {
+                  outputPath,
+                  firstPagePath: existingOwner.pagePath,
+                  firstRoutePath: existingOwner.routePath,
+                  secondPagePath: pagePath,
+                  secondRoutePath: route.path,
+                },
+              );
+            }
+
+            claimedOutputPaths.set(outputPath, {
+              pagePath,
+              routePath: route.path,
+            });
+            await this.generateSinglePage(route, pathInfo.params, pagePath);
             generatedPaths.push(outputPath);
 
             this.logger.debug('页面生成成功', {
@@ -412,7 +719,6 @@ export class SSGRenderer extends BaseRenderer {
             });
           } catch (pageError) {
             const errorMsg = pageError instanceof Error ? pageError.message : String(pageError);
-            const pagePath = this.interpolatePath(route.path, pathInfo.params);
             errors.push({ path: pagePath, error: errorMsg });
 
             this.logger.error('页面生成失败', {
@@ -455,13 +761,13 @@ export class SSGRenderer extends BaseRenderer {
   private async generateSinglePage(
     route: NamiRoute,
     params: Record<string, string>,
+    pagePath: string,
   ): Promise<void> {
     if (!this.appElementFactory) {
       throw new Error('appElementFactory 未配置');
     }
 
     // 构造虚拟渲染上下文
-    const pagePath = this.interpolatePath(route.path, params);
     const context: RenderContext = {
       url: pagePath,
       path: pagePath,
@@ -476,22 +782,72 @@ export class SSGRenderer extends BaseRenderer {
 
     // 执行数据预取
     const prefetchResult = await this.prefetchData(context);
+    if (prefetchResult.degraded) {
+      const reasons = prefetchResult.errors.map((error) => error.message).join('; ');
+      throw new RenderError(`SSG 数据预取失败: ${pagePath}`, ErrorCode.RENDER_SSG_FAILED, {
+        route: route.path,
+        pagePath,
+        reasons,
+      });
+    }
     context.initialData = prefetchResult.data as Record<string, unknown>;
+    context.extra.__nami_data_degraded = false;
 
-    // 条件导入 react-dom/server
-    const { renderToString } = await this.importRenderToString();
+    let fullHTML: string;
+    let metadata: StaticPageMetadata;
 
-    // React 渲染
-    const appElement = this.appElementFactory(context);
-    const appHTML = renderToString(appElement as React.ReactElement);
+    if (prefetchResult.redirect) {
+      const statusCode = resolveStaticRedirectStatus(prefetchResult.redirect);
+      fullHTML = this.createStaticRedirectHTML(prefetchResult.redirect.destination, statusCode);
+      metadata = {
+        version: STATIC_PAGE_METADATA_VERSION,
+        kind: 'redirect',
+        statusCode,
+        headers: {
+          Location: prefetchResult.redirect.destination,
+          'Cache-Control': 'private, no-store, max-age=0',
+        },
+      };
+    } else if (prefetchResult.notFound) {
+      fullHTML = this.assembleHTML(this.createNotFoundAppHTML(), context, { hydrate: false });
+      metadata = {
+        version: STATIC_PAGE_METADATA_VERSION,
+        kind: 'not-found',
+        statusCode: 404,
+        headers: {
+          'Cache-Control': 'private, no-store, max-age=0',
+        },
+      };
+    } else {
+      // 条件导入 react-dom/server
+      const { renderToString } = await this.importRenderToString();
 
-    // 组装完整 HTML
-    const fullHTML = this.assembleHTML(appHTML, context);
+      // React 渲染
+      const appElement = this.appElementFactory(context);
+      const appHTML = renderToString(await this.prepareAppElement(appElement, context));
+
+      // 组装完整 HTML
+      fullHTML = this.assembleHTML(appHTML, context);
+      metadata = {
+        version: STATIC_PAGE_METADATA_VERSION,
+        kind: 'page',
+        statusCode: 200,
+        headers: {
+          'Cache-Control': this.buildStaticCacheControl(prefetchResult.revalidate),
+        },
+        revalidate: prefetchResult.revalidate,
+      };
+    }
 
     // 写入文件
     const outputPath = this.resolveStaticFilePath(pagePath);
     await this.ensureDirectory(path.dirname(outputPath));
     await fs.promises.writeFile(outputPath, fullHTML, 'utf-8');
+    await fs.promises.writeFile(
+      this.resolveStaticMetadataPath(outputPath),
+      JSON.stringify(metadata, null, 2),
+      'utf-8',
+    );
   }
 
   /**
@@ -506,8 +862,8 @@ export class SSGRenderer extends BaseRenderer {
   private async getPathsForRoute(
     route: NamiRoute,
   ): Promise<Array<{ params: Record<string, string> }>> {
-    // 检查是否是动态路由（包含 : 参数）
-    const isDynamicRoute = route.path.includes(':');
+    // 必须识别完整路由语法，而不只是裸 `:param`。
+    const isDynamicRoute = parseRoutePattern(route.path).isDynamic;
 
     if (!isDynamicRoute) {
       // 静态路由只需生成一个页面
@@ -516,10 +872,11 @@ export class SSGRenderer extends BaseRenderer {
 
     // 动态路由需要 getStaticPaths 函数
     if (!route.getStaticPaths) {
-      this.logger.warn('动态路由未配置 getStaticPaths，跳过', {
-        path: route.path,
-      });
-      return [];
+      throw new RenderError(
+        `动态 SSG 路由必须配置 getStaticPaths: ${route.path}`,
+        ErrorCode.RENDER_SSG_FAILED,
+        { route: route.path },
+      );
     }
 
     // 通过 ModuleLoader 从 server bundle 加载 getStaticPaths
@@ -530,38 +887,67 @@ export class SSGRenderer extends BaseRenderer {
 
       if (getStaticPathsFn) {
         const result = await getStaticPathsFn();
+        this.assertSupportedStaticPathsFallback(route, result.fallback);
         this.logger.debug('getStaticPaths 返回路径列表', {
           path: route.path,
           pathCount: result.paths.length,
+          fallback: result.fallback,
         });
         return result.paths;
       }
     }
 
-    this.logger.warn('getStaticPaths 函数未找到或 ModuleLoader 未配置', {
-      component: route.component,
-      functionName: route.getStaticPaths,
-    });
-
-    return [];
+    throw new RenderError(
+      `getStaticPaths 函数未找到: ${route.component}#${route.getStaticPaths}`,
+      ErrorCode.RENDER_SSG_FAILED,
+      {
+        component: route.component,
+        functionName: route.getStaticPaths,
+      },
+    );
   }
 
   /**
-   * 将动态路由模板与参数合并为实际路径
+   * getStaticPaths fallback 必须与当前运行时真正具备的能力一致。
    *
-   * @param routePath - 路由路径模板（如 /blog/:id）
-   * @param params - 参数映射（如 { id: 'hello' }）
-   * @returns 实际路径（如 /blog/hello）
+   * - SSG 只能可靠支持 false：未生成的动态路径由 SSGRenderer 返回静态 404。
+   * - ISR 支持 blocking：冷 MISS 会同步执行 getStaticProps + React 渲染。
+   * - true/static 需要首屏 fallback 与后续替换协议，当前尚未实现，构建时直接失败。
    */
-  private interpolatePath(
-    routePath: string,
-    params: Record<string, string>,
-  ): string {
-    let result = routePath;
-    for (const [key, value] of Object.entries(params)) {
-      result = result.replace(`:${key}`, value);
+  private assertSupportedStaticPathsFallback(
+    route: NamiRoute,
+    fallback: GetStaticPathsResult['fallback'],
+  ): void {
+    const expectedFallback =
+      route.fallback ?? (route.renderMode === RenderModeEnum.ISR ? 'blocking' : false);
+
+    if (fallback !== expectedFallback) {
+      throw new RenderError(
+        `getStaticPaths fallback 与路由配置不一致: ${route.path}`,
+        ErrorCode.RENDER_SSG_FAILED,
+        {
+          route: route.path,
+          routeFallback: expectedFallback,
+          staticPathsFallback: fallback,
+        },
+      );
     }
-    return result;
+
+    const supported =
+      route.renderMode === RenderModeEnum.ISR ? fallback === 'blocking' : fallback === false;
+
+    if (!supported) {
+      throw new RenderError(
+        `当前运行时不支持 ${route.renderMode} 路由的 getStaticPaths fallback=${String(fallback)}`,
+        ErrorCode.RENDER_SSG_FAILED,
+        {
+          route: route.path,
+          renderMode: route.renderMode,
+          fallback,
+          supportedFallback: route.renderMode === RenderModeEnum.ISR ? 'blocking' : false,
+        },
+      );
+    }
   }
 
   /**
@@ -594,6 +980,99 @@ export class SSGRenderer extends BaseRenderer {
     return assertStaticFileInsideDirectory(this.staticDir, filePath, requestPath);
   }
 
+  /** 返回 HTML 产物对应的状态 sidecar 路径。 */
+  private resolveStaticMetadataPath(htmlFilePath: string): string {
+    return assertStaticFileInsideDirectory(
+      this.staticDir,
+      `${htmlFilePath}${STATIC_PAGE_METADATA_SUFFIX}`,
+      htmlFilePath,
+    );
+  }
+
+  /**
+   * 读取构建期写入的静态响应元数据。
+   * 老产物没有 sidecar 时保持向后兼容并按普通 200 SSG 页面处理；
+   * sidecar 一旦存在却损坏，则必须失败，避免把 redirect/notFound 静默恢复成 200。
+   */
+  private async readStaticPageMetadata(htmlFilePath: string): Promise<StaticPageMetadata | null> {
+    const metadataPath = this.resolveStaticMetadataPath(htmlFilePath);
+    const content = await this.fileReader.readFile(metadataPath);
+    if (content === null) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(content) as Partial<StaticPageMetadata>;
+      const validKinds: StaticPageMetadata['kind'][] = ['page', 'redirect', 'not-found'];
+      const headersAreValid =
+        parsed.headers !== null &&
+        typeof parsed.headers === 'object' &&
+        !Array.isArray(parsed.headers) &&
+        Object.values(parsed.headers).every((value) => typeof value === 'string');
+      const revalidateIsValid =
+        parsed.revalidate === undefined ||
+        (Number.isFinite(parsed.revalidate) &&
+          Number.isInteger(parsed.revalidate) &&
+          parsed.revalidate >= 0);
+
+      if (!revalidateIsValid) {
+        throw new TypeError('静态页面元数据 revalidate 的单位为秒，必须是非负有限整数');
+      }
+
+      if (
+        parsed.version !== STATIC_PAGE_METADATA_VERSION ||
+        !parsed.kind ||
+        !validKinds.includes(parsed.kind) ||
+        !Number.isInteger(parsed.statusCode) ||
+        parsed.statusCode! < 100 ||
+        parsed.statusCode! >= 600 ||
+        !headersAreValid
+      ) {
+        throw new TypeError('静态页面元数据字段非法');
+      }
+
+      return parsed as StaticPageMetadata;
+    } catch (error) {
+      throw new RenderError(
+        `SSG 静态页面元数据损坏: ${metadataPath}`,
+        ErrorCode.RENDER_SSG_FAILED,
+        {
+          metadataPath,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
+    }
+  }
+
+  private buildStaticCacheControl(revalidate?: number): string {
+    if (revalidate === undefined) {
+      return 'public, max-age=3600, s-maxage=86400';
+    }
+
+    return `public, s-maxage=${revalidate}, stale-while-revalidate=${revalidate * 2}`;
+  }
+
+  /** 生成无需 JavaScript/Hydration 也能工作的静态重定向文档。 */
+  private createStaticRedirectHTML(destination: string, statusCode: number): string {
+    const escapedDestination = this.escapeHTML(destination);
+    const title = statusCode === 308 || statusCode === 301 ? '页面已永久移动' : '正在跳转';
+
+    return [
+      '<!DOCTYPE html>',
+      '<html lang="zh-CN">',
+      '<head>',
+      '  <meta charset="utf-8">',
+      '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
+      `  <meta http-equiv="refresh" content="0; url=${escapedDestination}">`,
+      `  <title>${title}</title>`,
+      '</head>',
+      '<body>',
+      `  <p data-nami-redirect="true">页面已移动，<a href="${escapedDestination}">继续访问</a>。</p>`,
+      '</body>',
+      '</html>',
+    ].join('\n');
+  }
+
   /**
    * 组装完整的 HTML 文档
    *
@@ -601,22 +1080,23 @@ export class SSGRenderer extends BaseRenderer {
    * @param context - 渲染上下文
    * @returns 完整 HTML 字符串
    */
-  private assembleHTML(appHTML: string, context: RenderContext): string {
+  private assembleHTML(
+    appHTML: string,
+    context: RenderContext,
+    options: { hydrate?: boolean } = {},
+  ): string {
+    const hydrate = options.hydrate !== false;
     const containerId = 'nami-root';
 
-    const title =
-      (context.route.meta?.title as string) ??
-      this.config.title ??
-      this.config.appName;
+    const title = hydrate
+      ? ((context.route.meta?.title as string) ?? this.config.title ?? this.config.appName)
+      : `404 - ${this.config.title ?? this.config.appName}`;
 
-    const description =
-      (context.route.meta?.description as string) ??
-      this.config.description ??
-      '';
-
-    const dataScript = context.initialData
-      ? generateDataScript(context.initialData)
+    const description = hydrate
+      ? ((context.route.meta?.description as string) ?? this.config.description ?? '')
       : '';
+
+    const dataScript = hydrate ? this.createHydrationDataScript(context) : '';
 
     const { cssLinks, jsScripts } = this.resolveAssets();
 
@@ -627,16 +1107,16 @@ export class SSGRenderer extends BaseRenderer {
       '  <meta charset="utf-8">',
       '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
       `  <title>${this.escapeHTML(title)}</title>`,
-      description
-        ? `  <meta name="description" content="${this.escapeHTML(description)}">`
-        : '',
-      '  <meta name="renderer" content="ssg">',
+      description ? `  <meta name="description" content="${this.escapeHTML(description)}">` : '',
+      `  <meta name="renderer" content="${
+        hydrate ? this.escapeHTML(String(context.route.renderMode)) : 'static-404'
+      }">`,
       cssLinks,
       '</head>',
       '<body>',
       `  <div id="${containerId}">${appHTML}</div>`,
       dataScript ? `  ${dataScript}` : '',
-      jsScripts,
+      hydrate ? jsScripts : '',
       '</body>',
       '</html>',
     ]
@@ -648,7 +1128,7 @@ export class SSGRenderer extends BaseRenderer {
    * 条件导入 react-dom/server
    */
   private async importRenderToString(): Promise<{
-    renderToString: (element: React.ReactElement) => string;
+    renderToString: (element: ReactElement) => string;
   }> {
     try {
       const ReactDOMServer = await import(/* webpackIgnore: true */ 'react-dom/server');

@@ -31,11 +31,10 @@
  */
 
 import React from 'react';
-import type { NamiRoute, NamiConfig } from '@nami/shared';
+import type { NamiRoute, NamiConfig, RenderMode } from '@nami/shared';
 import { createLogger } from '@nami/shared';
-import { NamiDataProvider } from '@nami/core-client-shim';
 import { ClientErrorBoundary } from './error/client-error-boundary';
-import { NamiRouter } from './router/nami-router';
+import { NamiRouter, clearRouteComponentCache } from './router/nami-router';
 import type { ComponentResolver } from './router/nami-router';
 import { NamiHead } from './head/nami-head';
 
@@ -58,6 +57,15 @@ export interface NamiAppProps {
    * 数据将通过 props 或 context 传递给路由页面组件。
    */
   initialData?: Record<string, unknown>;
+
+  /** 服务端数据预取是否发生了可恢复降级。 */
+  initialDataDegraded?: boolean;
+
+  /** 服务端生成这份 initialData 时对应的 URL；SSG 仅记录 pathname。 */
+  initialRoutePath?: string;
+
+  /** 产生 initialData 的渲染模式，用于决定是否按 query 精确绑定。 */
+  initialRenderMode?: RenderMode;
 
   /**
    * 组件解析器
@@ -85,7 +93,8 @@ export interface NamiAppProps {
   onError?: (error: Error, errorInfo: React.ErrorInfo) => void;
 
   /**
-   * 路由加载中的 fallback 组件
+   * 路由加载中的 fallback 组件。
+   * 未传时由框架为 CSR 与客户端导航提供默认骨架；显式传 null 可关闭。
    */
   loadingFallback?: React.ReactNode;
 
@@ -139,12 +148,22 @@ export const NamiApp: React.FC<NamiAppProps> = ({
   routes,
   config,
   initialData,
+  initialDataDegraded,
+  initialRoutePath,
+  initialRenderMode,
   componentResolver,
   onRouteChange,
   onError,
   loadingFallback,
   errorFallback,
 }) => {
+  const [routerResetKey, setRouterResetKey] = React.useState(0);
+
+  const resetRouter = React.useCallback(() => {
+    clearRouteComponentCache(componentResolver);
+    setRouterResetKey((currentKey) => currentKey + 1);
+  }, [componentResolver]);
+
   logger.debug('NamiApp 渲染', {
     routeCount: routes.length,
     hasInitialData: !!initialData,
@@ -154,6 +173,7 @@ export const NamiApp: React.FC<NamiAppProps> = ({
   return (
     <ClientErrorBoundary
       fallback={errorFallback}
+      onReset={resetRouter}
       onError={(error, errorInfo) => {
         logger.error('应用根错误边界捕获到错误', {
           error: error.message,
@@ -162,12 +182,18 @@ export const NamiApp: React.FC<NamiAppProps> = ({
         onError?.(error, errorInfo);
       }}
     >
-      {/**
-       * 把首屏注水数据固定到 React Context 中，避免 hydration 完成后清理
-       * window.__NAMI_DATA__ 导致延迟挂载子树读不到 SSR/SSG 初始数据。
-       */}
-      <NamiDataProvider initialData={initialData ?? {}}>
-        {/* 默认 Head 配置 — 可被页面级 NamiHead 覆盖 */}
+      <NamiRouter
+        key={routerResetKey}
+        routes={routes}
+        config={config}
+        componentResolver={componentResolver}
+        onRouteChange={onRouteChange}
+        loadingFallback={loadingFallback}
+        initialData={initialData}
+        initialDataDegraded={initialDataDegraded}
+        initialRoutePath={initialRoutePath}
+        initialRenderMode={initialRenderMode}
+      >
         <NamiHead
           defaultTitle={config.title || config.appName}
           meta={
@@ -182,16 +208,7 @@ export const NamiApp: React.FC<NamiAppProps> = ({
               : undefined
           }
         />
-
-        {/* 路由系统 */}
-        <NamiRouter
-          routes={routes}
-          config={config}
-          componentResolver={componentResolver}
-          onRouteChange={onRouteChange}
-          loadingFallback={loadingFallback}
-        />
-      </NamiDataProvider>
+      </NamiRouter>
     </ClientErrorBoundary>
   );
 };

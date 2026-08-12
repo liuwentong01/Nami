@@ -63,7 +63,9 @@ export default function BlogPostPage({ post, generatedAt }: BlogPostPageProps) {
           </div>
           <div className="article-tags">
             {post.tags.map((tag) => (
-              <span key={tag} className="tag">{tag}</span>
+              <span key={tag} className="tag">
+                {tag}
+              </span>
             ))}
           </div>
         </header>
@@ -76,9 +78,7 @@ export default function BlogPostPage({ post, generatedAt }: BlogPostPageProps) {
         </div>
 
         <footer className="article-footer">
-          <p className="build-info">
-            此页面在构建时生成（{generatedAt}），内容更新需要重新构建。
-          </p>
+          <p className="build-info">此页面在构建时生成（{generatedAt}），内容更新需要重新构建。</p>
           <a href="/blog" className="back-link">
             &larr; 返回博客列表
           </a>
@@ -114,7 +114,7 @@ const BLOG_POSTS: Record<string, BlogPostDetail> = {
     title: '理解四种渲染模式的差异',
     content: `现代前端框架通常支持多种渲染策略，每种策略都有其适用场景。理解它们的差异对于做出正确的技术决策至关重要。
 
-CSR（客户端渲染）是最传统的 SPA 渲染方式。服务端返回一个几乎为空的 HTML 壳，所有页面内容由浏览器端的 JavaScript 生成。优点是部署简单、交互流畅；缺点是首屏白屏时间长、SEO 不友好。
+CSR（客户端渲染）是最传统的 SPA 渲染方式。Nami 服务端返回带临时骨架的 HTML Shell，所有真实页面内容由浏览器端的 JavaScript 生成。优点是部署简单、交互流畅；缺点是真实内容首屏依赖 JS、SEO 不友好。
 
 SSR（服务端渲染）每次请求都在服务端执行 React 渲染，返回完整的 HTML。首屏速度快、SEO 友好，但服务端压力较大，TTFB 受渲染耗时影响。
 
@@ -183,6 +183,10 @@ export async function getStaticProps(
   context: GetStaticPropsContext,
 ): Promise<GetStaticPropsResult<BlogPostPageProps>> {
   const { slug } = context.params;
+
+  if (!slug) {
+    return { notFound: true };
+  }
 
   const post = BLOG_POSTS[slug];
 

@@ -41,7 +41,6 @@ import type { Configuration as WebpackConfiguration, Compiler, Stats } from 'web
 import { DegradationManager, PluginLoader, PluginManager } from '@nami/core';
 import type {
   AppElementFactory,
-  HTMLRenderer,
   ModuleLoaderLike,
   AssetManifest,
 } from '@nami/core';
@@ -77,11 +76,8 @@ export interface DevServerOptions {
    */
   degradationManager?: DegradationManager;
 
-  /** React 元素工厂（新 SSR 协议） */
+  /** React 元素工厂（服务端统一渲染协议） */
   appElementFactory?: AppElementFactory;
-
-  /** 兼容 entry-server.renderToHTML() 的 HTML 渲染函数 */
-  htmlRenderer?: HTMLRenderer;
 
   /** 页面模块加载器 */
   moduleLoader?: ModuleLoaderLike;
@@ -97,7 +93,6 @@ export interface DevServerOptions {
    */
   runtimeProvider?: () => Promise<{
     appElementFactory?: AppElementFactory;
-    htmlRenderer?: HTMLRenderer;
     moduleLoader?: ModuleLoaderLike;
     assetManifest?: AssetManifest;
   }>;
@@ -322,7 +317,6 @@ export async function createDevServer(
     pluginManager: resolvedPluginManager,
     degradationManager: resolvedDegradationManager,
     appElementFactory: options.appElementFactory,
-    htmlRenderer: options.htmlRenderer,
     moduleLoader: options.moduleLoader,
     assetManifest: options.assetManifest,
     runtimeProvider: options.runtimeProvider,

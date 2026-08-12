@@ -29,6 +29,7 @@ import type { ClientOptions, NamiPlugin, AppWrapper, RenderMode } from '@nami/sh
 import {
   createLogger,
   NAMI_DATA_VARIABLE,
+  NAMI_DATA_PROTOCOL_VERSION,
   DEFAULT_CONTAINER_ID,
   NamiError,
   ErrorCode,
@@ -44,6 +45,7 @@ import { readServerData, cleanupServerData } from './data/data-hydrator';
 import { markNamiEvent, measureBetween } from './performance/performance-mark';
 import { collectWebVitals } from './performance/web-vitals';
 import type { ComponentResolver } from './router/nami-router';
+import { ClientErrorBoundary } from './error/client-error-boundary';
 
 // ==================== 类型定义 ====================
 
@@ -62,7 +64,8 @@ export interface InitClientOptions extends ClientOptions {
   componentResolver?: ComponentResolver;
 
   /**
-   * 路由加载中的全局 fallback
+   * 路由加载中的全局 fallback。
+   * 未传时由框架为 CSR 与客户端导航提供默认骨架；显式传 null 可关闭。
    */
   loadingFallback?: React.ReactNode;
 
@@ -95,6 +98,71 @@ export interface InitClientOptions extends ClientOptions {
 const logger = createLogger('@nami/client:entry');
 
 /**
+ * 在 React 根节点建立前发生致命错误时，替换仍停留在页面中的 CSR Shell 骨架。
+ *
+ * 这里刻意使用 DOM API 而不是 innerHTML：错误文本可能来自插件或网络环境，
+ * 只能作为文本展示，不能被解释为 HTML。重试采用整页 reload，确保插件状态、
+ * 动态 import 缓存和注水数据都从干净环境重新初始化。
+ */
+function renderBootstrapErrorPage(containerId: string, error: unknown): void {
+  if (typeof document === 'undefined') return;
+
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  const section = document.createElement('section');
+  section.setAttribute('data-nami-client-error', 'bootstrap');
+  section.setAttribute('role', 'alert');
+  section.style.boxSizing = 'border-box';
+  section.style.maxWidth = '720px';
+  section.style.margin = '64px auto';
+  section.style.padding = '32px';
+  section.style.border = '1px solid #e5e7eb';
+  section.style.borderRadius = '12px';
+  section.style.fontFamily = 'system-ui, sans-serif';
+  section.style.textAlign = 'center';
+
+  const title = document.createElement('h1');
+  title.textContent = '页面初始化失败';
+  title.style.margin = '0 0 12px';
+  title.style.fontSize = '24px';
+
+  const description = document.createElement('p');
+  description.textContent = '客户端未能完成初始化，请重新加载后重试。';
+  description.style.margin = '0';
+  description.style.color = '#6b7280';
+
+  const retryButton = document.createElement('button');
+  retryButton.type = 'button';
+  retryButton.textContent = '重新加载';
+  retryButton.style.marginTop = '20px';
+  retryButton.style.padding = '9px 18px';
+  retryButton.style.border = '1px solid #d1d5db';
+  retryButton.style.borderRadius = '6px';
+  retryButton.style.background = '#fff';
+  retryButton.style.cursor = 'pointer';
+  retryButton.addEventListener('click', () => window.location.reload());
+
+  section.append(title, description);
+
+  if (isDev()) {
+    const detail = document.createElement('pre');
+    detail.textContent = error instanceof Error ? error.message : String(error);
+    detail.style.margin = '20px 0 0';
+    detail.style.padding = '12px';
+    detail.style.overflow = 'auto';
+    detail.style.borderRadius = '6px';
+    detail.style.background = '#f9fafb';
+    detail.style.textAlign = 'left';
+    detail.style.whiteSpace = 'pre-wrap';
+    section.append(detail);
+  }
+
+  section.append(retryButton);
+  container.replaceChildren(section);
+}
+
+/**
  * 注册 Service Worker
  *
  * 在应用初始化完成后注册 Service Worker。
@@ -104,10 +172,7 @@ const logger = createLogger('@nami/client:entry');
  * @param url     - Service Worker 脚本路径
  * @param options - 注册选项（如 scope）
  */
-async function registerServiceWorker(
-  url: string,
-  options?: RegistrationOptions,
-): Promise<void> {
+async function registerServiceWorker(url: string, options?: RegistrationOptions): Promise<void> {
   // 检查浏览器是否支持 Service Worker
   if (!('serviceWorker' in navigator)) {
     logger.debug('浏览器不支持 Service Worker，跳过注册');
@@ -201,12 +266,18 @@ export async function initNamiClient(options: InitClientOptions): Promise<void> 
     containerId,
   });
 
+  // 提交给 React 前保持 false；提交后即使 API 同步抛错，也不再用 DOM API
+  // 改写同一容器，避免和一个可能已经建立的 React Root 竞争所有权。
+  let reactRootStarted = false;
+  let registeredPluginManager: PluginManager | undefined;
+
   try {
     // ==================== 阶段 1：初始化插件系统 ====================
 
     markNamiEvent('plugin-init-start');
 
     const pluginManager = new PluginManager(config);
+    registeredPluginManager = pluginManager;
 
     /**
      * 客户端运行时只接受已经解析完成的插件实例。
@@ -225,9 +296,7 @@ export async function initNamiClient(options: InitClientOptions): Promise<void> 
       });
     }
 
-    const pluginInstances = plugins.filter(
-      (p): p is NamiPlugin => typeof p !== 'string',
-    );
+    const pluginInstances = plugins.filter((p): p is NamiPlugin => typeof p !== 'string');
 
     await pluginManager.registerPlugins(pluginInstances);
 
@@ -292,6 +361,9 @@ export async function initNamiClient(options: InitClientOptions): Promise<void> 
         routes={routes}
         config={config}
         initialData={serverData.props}
+        initialDataDegraded={serverData.degraded}
+        initialRoutePath={serverData.routePath}
+        initialRenderMode={serverData.renderMode}
         componentResolver={componentResolver}
         onRouteChange={handleRouteChange}
         onError={handleError}
@@ -311,10 +383,12 @@ export async function initNamiClient(options: InitClientOptions): Promise<void> 
      * Plugin B: (app) => <StoreProvider>{app}</StoreProvider>
      * 最终结果: <StoreProvider><ThemeProvider><NamiApp /></ThemeProvider></StoreProvider>
      */
-    appElement = await pluginManager.runWaterfallHook<React.ReactElement>(
-      'wrapApp',
-      appElement,
-    );
+    appElement = await pluginManager.runWaterfallHook<React.ReactElement>('wrapApp', appElement);
+
+    // NamiApp 内部边界负责页面与路由错误；这一层位于插件 wrapper 外侧，
+    // 兜住插件在客户端渲染阶段引入的异常。外层刻意使用框架默认错误页，避免
+    // 自定义 errorFallback 本身抛错时被第二个边界再次渲染同一个坏 fallback。
+    appElement = <ClientErrorBoundary onError={handleError}>{appElement}</ClientErrorBoundary>;
 
     markNamiEvent('app-build-end');
     logger.debug('应用组件树构建完成');
@@ -346,17 +420,25 @@ export async function initNamiClient(options: InitClientOptions): Promise<void> 
      *   容器为空，React 需要完整创建所有 DOM 节点
      */
     const isSSR = renderMode !== 'csr';
+    const hasCompatibleHydrationPayload = serverData.version === NAMI_DATA_PROTOCOL_VERSION;
 
-    if (isSSR && container.childNodes.length > 0) {
+    if (isSSR && hasCompatibleHydrationPayload && container.childNodes.length > 0) {
       logger.info('使用 Hydration 模式挂载', { renderMode });
 
+      // hydrateApp/createRoot 可能在调用内部同步抛错。提前标记所有权，确保
+      // catch 不会直接改写一个可能已被 React 接管的容器。
+      reactRootStarted = true;
       hydrateApp(container, appElement, {
         onRecoverableError: (error) => {
           // 上报 Hydration 不匹配错误
-          reportMismatch(error, { renderMode, appName: config.appName }, {
-            reportUrl: config.monitor?.reportUrl,
-            sampleRate: config.monitor?.sampleRate,
-          });
+          reportMismatch(
+            error,
+            { renderMode, appName: config.appName },
+            {
+              reportUrl: config.monitor?.reportUrl,
+              sampleRate: config.monitor?.sampleRate,
+            },
+          );
         },
         onHydrated: () => {
           markNamiEvent('hydration-end');
@@ -377,8 +459,14 @@ export async function initNamiClient(options: InitClientOptions): Promise<void> 
         },
       });
     } else {
-      logger.info('使用 CSR 模式挂载', { renderMode });
+      logger.info('使用 CSR 模式挂载', {
+        renderMode,
+        reason: hasCompatibleHydrationPayload
+          ? '容器为空或路由为 CSR'
+          : '不存在兼容的服务端注水协议',
+      });
 
+      reactRootStarted = true;
       renderApp(container, appElement);
 
       markNamiEvent('csr-render-end');
@@ -463,6 +551,19 @@ export async function initNamiClient(options: InitClientOptions): Promise<void> 
     // 开发环境下在控制台输出完整错误
     if (isDev()) {
       console.error('[Nami] 客户端初始化失败:', error);
+    }
+
+    if (!reactRootStarted) {
+      renderBootstrapErrorPage(containerId, error);
+    }
+    if (!reactRootStarted && registeredPluginManager) {
+      try {
+        await registeredPluginManager.dispose();
+      } catch (disposeError) {
+        logger.warn('客户端初始化回滚时插件销毁失败', {
+          error: disposeError instanceof Error ? disposeError.message : String(disposeError),
+        });
+      }
     }
 
     // 重新抛出以便外部 catch 处理

@@ -111,6 +111,23 @@ export interface RenderContext {
 }
 
 /**
+ * 服务端写入 window.__NAMI_DATA__、客户端读取的稳定 wire protocol。
+ * 业务 props 与框架元信息分层，避免字段冲突并支持滚动升级兼容。
+ */
+export interface HydrationPayload {
+  /** 当前协议版本。 */
+  version: 1;
+  /** 当前页面的预取数据。 */
+  props: Record<string, unknown>;
+  /** 服务端数据预取是否发生了可恢复降级。 */
+  degraded: boolean;
+  /** 产生这份 HTML 的路由渲染模式。 */
+  renderMode: RenderMode;
+  /** 产生这份数据的 URL；SSR/ISR 含 query，SSG 仅记录 pathname。 */
+  routePath: string;
+}
+
+/**
  * 渲染结果
  *
  * 所有渲染器（CSR/SSR/SSG/ISR）的统一输出格式。

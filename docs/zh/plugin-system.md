@@ -178,12 +178,14 @@ this.logger.child({ plugin: this.pluginName })
 | server | `onRenderError` | Parallel | 是，由具体 Renderer 触发 |
 | client | `onClientInit` | Parallel | 是，`initNamiClient()` |
 | client | `onHydrated` | Parallel | 是，Hydration 完成后 |
-| client | `wrapApp` | Waterfall | 是，客户端包裹根组件 |
+| common | `wrapApp` | Waterfall | 是，Renderer 与客户端均按相同顺序包裹根组件 |
 | client | `onRouteChange` | Parallel | 是，客户端路由变化时 |
 | common | `onError` | Parallel | 是，插件 hook 错误和客户端错误边界会触发 |
 | common | `onDispose` | Parallel | 是，`PluginManager.dispose()` |
 
 `HookType.Bail` 和 `runBailHook()` 已实现，但当前 `HOOK_DEFINITIONS` 没有任何 Bail 类型钩子，主链路也没有使用 `runBailHook()`。
+
+`wrapApp` 是双端树协议的一部分。对正常可渲染页面，SSR、Streaming SSR、构建期 SSG 和 ISR 会在数据 Provider 外执行同一个 waterfall，客户端则在 Hydration 前执行它；插件不应在 wrapper 的 render 阶段读取仅浏览器可用的全局对象。稳定静态 404 在业务 React 树之前短路，不执行 `wrapApp`。
 
 ### 注册排序
 
@@ -462,16 +464,19 @@ extra: {}
 
 | 字段 | 类型 | 行为 |
 |------|------|------|
-| `__cache_hit` | `boolean` | 为 `true` 且有缓存内容时，替换 `result.html` |
+| `__cache_hit` | `boolean` | Renderer 在数据预取前直接返回缓存结果；中间件保留兼容消费 |
 | `__cache_content` | `string` | 插件缓存命中的 HTML |
 | `__custom_headers` | `Record<string, string>` | 合并进 `result.headers` |
 | `__retry_attempted` | `boolean` | 写入 `X-Nami-Retry: 1` |
 
-渲染异常分支还会读取：
+Renderer 与降级管理器还会读取：
 
 | 字段 | 行为 |
 |------|------|
-| `__skeleton_fallback` | 如果是字符串，直接返回骨架 HTML，状态码 200，跳过 `DegradationManager` |
+| `__csr_shell_skeleton` | 正常/降级 CSR Shell 的可恢复临时骨架；页面仍会加载客户端 JS |
+| `__skeleton_fallback` | Level 3 无 JS 静态应急候选；不会跳过重试或 CSR |
+
+路由 Chunk 的 Suspense fallback 与页面内部数据骨架属于客户端 loading 状态，不使用 Level 3 协议。
 
 最后，所有 `extra` 会被挂到：
 
@@ -491,7 +496,7 @@ context.extra['__cache_etag'] = cached.etag;
 context.extra['__cache_created_at'] = cached.createdAt;
 ```
 
-`renderMiddleware` 看到 `__cache_hit` 和 `__cache_content` 后，会把最终 HTML 替换成插件缓存内容，并写：
+Renderer 在 `onBeforeRender` 返回后立即消费命中结果，跳过数据预取与 React 渲染，并写：
 
 ```http
 X-Nami-Plugin-Cache: HIT
@@ -654,13 +659,14 @@ LRU 底层使用 `lru-cache`，`ttl` 单位是秒，内部转换为毫秒。TTL 
 
 ```text
 onBeforeRender
+  -> ISR / 默认个性化请求直接旁路
   -> keyGenerator(context)
   -> store.get(cacheKey)
-  -> 命中：写 context.extra.__cache_*
+  -> 命中：写 context.extra.__cache_* 并由 Renderer 立即返回
   -> 未命中：写 __cache_hit=false 和 __cache_key
 
 onAfterRender
-  -> 非 2xx 不缓存
+  -> 非 2xx / degraded / streaming / private / no-store 不缓存
   -> 缓存命中不重复写
   -> ttl = result.cacheControl?.revalidate ?? defaultTTL
   -> store.set(cacheKey, entry, ttl)

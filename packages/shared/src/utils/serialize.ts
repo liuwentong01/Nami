@@ -63,7 +63,7 @@ export function safeStringify(data: unknown, xssSafe: boolean = true): string {
  * ```
  */
 export function generateDataScript(
-  data: Record<string, unknown>,
+  data: unknown,
   variableName: string = NAMI_DATA_VARIABLE,
 ): string {
   const serialized = safeStringify(data);

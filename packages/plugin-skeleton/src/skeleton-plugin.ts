@@ -3,34 +3,34 @@
  *
  * NamiSkeletonPlugin 是 Nami 框架的官方骨架屏插件，负责：
  *
- * 1. 在渲染前（onBeforeRender）为首次加载注入骨架屏 HTML
- * 2. 在渲染错误时（onRenderError）使用骨架屏作为降级方案
+ * 1. 在渲染前（onBeforeRender）准备可被 CSR Shell 消费的临时骨架 HTML
+ * 2. 在渲染错误时（onRenderError）提供静态应急兜底内容
  * 3. 支持路由级别的骨架屏配置（routeSkeletons 映射）
  * 4. 支持自动从路由路径检测页面布局类型
- * 5. 通过 wrapApp 为客户端 Suspense 提供骨架屏 fallback
+ * 5. 通过同构 wrapApp 为服务端与客户端 Suspense 提供一致的骨架屏 fallback
  *
  * 骨架屏工作流程：
  * ```
  * 请求到达 → onBeforeRender
- *   ├─ 有缓存/正常渲染 → 跳过骨架屏
- *   └─ 首次加载/ISR fallback → 注入骨架屏 HTML 到 context
+ *   ├─ SSR/SSG/ISR 正常完成 → 不生成 CSR Shell 片段
+ *   └─ 正常 CSR → CSR Shell 立即展示，客户端接管后替换
  *
  * 渲染错误 → onRenderError
- *   └─ 返回骨架屏 HTML 作为降级内容
+ *   ├─ 准备 SSR→CSR Shell 片段
+ *   └─ 同时准备静态应急内容（只在可恢复 CSR 也不可用时消费）
  *
- * 客户端 → wrapApp
+ * 服务端 / 客户端 → wrapApp（两端保持相同配置与注册顺序）
  *   └─ Suspense fallback 使用骨架屏组件
  * ```
  */
 
 import React from 'react';
-import type {
-  NamiPlugin,
-  PluginAPI,
-  RenderContext,
-  NamiRoute,
-} from '@nami/shared';
-import { SkeletonPage, detectLayoutFromRoute, type SkeletonPageLayout } from './components/skeleton-page';
+import type { NamiPlugin, PluginAPI, RenderContext, NamiRoute } from '@nami/shared';
+import {
+  SkeletonPage,
+  detectLayoutFromRoute,
+  type SkeletonPageLayout,
+} from './components/skeleton-page';
 import type { SkeletonAnimation } from './components/skeleton-screen';
 
 /**
@@ -85,10 +85,19 @@ export interface SkeletonPluginOptions {
   autoDetectLayout?: boolean;
 
   /**
-   * 是否在渲染错误时使用骨架屏作为降级内容
+   * 是否在渲染错误时提供静态应急内容
    * @default true
    */
   useAsFallback?: boolean;
+
+  /**
+   * 是否把骨架作为 CSR HTML Shell 的临时加载内容
+   *
+   * 开启后，正常 CSR 与 SSR→CSR 降级都会在客户端 JS 下载、初始化和首次
+   * React commit 之前展示骨架；客户端成功接管后由 React 自动替换。
+   * @default true
+   */
+  useAsShell?: boolean;
 
   /**
    * 是否使用 Suspense 包裹应用
@@ -103,10 +112,18 @@ export interface SkeletonPluginOptions {
   customSkeletonComponent?: React.ComponentType<{ route?: NamiRoute }>;
 
   /**
-   * 降级骨架屏的静态 HTML 字符串
-   * 如果提供，将在 SSR 错误时直接返回此 HTML
+   * 静态应急 HTML 字符串
+   * 如果提供，将作为 Level 3 候选；不会跳过重试或可恢复 CSR
    */
   fallbackHTML?: string;
+
+  /**
+   * 自定义 CSR Shell 骨架 HTML 片段
+   *
+   * 只能提供放入 `#nami-root` 的片段，不应包含 html/body/script。完整文档会由
+   * Core 拒绝并回退到内置 Shell 骨架，避免产生嵌套文档或执行任意脚本。
+   */
+  shellHTML?: string;
 
   /**
    * 是否启用骨架屏
@@ -151,14 +168,27 @@ export class NamiSkeletonPlugin implements NamiPlugin {
 
   /**
    * 执行顺序：post（在缓存等前置插件之后执行）
-   * 骨架屏注入应在缓存检查之后，避免对缓存命中的请求注入骨架
+   * 由 Core 的缓存短路决定最终是否生成页面；本插件只准备上下文候选内容。
    */
   readonly enforce = 'post' as const;
 
   /** 插件配置 */
   private readonly options: Required<
-    Pick<SkeletonPluginOptions, 'defaultLayout' | 'animation' | 'backgroundColor' | 'highlightColor' | 'autoDetectLayout' | 'useAsFallback' | 'enableSuspense' | 'enabled' | 'logPrefix'>
-  > & SkeletonPluginOptions;
+    Pick<
+      SkeletonPluginOptions,
+      | 'defaultLayout'
+      | 'animation'
+      | 'backgroundColor'
+      | 'highlightColor'
+      | 'autoDetectLayout'
+      | 'useAsFallback'
+      | 'useAsShell'
+      | 'enableSuspense'
+      | 'enabled'
+      | 'logPrefix'
+    >
+  > &
+    SkeletonPluginOptions;
 
   constructor(options: SkeletonPluginOptions = {}) {
     this.options = {
@@ -169,6 +199,7 @@ export class NamiSkeletonPlugin implements NamiPlugin {
       highlightColor: options.highlightColor ?? '#f5f5f5',
       autoDetectLayout: options.autoDetectLayout ?? true,
       useAsFallback: options.useAsFallback ?? true,
+      useAsShell: options.useAsShell ?? true,
       enableSuspense: options.enableSuspense ?? true,
       enabled: options.enabled ?? true,
       logPrefix: options.logPrefix ?? '[NamiSkeleton]',
@@ -180,8 +211,8 @@ export class NamiSkeletonPlugin implements NamiPlugin {
    *
    * 注册以下生命周期钩子：
    * - wrapApp:        使用 Suspense 包裹应用根组件
-   * - onBeforeRender: 为 ISR fallback 等场景注入骨架屏
-   * - onRenderError:  渲染失败时用骨架屏作为降级内容
+   * - onBeforeRender: 为正常 CSR 准备 Shell 骨架
+   * - onRenderError:  为 SSR→CSR 和静态应急准备候选内容
    *
    * @param api - 插件 API
    */
@@ -196,6 +227,7 @@ export class NamiSkeletonPlugin implements NamiPlugin {
     logger.info(`${this.options.logPrefix} 骨架屏插件初始化`, {
       defaultLayout: this.options.defaultLayout,
       animation: this.options.animation,
+      useAsShell: this.options.useAsShell,
     });
 
     // ==================== wrapApp: 用 Suspense 包裹应用 ====================
@@ -219,9 +251,16 @@ export class NamiSkeletonPlugin implements NamiPlugin {
         // 确定该路由的骨架屏布局
         const layout = this.resolveLayout(context.route);
 
-        // 将骨架屏信息写入 context，供渲染器在需要时使用
+        // 保留原有上下文字段，供业务插件和观测逻辑继续使用。
         context.extra['__skeleton_layout'] = layout;
         context.extra['__skeleton_enabled'] = true;
+
+        // 正常 CSR Shell 是可恢复的 loading 状态：HTML 中仍会注入客户端 JS，
+        // React 首次 commit 后会替换本片段。SSR→CSR 的片段在 onRenderError 补充，
+        // 避免为成功的 SSR/SSG/ISR 上下文生成不会消费的较大 HTML 字符串。
+        if (this.options.useAsShell && context.route.renderMode === 'csr') {
+          context.extra['__csr_shell_skeleton'] = this.generateShellSkeletonHTML(layout);
+        }
 
         logger.debug(`${this.options.logPrefix} 骨架屏已就绪`, {
           url: context.url,
@@ -235,24 +274,37 @@ export class NamiSkeletonPlugin implements NamiPlugin {
       }
     });
 
-    // ==================== 渲染错误：骨架屏降级 ====================
-    if (this.options.useAsFallback) {
+    // ==================== 渲染错误：准备 CSR Shell 与静态应急候选 ====================
+    // 两个能力独立开关：关闭 Level 3 静态应急时，仍可为 SSR→CSR 准备 loading；
+    // 关闭 Shell loading 时，也仍可只提供静态应急页。
+    if (this.options.useAsShell || this.options.useAsFallback) {
       api.onRenderError(async (context: RenderContext, error: Error) => {
         try {
           const layout = this.resolveLayout(context.route);
-          const skeletonHTML = this.generateSkeletonHTML(layout);
 
-          // 将骨架屏 HTML 写入 context，供降级策略使用
-          context.extra['__skeleton_fallback'] = skeletonHTML;
-          context.extra['__skeleton_fallback_used'] = true;
+          // Renderer 可能在 beforeRender 之前就创建失败。此时仍准备一份可恢复的
+          // CSR Shell 骨架，让 Level 2 能加载客户端 JS，而不是直接停在静态兜底页。
+          if (
+            this.options.useAsShell &&
+            typeof context.extra['__csr_shell_skeleton'] !== 'string'
+          ) {
+            context.extra['__csr_shell_skeleton'] = this.generateShellSkeletonHTML(layout);
+          }
 
-          logger.warn(`${this.options.logPrefix} SSR 渲染失败，提供骨架屏降级`, {
+          if (this.options.useAsFallback) {
+            // 本字段只供 Level 3 静态应急兜底使用；Level 2 读取上面的 CSR Shell 字段。
+            context.extra['__skeleton_fallback'] = this.generateEmergencyFallbackHTML(layout);
+          }
+
+          logger.warn(`${this.options.logPrefix} SSR 渲染失败，已准备降级候选`, {
             url: context.url,
             layout,
+            csrShell: this.options.useAsShell,
+            staticEmergency: this.options.useAsFallback,
             error: error.message,
           });
         } catch (genError) {
-          logger.error(`${this.options.logPrefix} 骨架屏降级生成失败`, {
+          logger.error(`${this.options.logPrefix} 错误兜底内容生成失败`, {
             error: genError instanceof Error ? genError.message : String(genError),
           });
         }
@@ -327,6 +379,15 @@ export class NamiSkeletonPlugin implements NamiPlugin {
     return FallbackSkeleton;
   }
 
+  /** 生成放入可恢复 CSR Shell 的加载片段。 */
+  private generateShellSkeletonHTML(layout: SkeletonPageLayout): string {
+    if (this.options.shellHTML) {
+      return this.options.shellHTML;
+    }
+
+    return this.generateSkeletonFragment(layout, 'loading-shell');
+  }
+
   /**
    * 生成骨架屏的内联 HTML 字符串
    *
@@ -335,12 +396,23 @@ export class NamiSkeletonPlugin implements NamiPlugin {
    * @param layout - 布局类型
    * @returns HTML 字符串
    */
-  private generateSkeletonHTML(layout: SkeletonPageLayout): string {
+  private generateEmergencyFallbackHTML(layout: SkeletonPageLayout): string {
     // 如果配置了静态 HTML，直接返回
     if (this.options.fallbackHTML) {
       return this.options.fallbackHTML;
     }
 
+    return this.generateSkeletonFragment(layout, 'static-emergency');
+  }
+
+  /**
+   * 生成不依赖客户端运行时的骨架片段。
+   * loading-shell 会被 React 接管；static-emergency 是不可恢复链路中的明确兜底。
+   */
+  private generateSkeletonFragment(
+    layout: SkeletonPageLayout,
+    purpose: 'loading-shell' | 'static-emergency',
+  ): string {
     const { backgroundColor } = this.options;
 
     // 生成 CSS 动画
@@ -360,9 +432,20 @@ export class NamiSkeletonPlugin implements NamiPlugin {
     // 根据布局生成内容 HTML
     const contentHTML = this.buildLayoutHTML(layout);
 
+    const isLoadingShell = purpose === 'loading-shell';
+    const statusContent = isLoadingShell
+      ? ''
+      : `
+  <div style="margin-bottom:20px;padding:14px 16px;border:1px solid #e5e7eb;border-radius:8px;color:#4b5563;background:#fff">
+    <strong>页面暂时不可用</strong>
+    <p style="margin:6px 0 0">服务端和客户端降级均未能完成，请稍后重新加载。</p>
+    <a href="" style="display:inline-block;margin-top:10px;color:#2563eb">重新加载</a>
+  </div>`;
+
     return `
-<div data-nami-skeleton="fallback" style="padding:24px;max-width:1200px;margin:0 auto" role="presentation" aria-label="页面加载中">
+<div data-nami-skeleton="${purpose}" style="padding:24px;max-width:1200px;margin:0 auto" role="${isLoadingShell ? 'status' : 'alert'}" aria-live="polite" aria-busy="${isLoadingShell ? 'true' : 'false'}" aria-label="${isLoadingShell ? '页面加载中' : '页面暂时不可用'}">
   <style>${animationCSS}</style>
+  ${statusContent}
   ${contentHTML}
 </div>`.trim();
   }

@@ -7,7 +7,7 @@ declare module '@nami/generated-route-modules' {
 
   export const generatedComponentLoaders: Record<
     string,
-    () => Promise<{ default: React.ComponentType<unknown> }>
+    () => Promise<{ default: React.ComponentType<any> }>
   >;
 
   export const generatedRouteDefinitions: GeneratedRouteDefinition[];

@@ -122,9 +122,9 @@ function formatSnapshot(isoTime: string): string {
 }
 
 /**
- * Builder 会为这里列出的两个商品生成静态文件。但当前 ISRManager 启动时不会
- * 用这些文件预热运行时缓存，且请求分支尚未消费 fallback 字段。因此新进程里，
- * 列出和未列出的合法商品都会先经历一次同步 MISS；页面会直接展示这个边界。
+ * Builder 会为这里列出的两个商品生成静态文件。当前 ISRManager 启动时尚不会
+ * 用这些文件预热运行时缓存；fallback='blocking' 则由冷 MISS 的同步渲染链路兑现。
+ * 因此新进程里，列出和未列出的合法商品都会先等待一次完整渲染。
  */
 export async function getStaticPaths(): Promise<GetStaticPathsResult> {
   return {
@@ -168,11 +168,10 @@ export default function ISRProductPage(props: ISRProductPageProps = {}) {
     return (
       <main className="page-shell" data-render-mode="isr">
         <section className="callout">
-          <h1>未知商品：ISR notFound 尚未透传</h1>
+          <h1>商品数据暂不可用</h1>
           <p>
-            本页的 getStaticProps 已返回 <code>notFound: true</code>，但当前 ISRRenderer 只读取
-            props，随后把空数据页面作为 200 写入缓存。这个页面用于暴露当前实现边界，
-            不是期望的产品语义。
+            正常服务端请求若由 getStaticProps 返回 <code>notFound: true</code>，ISRRenderer
+            会直接返回无 Hydration 的静态 404 且不写入缓存；这里仅作为客户端数据缺失时的防御 UI。
           </p>
           <a href="/products">返回商品目录</a>
         </section>
@@ -237,19 +236,19 @@ export default function ISRProductPage(props: ISRProductPageProps = {}) {
         <p>
           <code>edge-cache</code> 与 <code>stream-kit</code> 在构建期生成；
           <code>manifest-inspector</code> 与 <code>hydration-probe</code> 不在 getStaticPaths 中。
-          但当前运行时不会用构建文件预热 ISR 缓存，也没有根据 <code>fallback</code>{' '}
-          分支。新进程中两类地址都会先返回 <code>MISS</code>，当前请求等待完整 HTML； 随后才进入{' '}
+          当前运行时不会用构建文件预热 ISR 缓存；<code>fallback='blocking'</code> 明确表示冷 MISS
+          由当前请求等待完整 HTML。新进程中两类地址都会先返回 <code>MISS</code>，随后才进入{' '}
           <code>HIT → STALE → HIT</code>。
         </p>
         <pre className="code-block">
-          <code>{`curl -sI http://localhost:3100/products/edge-cache
-curl -sI http://localhost:3100/products/manifest-inspector
-curl -sI http://localhost:3100/products/edge-cache
-curl -sI http://localhost:3100/products/manifest-inspector
+          <code>{`curl -sD - -o /dev/null http://localhost:3100/products/edge-cache
+curl -sD - -o /dev/null http://localhost:3100/products/manifest-inspector
+curl -sD - -o /dev/null http://localhost:3100/products/edge-cache
+curl -sD - -o /dev/null http://localhost:3100/products/manifest-inspector
 sleep 9
-curl -sI http://localhost:3100/products/manifest-inspector
+curl -sD - -o /dev/null http://localhost:3100/products/manifest-inspector
 sleep 1
-curl -sI http://localhost:3100/products/manifest-inspector`}</code>
+curl -sD - -o /dev/null http://localhost:3100/products/manifest-inspector`}</code>
         </pre>
         <p>
           <a href="/products">返回 ISR 商品目录</a>

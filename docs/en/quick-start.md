@@ -30,8 +30,10 @@ my-app/
 │   │   └── about.tsx         # About page
 │   ├── layouts/
 │   │   └── default.tsx       # Default layout
+│   ├── app.tsx                 # Isomorphic application shell
+│   ├── app-shell-plugin.tsx    # Installs the shell with wrapApp
 │   ├── entry-client.tsx      # Client entry
-│   ├── entry-server.tsx      # Server entry (SSR/SSG modes)
+│   ├── entry-server.tsx      # React element factory for SSR/SSG/ISR
 │   └── global.css            # Global styles
 ├── nami.config.ts            # Framework configuration file
 ├── tsconfig.json
@@ -45,6 +47,7 @@ my-app/
 ```typescript
 // nami.config.ts
 import { defineConfig } from '@nami/core';
+import appShellPlugin from './src/app-shell-plugin';
 
 export default defineConfig({
   // ===== Basic information =====
@@ -80,7 +83,7 @@ export default defineConfig({
     {
       path: '/dashboard',
       component: './pages/dashboard',
-      renderMode: 'csr',               // Server returns shell HTML; browser renders on the client
+      renderMode: 'csr',               // Server returns a temporary-skeleton shell; browser takes over rendering
     },
   ],
 
@@ -103,7 +106,7 @@ export default defineConfig({
   // ===== Degradation configuration =====
   // Fault-tolerance strategy when SSR rendering fails
   fallback: {
-    ssrToCSR: true,               // Automatically degrade to CSR when SSR fails (shell HTML + JS)
+    ssrToCSR: true,               // Automatically degrade to CSR when SSR fails (temporary-skeleton shell + JS)
     maxRetries: 1,                // Retry once after rendering failure (handles transient failures)
     timeout: 5000,                // Timeout for the degradation process
   },
@@ -136,6 +139,8 @@ export default defineConfig({
   plugins: [
     // Can be plugin instances, such as new NamiCachePlugin({...})
     // Can also be plugin package-name strings, such as '@nami/plugin-monitor'
+    // Keep appShellPlugin last so it becomes the outermost wrapper.
+    appShellPlugin,
   ],
 });
 ```
@@ -255,8 +260,9 @@ import React, { useState, useEffect } from 'react';
  * CSR pages do not need getServerSideProps or getStaticProps.
  * Data is fetched in the browser via useEffect / useClientFetch.
  *
- * The server only returns shell HTML (<div id="nami-root"></div> + JS),
- * and the browser executes React rendering after downloading JS.
+ * The server returns an HTML shell containing a temporary skeleton plus JavaScript.
+ * It covers bundle download, client initialization, and the time before the first
+ * React commit, which then replaces the skeleton with page content.
  */
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
@@ -272,18 +278,50 @@ export default function Dashboard() {
 }
 ```
 
-> **When should you choose CSR?** Pages that do not need SEO, have highly personalized data (such as user dashboards), and are not sensitive to first-screen performance. CSR's advantage is zero server rendering load, and shell HTML can be cached by a CDN.
+> **When should you choose CSR?** Pages that do not need SEO, have highly personalized data (such as user dashboards), and are not sensitive to first-screen performance. CSR avoids page-level React SSR work, and its temporary-skeleton shell can be cached by a CDN; route chunks and business data should still provide their own client loading UI.
 
 ## 4. Client Entry
+
+First declare the shared application shell as an isomorphic plugin:
+
+```tsx
+// src/app.tsx
+import type { ReactNode } from 'react';
+
+export default function App({ children }: { children: ReactNode }) {
+  return <div className="nami-app">{children}</div>;
+}
+
+// src/app-shell-plugin.tsx
+import type { NamiPlugin } from '@nami/shared';
+import App from './app';
+
+const appShellPlugin: NamiPlugin = {
+  name: 'app-shell',
+  setup(api) {
+    api.wrapApp((app) => <App>{app}</App>);
+  },
+};
+
+export default appShellPlugin;
+```
+
+Because `nami.config.ts` is the shared registration source, server and client execute the `wrapApp` waterfall in the same order.
 
 ```typescript
 // src/entry-client.tsx
 import { initNamiClient } from '@nami/client';
+import { resolveNamiConfig } from '@nami/shared';
+import userConfig from '../nami.config';
+import './global.css';
 
-initNamiClient({
+const config = resolveNamiConfig(userConfig);
+
+void initNamiClient({
+  routes: config.routes,
+  plugins: config.plugins.filter((plugin) => typeof plugin !== 'string'),
+  config,
   containerId: 'nami-root',
-  // Plugins are initialized at this stage
-  // plugins: [...],
 });
 ```
 
@@ -292,21 +330,41 @@ initNamiClient({
 ```typescript
 // src/entry-server.tsx
 import React from 'react';
-import App from './app';
+import type { RenderContext } from '@nami/core';
+import HomePage from './pages/home';
+import AboutPage from './pages/about';
+
+const pageRegistry = {
+  './pages/home': HomePage,
+  './pages/about': AboutPage,
+};
 
 /**
  * Server-side rendering entry function
  * The framework calls this function on every SSR request
  */
-export function createAppElement(context) {
-  return <App url={context.url} initialData={context.initialData} />;
-}
+export function createAppElement(context: RenderContext) {
+  const Page = pageRegistry[context.route.component];
+  if (!Page) throw new Error(`Unregistered server page: ${context.route.component}`);
 
-// Or use the renderToHTML protocol (choose one of the two)
-// export async function renderToHTML(context, initialData) {
-//   return renderToString(<App />);
-// }
+  return (
+    <React.Suspense fallback={null}>
+      <Page {...(context.initialData ?? {})} />
+    </React.Suspense>
+  );
+}
 ```
+
+`createAppElement(context)` is the only server-rendering entry contract. The
+application selects the page and returns its React tree; Nami owns
+`renderToString()` / streaming execution, the outer Document, manifest asset
+injection, and the serialized `{ version: 1, props, degraded, renderMode, routePath }`
+hydration envelope. The server entry returns only `Suspense + Page`; the shared App
+shell is added by the isomorphic `appShellPlugin` through `wrapApp`, registered in
+the same order on both sides. Normal hydratable pages therefore preserve an
+isomorphic tree. A stable static 404 is the exception: it short-circuits before the
+business React tree, so it does not run `wrapApp` or include a Hydration payload or
+client bundle.
 
 ## 6. CLI Commands
 
@@ -365,12 +423,25 @@ import { useClientFetch } from '@nami/client';
 function ProductList() {
   const { data, loading, error, refetch } = useClientFetch<Product[]>(
     '/api/products',
-    { staleTime: 30000 }, // Use the cache within 30 seconds
+    { cacheTime: 30000, staleWhileRevalidate: true },
   );
 
-  if (loading) return <div>Loading...</div>;
-  if (error) return <div>Error: {error.message}</div>;
-  return <ul>{data?.map(p => <li key={p.id}>{p.name}</li>)}</ul>;
+  // Show a page-local skeleton only when no data is available yet.
+  if (loading && data === undefined) {
+    return <div className="product-list-skeleton" role="status">Loading products...</div>;
+  }
+
+  if (error && data === undefined) {
+    return <button onClick={() => void refetch()}>Loading failed; retry</button>;
+  }
+
+  return (
+    <section>
+      {loading && <p role="status">Refreshing in the background; showing existing data...</p>}
+      {error && <p role="alert">Refresh failed: {error.message}</p>}
+      <ul>{data?.map(p => <li key={p.id}>{p.name}</li>)}</ul>
+    </section>
+  );
 }
 ```
 

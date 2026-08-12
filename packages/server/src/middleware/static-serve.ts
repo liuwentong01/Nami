@@ -91,13 +91,11 @@ const HASHED_FILE_PATTERN = /\.[a-f0-9]{8,}\.\w+$/i;
  * @param options - 配置选项（可选）
  * @returns Koa 中间件函数
  */
-export function staticServeMiddleware(
-  options: StaticServeOptions = {},
-): Koa.Middleware {
+export function staticServeMiddleware(options: StaticServeOptions = {}): Koa.Middleware {
   const {
     root = path.join(process.cwd(), 'dist', 'client'),
-    maxAge = 31536000,  // 一年，用于带 hash 的资源
-    htmlMaxAge = 0,     // 协商缓存，用于 HTML 等非 hash 资源
+    maxAge = 31536000, // 一年，用于带 hash 的资源
+    htmlMaxAge = 0, // 协商缓存，用于 HTML 等非 hash 资源
     gzip = true,
     brotli = true,
     defer = true,
@@ -127,14 +125,21 @@ export function staticServeMiddleware(
    * 包装 koa-static 中间件，根据文件类型设置差异化缓存策略
    */
   return async (ctx: Koa.Context, next: Koa.Next): Promise<void> => {
-    // 先执行 koa-static（defer 模式下会先执行 next 再检查文件）
-    await staticMiddleware(ctx, next);
+    let handledByDownstream = false;
+
+    // defer=true 时 koa-static 会先调用 next()，只有下游仍保持 404/空 body
+    // 才尝试读取文件。必须在这个边界记录“下游已经处理”，否则仅凭最终 2xx
+    // 无法区分静态资源与 SSR/SSG/ISR 页面，并会误覆盖页面缓存头。
+    await staticMiddleware(ctx, async () => {
+      await next();
+      handledByDownstream = (ctx.body !== null && ctx.body !== undefined) || ctx.status !== 404;
+    });
 
     /**
      * 如果 koa-static 成功匹配并发送了文件（状态码为 2xx），
      * 则根据文件名是否包含 hash 来设置缓存策略。
      */
-    if (ctx.status >= 200 && ctx.status < 300 && ctx.path) {
+    if (!handledByDownstream && ctx.status >= 200 && ctx.status < 300 && ctx.path) {
       if (HASHED_FILE_PATTERN.test(ctx.path)) {
         /**
          * 带 hash 的资源文件 → 强缓存
@@ -143,10 +148,7 @@ export function staticServeMiddleware(
          * 文件内容变化时 URL 也会变化，因此可以安全地设置超长缓存。
          * immutable 指令告诉浏览器不需要发送条件请求来验证缓存。
          */
-        ctx.set(
-          'Cache-Control',
-          `public, max-age=${maxAge}, immutable`,
-        );
+        ctx.set('Cache-Control', `public, max-age=${maxAge}, immutable`);
       } else {
         /**
          * 不带 hash 的资源文件 → 协商缓存
@@ -155,10 +157,7 @@ export function staticServeMiddleware(
          * 使用 no-cache 指令强制浏览器每次都发送条件请求验证。
          * 如果资源未变化，服务端返回 304 Not Modified。
          */
-        ctx.set(
-          'Cache-Control',
-          'public, no-cache',
-        );
+        ctx.set('Cache-Control', 'public, no-cache');
       }
     }
   };

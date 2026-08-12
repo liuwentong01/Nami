@@ -20,12 +20,11 @@ import * as fs from 'fs';
 
 import type { NamiConfig, UserNamiConfig } from '@nami/shared';
 import {
-  deepMerge,
+  resolveNamiConfig,
   createLogger,
   ConfigError,
 } from '@nami/shared';
 
-import { getDefaultConfig } from './defaults';
 import { ConfigValidator } from './config-validator';
 
 /** 配置加载器内部日志 */
@@ -96,14 +95,8 @@ export class ConfigLoader {
     // 加载用户配置模块
     const userConfig = await this.loadModule(resolvedPath);
 
-    // 获取默认配置
-    const defaultConfig = getDefaultConfig();
-
-    // 深度合并：用户配置覆盖默认配置
-    const mergedConfig = deepMerge(
-      defaultConfig as unknown as Record<string, unknown>,
-      userConfig as unknown as Record<string, unknown>,
-    ) as unknown as NamiConfig;
+    // 使用浏览器/服务端共用的纯函数完成默认值深度合并。
+    const mergedConfig = resolveNamiConfig(userConfig);
 
     // 校验合并后的配置
     const validation = this.validator.validate(mergedConfig);

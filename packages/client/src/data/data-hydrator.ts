@@ -11,8 +11,8 @@
  *
  * 服务端：
  *   getServerSideProps() → 返回 { props: { ... } }
- *   → safeStringify(props) → 转义 XSS 危险字符
- *   → <script>window.__NAMI_DATA__ = {...}</script> → 注入 HTML
+ *   → 组装 { version, props, degraded, renderMode, routePath } envelope
+ *   → safeStringify(envelope) → 转义 XSS 危险字符并注入 HTML
  *
  * 客户端：
  *   DataHydrator.readServerData() → 读取 window.__NAMI_DATA__
@@ -24,9 +24,12 @@
 
 import {
   NAMI_DATA_VARIABLE,
+  NAMI_DATA_PROTOCOL_VERSION,
+  RenderMode,
   createLogger,
   hydrateData,
 } from '@nami/shared';
+import type { HydrationPayload } from '@nami/shared';
 
 // ==================== 类型定义 ====================
 
@@ -36,19 +39,7 @@ import {
  * window.__NAMI_DATA__ 的类型定义。
  * 包含页面数据和可选的渲染元信息。
  */
-export interface ServerInjectedData {
-  /** 页面组件的 props 数据 */
-  props?: Record<string, unknown>;
-
-  /** 渲染模式标识 — 客户端用于判断 hydrate 还是 render */
-  renderMode?: string;
-
-  /** 路由路径 — 用于客户端路由初始化 */
-  routePath?: string;
-
-  /** 其他由插件注入的自定义数据 */
-  [key: string]: unknown;
-}
+export type ServerInjectedData = Partial<HydrationPayload> & Record<string, unknown>;
 
 // ==================== 内部工具 ====================
 
@@ -60,6 +51,125 @@ let dataRead = false;
 
 /** 缓存首次读取的数据 — 即使全局变量被清理后仍可访问 */
 let cachedData: ServerInjectedData | null = null;
+
+/** 一旦离开首屏 URL，初始快照永久失效，返回该 URL 时也不复用旧数据。 */
+let dataScopeInvalidated = false;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function resolveRenderMode(value: unknown): RenderMode | undefined {
+  switch (value) {
+    case RenderMode.CSR:
+    case RenderMode.SSR:
+    case RenderMode.SSG:
+    case RenderMode.ISR:
+      return value;
+    // Streaming SSR 是 SSR 的传输方式，不是独立的路由 RenderMode。
+    case 'streaming-ssr':
+      return RenderMode.SSR;
+    default:
+      return undefined;
+  }
+}
+
+function resolveDocumentRenderMode(): RenderMode | undefined {
+  if (typeof document === 'undefined') return undefined;
+  const renderer = document.querySelector('meta[name="renderer"]')?.getAttribute('content');
+  return resolveRenderMode(renderer);
+}
+
+function resolveCurrentRoutePath(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  return `${window.location.pathname}${window.location.search}`;
+}
+
+function isCurrentDataRoute(data: ServerInjectedData): boolean {
+  if (typeof data.routePath !== 'string' || typeof window === 'undefined') {
+    return true;
+  }
+
+  if (data.renderMode === RenderMode.SSG) {
+    return window.location.pathname === data.routePath;
+  }
+
+  return resolveCurrentRoutePath() === data.routePath;
+}
+
+function isServerDataActive(data: ServerInjectedData): boolean {
+  if (dataScopeInvalidated) return false;
+
+  if (!isCurrentDataRoute(data)) {
+    dataScopeInvalidated = true;
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * 将历史裸 props 和无版本 envelope 归一化为当前注水协议。
+ *
+ * 该兼容层用于滚动发布：新客户端可能读取 CDN、ISR 或浏览器缓存中的旧 HTML，
+ * 因此不能假设 window.__NAMI_DATA__ 一定由同一版本服务端生成。
+ */
+function normalizeServerData(rawData: Record<string, unknown>): ServerInjectedData {
+  const hasEnvelopeMetadata = 'renderMode' in rawData || 'routePath' in rawData;
+  const declaresEnvelope = hasEnvelopeMetadata && 'props' in rawData;
+  const hasEnvelopeProps = isRecord(rawData.props);
+
+  if (
+    declaresEnvelope &&
+    'version' in rawData &&
+    rawData.version !== undefined &&
+    rawData.version !== NAMI_DATA_PROTOCOL_VERSION
+  ) {
+    logger.warn('检测到不兼容的服务端注水协议，忽略该数据并使用 CSR 重建', {
+      receivedVersion: rawData.version,
+      supportedVersion: NAMI_DATA_PROTOCOL_VERSION,
+    });
+    return {};
+  }
+
+  if (declaresEnvelope && !hasEnvelopeProps) {
+    logger.warn('检测到损坏的服务端注水协议，props 必须是普通对象，已使用 CSR 重建', {
+      receivedType: Array.isArray(rawData.props) ? 'array' : typeof rawData.props,
+    });
+    return {};
+  }
+
+  // `version`、`props` 都可能是合法业务字段；只有同时出现框架元信息时，
+  // 才把旧数据识别为 envelope，避免滚动发布期间吞掉同名业务字段。
+  const hasEnvelopeShape = declaresEnvelope && hasEnvelopeProps;
+
+  const renderMode = resolveRenderMode(rawData.renderMode) ?? resolveDocumentRenderMode();
+  const routePath =
+    typeof rawData.routePath === 'string'
+      ? rawData.routePath
+      : renderMode === RenderMode.SSG && typeof window !== 'undefined'
+        ? window.location.pathname
+        : resolveCurrentRoutePath();
+
+  if (!hasEnvelopeShape) {
+    return {
+      version: NAMI_DATA_PROTOCOL_VERSION,
+      props: rawData,
+      degraded: false,
+      renderMode,
+      routePath,
+    };
+  }
+
+  return {
+    ...rawData,
+    version: NAMI_DATA_PROTOCOL_VERSION,
+    props: isRecord(rawData.props) ? rawData.props : {},
+    degraded: rawData.degraded === true,
+    renderMode,
+    routePath,
+  };
+}
 
 // ==================== 公共 API ====================
 
@@ -88,11 +198,11 @@ export function readServerData(): ServerInjectedData {
   // 使用缓存
   if (dataRead && cachedData !== null) {
     logger.debug('返回缓存的服务端数据');
-    return cachedData;
+    return isServerDataActive(cachedData) ? cachedData : {};
   }
 
   // 使用 @nami/shared 的 hydrateData 工具函数读取
-  const rawData = hydrateData<ServerInjectedData>(NAMI_DATA_VARIABLE);
+  const rawData = hydrateData<unknown>(NAMI_DATA_VARIABLE);
 
   if (rawData === null || rawData === undefined) {
     logger.debug('未检测到服务端注入数据（window.__NAMI_DATA__ 不存在）');
@@ -101,17 +211,41 @@ export function readServerData(): ServerInjectedData {
     return cachedData;
   }
 
+  if (!isRecord(rawData)) {
+    logger.warn('检测到无效的服务端注水数据，忽略并回退到 CSR', {
+      receivedType: Array.isArray(rawData) ? 'array' : typeof rawData,
+    });
+    cachedData = {};
+    dataRead = true;
+    return cachedData;
+  }
+
+  const normalizedData = normalizeServerData(rawData);
+
   logger.info('成功读取服务端注入数据', {
-    keys: Object.keys(rawData),
-    renderMode: rawData.renderMode,
-    routePath: rawData.routePath,
+    keys: Object.keys(normalizedData),
+    renderMode: normalizedData.renderMode,
+    routePath: normalizedData.routePath,
   });
 
   // 缓存数据
-  cachedData = rawData;
+  cachedData = normalizedData;
   dataRead = true;
 
-  return cachedData;
+  return isServerDataActive(cachedData) ? cachedData : {};
+}
+
+/**
+ * 使首屏服务端快照永久失效。
+ *
+ * 客户端路由离开初始 URL 时调用；只清理可见性，不删除缓存本身，确保正在
+ * Hydration 的延迟子树仍可在离开路由之前读取同一份稳定快照。
+ */
+export function invalidateServerData(): void {
+  if (!dataScopeInvalidated) {
+    dataScopeInvalidated = true;
+    logger.debug('首屏服务端数据已因路由切换失效');
+  }
 }
 
 /**
@@ -170,10 +304,7 @@ export function cleanupServerData(): void {
      */
     const scripts = document.querySelectorAll('script');
     for (const script of scripts) {
-      if (
-        script.textContent &&
-        script.textContent.includes(NAMI_DATA_VARIABLE)
-      ) {
+      if (script.textContent && script.textContent.includes(NAMI_DATA_VARIABLE)) {
         script.parentNode?.removeChild(script);
         logger.debug('已移除数据注入的 <script> 标签');
         break;
@@ -197,5 +328,6 @@ export function cleanupServerData(): void {
 export function resetDataHydrator(): void {
   dataRead = false;
   cachedData = null;
+  dataScopeInvalidated = false;
   logger.debug('DataHydrator 内部状态已重置');
 }

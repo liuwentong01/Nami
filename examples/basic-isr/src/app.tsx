@@ -10,7 +10,6 @@
  * 而是仅在缓存过期后的首个请求触发后台异步渲染。
  */
 import React from 'react';
-import './global.css';
 
 interface AppProps {
   children: React.ReactNode;

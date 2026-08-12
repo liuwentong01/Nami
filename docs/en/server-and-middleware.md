@@ -145,7 +145,7 @@ Respond to outbound
 | ③ | `security` | Registered first, but the real write head is in the outbound stage, and the final downstream cache semantics can be obtained |
 | ④ | `requestContext` | Subsequent health checks, data prefetching, rendering, and logging can all use the same `requestId` |
 | ⑤ | `healthCheck` | Probe requests should not trigger static resource lookups, plug-in logic, or rendering |
-| ⑥ | `staticServe` | Static resources are sent uniformly by the framework; the packaging layer will supplement the cache header for the 2xx response according to the final path |
+| ⑥ | `staticServe` | Static resources are sent uniformly by the framework; the wrapper adds cache headers only to 2xx files actually served by `koa-static` |
 | ⑦ | User middleware | The business can inject Koa logic before the plug-in, such as authentication, proxy, API mock |
 | ⑧ | Plug-in middleware | Plug-ins provide server-side extensions in the `enforce: pre -> normal -> post` registration order |
 | ⑨ | `dataPrefetch` | The data prefetch API is a routing data interface, located behind the business/plug-in middleware, and returns JSON after a hit |
@@ -465,11 +465,11 @@ Static resource request /assets/main.abcdef12.js
 
 
 
-This design allows static resources to exist as the framework's bottom-up capabilities, while avoiding unconditional preemption of subsequent business middleware. It should be noted that the current packaging layer does not additionally determine "whether the file is hit by `koa-static`", but checks whether the final `ctx.status` is 2xx after `koa-static` returns, and writes the cache header according to `ctx.path`. Therefore, it not only adds the cache policy to static files, but also adds the default `public, no-cache` to successfully generated pages downstream; if the rendering result or ISR middleware sets `ctx.state.namiCacheControl`, the outer layer `securityMiddleware` will rewrite the final cache semantics back in the later outbound phase.
+This design keeps static files as a framework fallback without unconditionally preempting downstream business middleware. The wrapper records whether downstream handled the request at the `next` boundary passed to `koa-static`. It writes a static-resource `Cache-Control` from `ctx.path` only when downstream did not handle the request and `koa-static` actually served a 2xx file. SSR, SSG, ISR, and data-API responses therefore preserve their own cache semantics instead of receiving the static default.
 
 
 
-| final `ctx.path` | matching rules | `Cache-Control` |
+| `ctx.path` actually served by `koa-static` | matching rules | `Cache-Control` |
 |------------------|----------|------------------|
 | `/assets/main.abcdef12.js` | Contains more than 8 digits of hexadecimal hash: `/\.[a-f0-9]{8,}\.\w+$/i` | `public, max-age=31536000, immutable` |
 | `/index.html`, `/dashboard`, `/asset-manifest.json`, etc. | Do not match hash rules | `public, no-cache` |
@@ -609,8 +609,18 @@ Response rules:
 |----------------------|----------|
 | Function export does not exist | `404 { message: 'getStaticProps not found' }` |
 | `{ notFound: true }` | `404 { notFound: true }` |
-| `{ redirect }` | Permanent jump to `308`, temporary jump to `307`, Body is `{ redirect }` |
+| `{ redirect }` | `statusCode` wins; otherwise permanent is `308` and temporary is `307`. Body is `{ redirect }` |
 | `{ props }` or empty result | `200`, Body is `props ?? {}` |
+
+This table describes only the `/_nami/data/*` JSON API. In the HTML path, SSG
+writes GSP `redirect` / `notFound` as redirect/static-404 HTML plus a
+`.html.nami.json` sidecar and restores status/headers at runtime. Core's GSP/HTML
+contract accepts only explicit redirect statuses `301/302/303/307/308` (omission
+defaults to permanent `308` or temporary `307`); do not extrapolate this whitelist to
+the JSON API table or GSSP. An ISR cold MISS short-circuits the control response and
+returns `X-Nami-Cache: SKIP` with `private, no-store`. An internal background rebuild
+instead carries `private, no-store` and tells the queue to delete the old key; the
+original user response remains `STALE`.
 
 
 
@@ -635,7 +645,7 @@ Data prefetching API and above-the-fold water injection are not the same thing:
 | Mechanism | Location | Purpose |
 |------|------|------|
 | `/_nami/data/*` | Koa middleware | Client routing prefetch data |
-| `window.__NAMI_DATA__` | HTML injection script | Above the fold SSR/SSG/ISR Bring server data to the browser hydration |
+| `window.__NAMI_DATA__` | HTML injection script | Normal hydratable output carries `{ version: 1, props, degraded, renderMode, routePath }`; stable static 404 output does not inject it |
 
 
 
@@ -847,12 +857,16 @@ The cache key defaults to:
 
 
 ```typescript
-ctx.path
+ctx.url
 ```
 
 
 
-That is to say, query, cookie or header are not included by default. If the page content depends on these factors, you need to customize the cache key through `generateCacheKey`, otherwise different variants may share the same cache.
+This is the raw full request URL, so the query string is included and query ordering
+is not canonicalized: `?a=1&b=2` and `?b=2&a=1` are distinct keys. Cookies,
+headers, and tenant identity are not included. Use a custom `generateCacheKey()`
+when those are content dimensions, and use tags to invalidate a family of URL
+variants.
 
 
 
@@ -886,7 +900,8 @@ isrManager.getOrRevalidate(cacheKey, renderFn, revalidateSeconds, backgroundReva
 | `Fresh` | Cache age `<= revalidateAfter` | Return cached HTML directly |
 | `Stale` | Exceeded `revalidateAfter`, but not exceeded `revalidateAfter * staleMultiplier` | Return the old HTML while revalidating in the background |
 | `Expired` | stale grace period exceeded | Do not return old HTML, re-render synchronously |
-| Cache does not exist | No cache entry | Render synchronously and write to cache asynchronously |
+| Cache does not exist | No cache entry | Render synchronously, await the cache write, then release same-key singleflight |
+| Effective `revalidate = 0` | The route or this GSP run disables persistent ISR caching | Skip CacheStore reads/writes, clear the old key, and keep only same-process in-flight coalescing |
 
 
 
@@ -919,6 +934,12 @@ When there is a cache hit and not a cache miss, the middleware sets it directly:
 | `ETag` | ETag in the cache entry, optional |
 | `X-Nami-Cache-Age` | The number of seconds since the cache was created, optional |
 
+In addition to these ISR-owned fields, HIT/STALE restores `CacheEntry.statusCode` and
+safely filtered end-to-end business headers. Hop-by-hop fields, `Set-Cookie`,
+compression/length fields, `Cache-Control`, ETag, and Nami diagnostics are not
+persisted. Both synchronous cold rendering and a successful background rebuild
+generate a fresh ETag from the HTML.
+
 
 
 On a cache miss, `renderFn` executes `await next()` into `renderMiddleware`. After rendering is complete, the ISR middleware reads:
@@ -926,15 +947,32 @@ On a cache miss, `renderFn` executes `await next()` into `renderMiddleware`. Aft
 
 
 ```typescript
+const renderResult = ctx.state.namiRenderResult as RenderResult | undefined;
+const statusCode = renderResult?.statusCode ?? ctx.status;
+
 {
   html: typeof ctx.body === 'string' ? ctx.body : String(ctx.body || ''),
   tags: ctx.state.namiCacheTags,
+  cacheable: ctx.state.namiCacheable === true
+    && renderResult?.meta.renderMode === RenderMode.ISR,
+  statusCode,
+  headers: renderResult ? { ...renderResult.headers } : undefined,
+  revalidate: renderResult?.cacheControl?.revalidate,
+  invalidate:
+    renderResult?.meta.degraded !== true
+    && (statusCode === 404 || [301, 302, 303, 307, 308].includes(statusCode)),
 }
 ```
 
 
 
-It is then written to the cache by `ISRManager`. The write cache is asynchronous and does not block this response.
+A cacheable cold MISS prefers the dynamic `revalidate` returned by this GSP run,
+filters and stores status/headers, generates an ETag, and then awaits
+`cacheStore.set(...)`; only after the write completes does `ISRManager` release the
+same-key singleflight Promise. Redirect/notFound deletes the old key on a best-effort
+basis and never caches the control response. A final `revalidate = 0` also clears the
+old key and skips persistent CacheStore writes, retaining only the current process's
+in-flight Promise. Other uncacheable or degraded results return `SKIP + no-store`.
 
 
 
@@ -950,6 +988,7 @@ In the Stale state, the middleware will not re-render directly in the current re
 fetch(internalURL, {
   method: 'GET',
   headers: {
+    ...buildInternalRevalidateHeaders(ctx),
     [NAMI_ISR_REVALIDATE_HEADER]: '1',
     'x-nami-isr-revalidate-token': process.env.NAMI_ISR_REVALIDATE_TOKEN,
     'X-Requested-With': 'nami-isr-revalidate',
@@ -959,11 +998,41 @@ fetch(internalURL, {
 
 
 
-Internal URLs do not use `Host` for browser inbound requests. The source code will normalize the listening host to the local address (for example, `0.0.0.0`/`::` will use `127.0.0.1`), and the port will be `config.server.port` first. Otherwise, the local port of the current socket will be taken, and the path and querystring of the current request will be spliced.
+The internal URL's network target does not use the inbound browser request's `Host`.
+The listening host is normalized to a local address (`0.0.0.0`/`::` becomes
+`127.0.0.1`), the port prefers `config.server.port` and otherwise uses the socket's
+local port, and the original path and query string are appended.
+
+The request headers are forwarded end to end from the request that observed STALE,
+including `Cookie`, `Authorization`, the original `Host`, and application-specific
+tenant/locale headers. Only hop-by-hop fields, `Content-Length`, conditional headers,
+and `Range` are removed because they cannot be safely replayed. Thus, when a custom
+`generateCacheKey()` varies by identity, tenant, or locale, background rendering keeps
+the same variant context instead of writing another variant's HTML under that key.
 
 
 
 The request carries `x-nami-isr-revalidate: 1`, but when it passes through the ISR middleware again, it needs to meet the trusted source verification: the request source IP must be a loopback address or match the explicitly configured local host; if `NAMI_ISR_REVALIDATE_TOKEN` is configured, it must also carry a matching token. After the verification is passed, the cache layer will be bypassed and the rendering middleware will be directly entered to generate new HTML to avoid the cycle of "backend re-validation and hitting the stale cache again".
+
+Every response whose `RenderResult.meta.degraded` is `true` is explicitly marked by
+`renderMiddleware` with `X-Nami-Degraded` (preserving an existing semantic value, or `1` when absent) and `Cache-Control: private, no-store,
+max-age=0`. If the internal request sees a degradation marker or an ordinary failing
+`private/no-store` result, the queue rejects it and keeps serving the old stale page.
+A valid GSP redirect or `404 notFound`, however, is a control response: the queue
+deletes the old key instead of preserving an obsolete page and does not cache the
+30x/404 response itself.
+
+The internal response's `s-maxage` is parsed as the new `revalidate`. The background
+queue uses it to update both `revalidateAfter` and storage TTL; a new value of `0`
+deletes the old key without writing a replacement, and only an omitted value inherits
+the old interval. A normal successful rebuild stores safe status/headers and generates
+an ETag.
+
+Background-queue deduplication and synchronous singleflight are both local to one
+Node process. A `Promise.race([renderFn(), timeout])` timeout only stops awaiting and
+releases the queue slot; it does not cancel the render/internal fetch already in
+progress. The underlying task can continue and overlap a later task, so true
+cancellation requires the business call chain to propagate an `AbortSignal`.
 
 
 
@@ -1078,15 +1147,48 @@ The renderer is then created via `RendererFactory.create()`. Important parameter
 |------|------|
 | `config` | Global configuration |
 | `pluginManager` | Let the renderer trigger the plug-in life cycle internally |
-| `appElementFactory` | Create React element tree under new SSR protocol |
-| `htmlRenderer` | Compatible with `entry-server.renderToHTML()` |
+| `appElementFactory` | Resolved from the mandatory `createAppElement(context)` export; creates the shared React tree for runtime SSR/ISR and build-time SSG |
 | `moduleLoader` | Load page data function |
 | `isrManager` | ISR renderer usage |
-| `preferStreaming` | Enables streaming preferences when SSR routes `meta.streaming === true` |
+| `preferStreaming` | Selects Streaming SSR when an SSR route has `meta.streaming === true`; the element factory is required for every SSR route |
 
 
 
-When creating a renderer fails, an error is logged and the CSR renderer is returned.
+`createAppElement(context)` is the single application element-factory contract for
+runtime SSR/ISR and build-time SSG. Nami owns string or streaming execution, the
+outer Document, manifest-derived assets, and the shared hydration envelope.
+
+#### SSG static-response protocol
+
+At build time, every prebuilt SSG/ISR path receives `page.html` and a
+`page.html.nami.json` sidecar. The sidecar stores `page | redirect | not-found`,
+status, headers, and optional `revalidate`; `SSGRenderer` reads it at runtime to
+preserve build-time GSP control-response semantics. An explicit redirect status is
+limited to `301/302/303/307/308`.
+
+Dynamic SSG/ISR builds recognize the complete route-token set: `:param`, `:param?`,
+`:param(constraint)`, `:path+`, `*`, and `(.*)`. `getStaticPaths.params` is
+materialized into a canonical URL and must then pass formal
+`matchPath(..., { exact: true })` plus parameter round-trip validation. Missing
+required parameters, a value that violates its constraint, a non-matching generated
+URL, or two pages resolving to the same artifact path records a build error and makes
+the build fail. This does not change the existing URL-to-file mapping: `/` becomes
+`index.html`, `/about` becomes `about.html`, and `/blog/hello` becomes
+`blog/hello.html`; each HTML file still has its `.html.nami.json` sidecar.
+
+| Dynamic mode | Supported `getStaticPaths.fallback` | Non-prebuilt path |
+|--------------|-------------------------------------|-------------------|
+| SSG | `false` | Stable static 404 without Hydration/client bundle |
+| ISR | `'blocking'` | Cold MISS synchronously runs GSP + React; cacheable success writes CacheStore |
+
+`true`, other combinations, or a mismatch with route configuration are unsupported
+and produce a build-generation error.
+
+
+
+When renderer creation fails, the error is logged and passed to the unified
+degradation pipeline. CSR is used only when the configured degradation sequence
+reaches that level.
 
 
 
@@ -1121,7 +1223,7 @@ After the plug-in hook is triggered inside the renderer, the plug-in may write t
 
 | Field | Behavior |
 |------|------|
-| `__cache_hit === true` and `__cache_content` is a string | Replace `result.html` with the plugin cache contents and write `X-Nami-Plugin-Cache: HIT` |
+| `__cache_hit === true` and `__cache_content` is a string | The Renderer short-circuits before data fetching; compatibility handling writes `X-Nami-Plugin-Cache: HIT` |
 | `__custom_headers` | Merged into `result.headers` |
 | `__retry_attempted === true` | Write `X-Nami-Retry: 1` |
 | Any `extra` | Hang to `ctx.state.namiExtra` for subsequent logical reading |
@@ -1158,13 +1260,13 @@ After the plug-in hook is triggered inside the renderer, the plug-in may write t
 
 
 
-When an error occurs during the rendering process, the middleware will first log the error. Then try in order:
+The middleware passes the initial render function to `DegradationManager`, which then executes the ordered policy:
 
 
 
-1. If the plug-in provides `renderContext.extra.__skeleton_fallback`, it will directly return the skeleton screen HTML, status code `200`, and response header `X-Nami-Render-Mode: skeleton-fallback`.
-2. Otherwise, call `degradationManager.executeWithDegradation()` and press `config.fallback` to execute the framework downgrade strategy.
-3. Write the downgrade results back through `setResponse()`.
+1. Level 0 performs the first render, followed by configured retries and CSR on failure.
+2. Level 2 returns a temporary-skeleton CSR shell that still loads JavaScript; `renderContext.extra.__skeleton_fallback` is only a no-JavaScript Level 3 static emergency candidate.
+3. The unified `RenderResult` is written through `setResponse()`; Levels 2–5 use `no-store`.
 
 
 
@@ -1211,7 +1313,7 @@ GET /_nami/data/products/1
   -> staticServe is inbound, because defer enters the downstream first
   -> User/plugin middleware
   -> dataPrefetch matches the data API, executes the page data function and returns JSON
-  <- staticServe usually does not overwrite the generated data response
+  <- staticServe detects downstream handling and does not overwrite the response or Cache-Control
   <- security / timing outbound supplementary header
 ```
 
@@ -1486,6 +1588,12 @@ process.send({
 
 Each Worker has its own Node.js process, event loop, and memory space. When using in-memory ISR cache, the caches of each worker are not shared with each other; if the production environment is deployed with multiple workers or multiple machines and the ISR content is required to be consistent, a shared cache adapter such as Redis should be used.
 
+The public `startWorker(options)` API uses the same runtime entry. `WorkerOptions`
+extends `CreateServerOptions` and forwards `appElementFactory` (resolved from
+`createAppElement(context)`), `moduleLoader`, `assetManifest`, or `runtimeProvider`
+unchanged to `createNamiServer()`; there is no separate Worker-only HTML-rendering
+contract.
+
 
 
 ### Abnormal restart
@@ -1644,7 +1752,17 @@ activeServerCompiler.watch({ aggregateTimeout: 300 }, callback);
 
 
 
-After the server bundle is recompiled, `renderMiddleware` can get the latest `appElementFactory`, `htmlRenderer`, and `moduleLoader` through `runtimeProvider` before each request to avoid SSR from using old entries or old page modules.
+After the server bundle is recompiled, `runtimeProvider` resolves the latest
+`createAppElement(context)` export as `appElementFactory` and rebuilds the
+`moduleLoader` before each request. This prevents SSR from using an old application
+tree factory or stale page modules. The framework then owns React string/stream
+rendering, Document assembly, manifest assets, and hydration-data injection.
+
+`nami dev` sets `requireServerEntry` from whether the merged routes match
+`NEEDS_SERVER_BUNDLE`. If any SSR, SSG, or ISR route exists, development runtime
+resolution strictly requires the latest server bundle to exist and export
+`createAppElement(context)`; it does not silently fall back to the retired
+`renderToHTML` protocol.
 
 
 

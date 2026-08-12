@@ -9,7 +9,6 @@
  * 否则会导致 Hydration 不匹配。
  */
 import React from 'react';
-import './global.css';
 
 interface AppProps {
   children: React.ReactNode;

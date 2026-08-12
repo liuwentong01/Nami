@@ -145,7 +145,7 @@ export interface GetStaticPropsResult<P = Record<string, unknown>> {
   props?: P;
   /**
    * ISR 重验证间隔（秒）
-   * - 正数: 过期后在后台重新生成
+   * - 正整数: 经过对应秒数后在后台重新生成
    * - 0: 每次请求都触发重验证
    * - undefined: 不启用 ISR（纯 SSG）
    */
@@ -154,6 +154,8 @@ export interface GetStaticPropsResult<P = Record<string, unknown>> {
   redirect?: {
     destination: string;
     permanent?: boolean;
+    /** 显式重定向状态码；不传时 permanent=true 使用 308，否则使用 307 */
+    statusCode?: number;
   };
   /** 返回 404 */
   notFound?: boolean;

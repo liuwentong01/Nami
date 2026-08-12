@@ -29,13 +29,13 @@
 import cluster from 'cluster';
 import type { NamiConfig, Logger } from '@nami/shared';
 import { createLogger } from '@nami/shared';
-import { createNamiServer } from '../app';
+import { createNamiServer, type CreateServerOptions } from '../app';
 import { setupGracefulShutdown } from '../middleware/graceful-shutdown';
 
 /**
  * 工作进程配置选项
  */
-export interface WorkerOptions {
+export interface WorkerOptions extends CreateServerOptions {
   /** Nami 框架主配置 */
   config: NamiConfig;
 
@@ -82,7 +82,10 @@ export async function startWorker(options: WorkerOptions): Promise<void> {
 
   try {
     // ===== 1. 创建 Koa 应用 =====
-    const { app, pluginManager, isrManager, triggerShutdown } = await createNamiServer(config);
+    const { app, pluginManager, isrManager, triggerShutdown } = await createNamiServer(
+      config,
+      options,
+    );
 
     // ===== 2. 启动 HTTP 服务器 =====
     const server = app.listen(port, host, () => {
@@ -180,7 +183,6 @@ export async function startWorker(options: WorkerOptions): Promise<void> {
         reason: reason instanceof Error ? reason.message : String(reason),
       });
     });
-
   } catch (error) {
     logger.fatal('工作进程启动失败', {
       workerId,

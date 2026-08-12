@@ -108,12 +108,16 @@ const MOCK_POSTS: Record<string, PostDetail> = {
  * 根据文章 ID 获取详情数据
  *
  * 动态路由参数通过 context.params 获取，如 /posts/1 中 params.id = '1'。
- * 当文章不存在时返回 notFound: true，框架会自动渲染 404 页面。
+ * 当文章不存在时返回 notFound: true，框架会返回不启动 Hydration 的稳定静态 404。
  */
 export async function getServerSideProps(
   context: GetServerSidePropsContext,
 ): Promise<GetServerSidePropsResult<PostDetailPageProps>> {
   const { id } = context.params;
+
+  if (!id) {
+    return { notFound: true };
+  }
 
   /** 模拟数据库查询延迟 */
   await new Promise((resolve) => setTimeout(resolve, 80));

@@ -1,12 +1,12 @@
 # 渲染模式原理
 
-Nami 的渲染系统由四个正式 `RenderMode` 枚举和一个 SSR 的流式变体组成。源码中的枚举只有 `csr`、`ssr`、`ssg`、`isr` 四种；Streaming SSR 不是独立枚举，而是 SSR 路由在 `meta.streaming === true` 且运行时具备 `appElementFactory` 时选择的渲染器变体。
+Nami 的渲染系统由四个正式 `RenderMode` 枚举和一个 SSR 的流式变体组成。源码中的枚举只有 `csr`、`ssr`、`ssg`、`isr` 四种；Streaming SSR 不是独立枚举。服务端 React 元素工厂已是 SSR 的必需依赖，因此是否选择流式变体由 SSR 路由的 `meta.streaming === true` 决定。
 
 读这一章时要先区分三条链路：
 
 1. **HTML 渲染链路**：`renderMiddleware` 匹配路由后创建具体 Renderer，产出页面 HTML。
 2. **数据预取 API 链路**：`dataPrefetchMiddleware` 只处理 `GET /_nami/data/*`，返回 JSON，不等同于 HTML 渲染前的数据预取。
-3. **构建期静态生成链路**：`NamiBuilder.generateStaticPages()` 在 `nami build` 后读取 server bundle，为 SSG/ISR 路由写出静态 HTML。
+3. **构建期静态生成链路**：`NamiBuilder.generateStaticPages()` 在编译后装配 server bundle，并委托 `SSGRenderer.generateStatic()` 为 SSG/ISR 路由写出静态 HTML。
 
 ---
 
@@ -62,10 +62,10 @@ export enum RenderMode {
 | 特性 | CSR | SSR | SSG | ISR | Streaming SSR |
 |------|-----|-----|-----|-----|---------------|
 | 是否是 `RenderMode` 枚举 | 是 | 是 | 是 | 是 | 否，属于 SSR 变体 |
-| HTML 生成位置 | 请求时生成空壳 | 每次请求服务端渲染 | 构建期生成 | 构建期 + 运行期重验证 | 每次请求服务端流式渲染 |
+| HTML 生成位置 | 请求时生成带临时骨架的 Shell | 每次请求服务端渲染 | 构建期生成 | 构建期 + 运行期重验证 | 每次请求服务端流式渲染 |
 | 是否执行页面数据函数 | 服务端不执行 | HTML 链路执行 `getServerSideProps` | 构建期执行 `getStaticProps` | 缓存 miss/重验证执行 `getStaticProps` | 与 SSR 一样执行 `getServerSideProps` |
 | 运行期是否需要服务端 | 否 | 是 | 读取静态文件时可不需要 React SSR | 是 | 是 |
-| 首屏 HTML 是否已有内容 | 否 | 是 | 是 | 缓存命中时是 | 是，且可分块返回 |
+| 首屏 HTML 是否已有内容 | 只有临时 loading 骨架，无业务内容 | 是 | 是 | 缓存命中时是 | 是，且可分块返回 |
 | 典型缓存 | 短缓存 HTML 壳 | `private, no-cache` | 长缓存静态 HTML | SWR 缓存 | `private, no-cache` |
 
 ---
@@ -125,7 +125,7 @@ preferStreaming:
   renderMode === RenderMode.SSR && matchResult.route.meta?.streaming === true
 ```
 
-真正是否创建 `StreamingSSRRenderer` 还要看 `RendererFactory`：只有 `preferStreaming === true` 且存在 `appElementFactory` 时，才会返回流式渲染器；否则仍返回普通 `SSRRenderer`。
+`renderMiddleware` 把这项路由配置映射成 `preferStreaming`，`RendererFactory` 据此返回 `StreamingSSRRenderer`；未开启时返回普通 `SSRRenderer`。`appElementFactory` 不再是额外的流式分支条件，因为它本来就是所有 SSR 渲染器的必需参数。
 
 ### 流式响应选择
 
@@ -217,8 +217,10 @@ HTML 壳包含：
 2. 标题和描述
 3. `<meta name="renderer" content="csr">`
 4. CSS 资源链接
-5. 空容器 `<div id="nami-root"></div>`
+5. 含 `data-nami-csr-shell="loading"` 临时骨架的 `<div id="nami-root">...</div>`
 6. 客户端 JS Bundle
+
+临时骨架覆盖 Bundle 下载、客户端初始化和 React 首次提交前的等待时间；客户端 JS 成功运行后会替换根容器内容。它与 Level 3 无 JS 静态应急页不是同一类状态。
 
 CSR 不在服务端执行页面数据函数：
 
@@ -228,7 +230,7 @@ async prefetchData() {
 }
 ```
 
-默认响应缓存：
+未声明 GSP `revalidate` 时的默认响应缓存：
 
 ```http
 Cache-Control: public, max-age=60, s-maxage=120
@@ -260,21 +262,20 @@ SSRRenderer.render(context)
        -> prefetchData(context)
        -> context.initialData = prefetchResult.data
        -> renderAppHTML(context)
-       -> ensureDocumentHTML(renderedHTML, context)
+       -> assembleHTML(renderedHTML, context)
        -> createDefaultResult(..., RenderMode.SSR)
   -> callPluginHook('afterRender')
 ```
 
 ### 服务端入口协议
 
-SSR 支持两种服务端渲染入口：
+SSR 只有一种服务端渲染入口协议：
 
 | 入口 | 说明 |
 |------|------|
-| `htmlRenderer(context, initialData)` | 兼容 `entry-server.renderToHTML()`，直接返回 HTML 字符串 |
-| `appElementFactory(context)` | 返回 React 元素，框架内部动态导入 `react-dom/server` 并调用 `renderToString()` |
+| `entry-server.createAppElement(context)` | 返回 React 元素；CLI 将其解析为内部的 `appElementFactory`，框架再调用 `react-dom/server` |
 
-`renderAppHTML()` 优先使用 `htmlRenderer`。如果没有 `htmlRenderer`，才使用 `appElementFactory`。
+应用负责依据 `context.route`、`context.params` 和 `context.initialData` 选择页面并创建元素树；框架负责普通 SSR/SSG/ISR 的 `renderToString()`、Streaming SSR 的流式输出，以及后续的 Document 组装，不再接受由应用直接返回 HTML 字符串的平行协议。
 
 ### 数据预取
 
@@ -292,11 +293,11 @@ SSR 支持两种服务端渲染入口：
 | `cookies` | `context.koaContext?.cookies ?? {}` |
 | `requestId` | 请求 ID |
 
-当前 HTML 渲染链路中，`SSRRenderer` 会先执行 `getServerSideProps`。如果返回 `redirect` 或 `notFound`，渲染器会在 React 渲染前短路，分别返回 30x 或 404；否则才把 `result.props ?? {}` 作为页面数据继续组装 HTML。Streaming SSR 也会在开始流式输出前处理这类早期结果，避免已经写出 shell 后再尝试改状态码。
+当前 HTML 渲染链路中，`SSRRenderer` 会先执行 `getServerSideProps`。如果返回 `redirect` 或 `notFound`，渲染器会在 React 渲染前短路，分别返回 30x 或稳定的静态 404；否则才把 `result.props ?? {}` 作为页面数据继续组装 HTML。默认 404 不注入 Hydration 数据或客户端 Bundle，避免空根节点在浏览器中重新 CSR 渲染原业务页。Streaming SSR 也会在开始流式输出前处理这类早期结果，避免已经写出 shell 后再尝试改状态码。
 
 ### HTML 组装与注水
 
-如果 `htmlRenderer` 返回的是完整 HTML 文档，`ensureDocumentHTML()` 直接透传；否则 `assembleHTML()` 组装文档：
+React 页面片段生成后，框架始终通过 `assembleHTML()` 组装完整 Document：
 
 ```text
 <!DOCTYPE html>
@@ -345,39 +346,66 @@ SSG 分为构建期和运行期。
 
 ### 构建期
 
-当前 `nami build` 的静态生成主要由 `NamiBuilder.generateStaticPages()` 完成，而不是单独执行 `SSGRenderer.generateStatic()`：
+当前 `nami build` 由 `NamiBuilder.generateStaticPages()` 发起静态生成，并直接复用 `SSGRenderer.generateStatic()`：
 
 ```text
 nami build
   -> client/server Webpack 编译完成
   -> generateStaticPages(routes)
        -> 读取 dist/server/entry-server.js
+       -> 校验并解析 createAppElement(context)
        -> 创建 ModuleLoader
-       -> 遍历 SSG/ISR 路由
-       -> 动态路由执行 getStaticPaths()
-       -> 每个 path 执行 getStaticProps()
-       -> renderToHTML / pageModule.render / pageModule.default / 兜底 shell
-       -> 写入 dist/static/{path}/index.html
+       -> 读取 asset-manifest.json
+       -> SSGRenderer.generateStatic(routes)
+            -> 动态路由执行 getStaticPaths()
+            -> 每个 path 执行 getStaticProps()
+            -> createAppElement(context) → renderToString()
+            -> 组装完整 Document、资源和注水数据
+            -> 写入 dist/static 对应的 .html 与 .html.nami.json
 ```
 
-对于动态路由，`generateStaticPages()` 只在 `route.path.includes(':') && route.getStaticPaths` 时执行 `getStaticPaths`。如果动态路由找不到对应函数，会记录 warn 并跳过该路由。
+静态路由直接生成一个路径；动态路由必须声明且能通过 `ModuleLoader` 解析
+`getStaticPaths`。缺少声明、找不到导出或数据预取降级都会记入该路由的生成错误，
+其余路由继续生成，最终由 Builder 汇总到构建结果。
 
-构建期渲染策略按优先级：
+这里的“动态”覆盖匹配器的完整段语法，而不只是裸 `:param`：
 
-| 优先级 | 条件 | 行为 |
-|--------|------|------|
-| 1 | `serverBundle.renderToHTML` 是函数 | 调用 `renderToHTML(actualPath, props)` |
-| 2 | `pageModule.render` 是函数 | 调用 `pageModule.render({ path, props })` |
-| 3 | `pageModule.default` 是函数 | `React.createElement(default, props)` 后 `renderToString()` |
-| 4 | 都不存在 | 生成带 `window.__NAMI_DATA__` 的最小 HTML 壳 |
+| 路由 token | `getStaticPaths.params` 键 | 值形态 |
+|------------|----------------------------|--------|
+| `:id` | `id` | 单个非空路径段 |
+| `:id?` | `id`，可省略 | 可选单段 |
+| `:id(\\d+)` | `id` | 必须满足约束 |
+| `:path+` | `path` | 一个或多个 `/` 分隔段 |
+| `*` | `'*'` | 非空剩余路径 |
+| `(.*)` | `$0`（后续组依次 `$1`） | 可为空的多段值 |
+
+构建期先把 params materialize 为逐段编码的 canonical URL，再用正式
+`matchPath(route.path, url, { exact: true })` 做参数 round-trip。缺少必填参数、
+参数类型错误、单段值含 `/`、不满足约束或生成 URL 无法精确匹配都会成为页面
+生成错误；不同路由/params 若最终落到同一个绝对静态产物路径，也会报碰撞并使
+build 失败。这些校验没有引入新的 URL→文件格式，映射仍是 `/` →
+`index.html`、`/about` → `about.html`、`/blog/hello` →
+`blog/hello.html`。
+
+构建期不再尝试页面级 `render`、默认组件或最小 shell 等平行协议。它与 SSR/ISR 共享 `createAppElement(context)`，由框架统一掌控渲染与 Document，从而保证构建产物和运行期输出的资源、数据及挂载容器一致。
 
 输出路径是：
 
 ```text
 dist/static/index.html
-dist/static/about/index.html
-dist/static/blog/hello/index.html
+dist/static/index.html.nami.json
+dist/static/about.html
+dist/static/about.html.nami.json
+dist/static/blog/hello.html
+dist/static/blog/hello.html.nami.json
 ```
+
+`*.html.nami.json` 是响应 sidecar，记录版本、`page | redirect | not-found`
+类型、状态码、响应头与可选 `revalidate`。运行期同时读取 HTML
+和 sidecar，所以构建期 GSP 的 30x/404 不会被还原成 200；旧产物没有
+sidecar 时仍按普通 200 SSG 页兼容，sidecar 存在但损坏则直接报错。
+GSP 显式 redirect status 只允许 `301/302/303/307/308`；未显式设置时
+permanent 解析为 `308`，临时重定向为 `307`。
 
 ### 运行期
 
@@ -386,13 +414,28 @@ dist/static/blog/hello/index.html
 ```text
 SSGRenderer.render(context)
   -> callPluginHook('beforeRender')
-  -> resolveStaticFilePath(context.path)
+  -> materializeStaticRoutePath(route.path, context.params)
+  -> matchPath(..., { exact: true }) round-trip
+  -> resolveStaticFilePath(canonicalPath)
   -> fileReader.readFile(filePath)
+  -> readStaticPageMetadata(filePath)
   -> createDefaultResult(..., RenderMode.SSG)
   -> callPluginHook('afterRender')
 ```
 
-静态文件不存在时抛出 `RenderError`，上层进入降级流程。
+动态 SSG 路由配置 `fallback: false` 时，未生成路径直接返回稳定静态
+404，不注入 Hydration payload 或客户端 Bundle。其他静态文件缺失仍抛出
+`RenderError`，上层进入降级流程。
+
+`getStaticPaths.fallback` 当前支持矩阵：
+
+| 模式 | 支持值 | 未预生成路径 |
+|------|--------|------------------|
+| SSG | `false` | 稳定静态 404 |
+| ISR | `'blocking'` | 冷 `MISS`，同步执行 GSP + React 渲染并写入 CacheStore |
+
+`true` 以及 SSG/ISR 的其他组合尚未实现；路由配置与
+`getStaticPaths()` 返回值不一致或使用不支持的值时，构建直接记录生成错误。
 
 默认响应缓存：
 
@@ -400,9 +443,12 @@ SSGRenderer.render(context)
 Cache-Control: public, max-age=3600, s-maxage=86400
 ```
 
+若 GSP 显式返回 `revalidate`（包括合法的 `0`），构建期会把对应
+`s-maxage` / `stale-while-revalidate` 写入 sidecar，运行期使用该页面自己的值。
+
 ### `SSGRenderer.generateStatic()`
 
-`SSGRenderer` 自身也实现了 `generateStatic(routes)`、`getStaticPaths`、`getStaticProps` 等构建能力，但当前 CLI 构建主链路使用的是 `NamiBuilder.generateStaticPages()`。文档和排查时应以 Builder 链路为准。
+`SSGRenderer` 实现 `generateStatic(routes)`、`getStaticPaths`、`getStaticProps` 等构建能力。`NamiBuilder.generateStaticPages()` 负责装配 server bundle、`ModuleLoader`、asset manifest 和输出目录，然后调用它；二者现在是同一条主链路，而不是两套静态生成实现。
 
 ---
 
@@ -434,10 +480,10 @@ GET /article/1
 默认缓存键是：
 
 ```typescript
-ctx.path
+ctx.url
 ```
 
-这意味着默认 ISR 缓存层不包含 query、Cookie 或 Header。如果页面内容依赖这些因素，需要自定义缓存键，否则不同变体可能共用同一份缓存。
+这意味着默认 ISR 缓存层包含 pathname 与原始 query，但不包含 Cookie、Header 或租户身份，query 顺序也不会归一化。页面内容依赖额外维度或需要忽略营销参数时，应自定义 `generateCacheKey()`；需要失效同一路径的多个 URL 变体时使用 tag。
 
 ### SWR 状态
 
@@ -455,7 +501,11 @@ ctx.path
 | `Fresh` | 直接返回缓存，`X-Nami-Cache: HIT` |
 | `Stale` | 返回旧 HTML，后台发起内部重验证，`X-Nami-Cache: STALE` |
 | `Expired` | 不返回旧 HTML，走同步渲染 |
-| Miss | 同步渲染并异步写入缓存 |
+| Miss | 同步渲染，等待缓存写入完成后再释放同 key singleflight |
+
+有效 `revalidate = 0` 是旁路持久 ISR 缓存的特殊分支：不读取或写入
+CacheStore，尽力删除旧 key，仅允许当前 Node 进程内的同 key in-flight Promise
+合并。它不会生成一个 TTL=0 的持久条目。
 
 后台重验证通过内部请求实现，请求头包含：
 
@@ -465,6 +515,12 @@ X-Requested-With: nami-isr-revalidate
 ```
 
 带该头的请求会绕过 `isrCacheMiddleware`，直接进入渲染层，避免后台重验证再次命中 stale 缓存。
+
+普通成功页的冷渲染与后台重建都会把安全过滤后的 `statusCode` / 端到端 headers
+写入 `CacheEntry` 并基于 HTML 生成 ETag，HIT/STALE 会恢复这些字段。后台若
+得到合法 GSP redirect 或 `404 notFound`，会删除旧 key 且不缓存控制响应；
+降级/普通失败才保留旧 stale。同步 singleflight 与后台队列去重都只在单进程
+内有效，队列 `Promise.race()` 超时也只停止等待，不会取消底层 render/fetch。
 
 ### `ISRRenderer`
 
@@ -476,6 +532,7 @@ ISRRenderer.render(context)
   -> handleCacheMiss()
        -> prefetchData(context)  // getStaticProps
        -> context.initialData = props
+       -> redirect/notFound? 30x/404 + no-store 短路
        -> renderAppHTML(context)
        -> ensureDocumentHTML(...)
        -> createDefaultResult(..., RenderMode.ISR, cacheControl)
@@ -488,8 +545,8 @@ ISRRenderer 返回的 `cacheControl` 包含：
 
 ```typescript
 {
-  revalidate,
-  staleWhileRevalidate: revalidate * 2,
+  revalidate: effectiveRevalidate,
+  staleWhileRevalidate: effectiveRevalidate * 2,
   tags: extractCacheTags(context),
 }
 ```
@@ -501,7 +558,7 @@ ISRRenderer 返回的 `cacheControl` 包含：
 | 路由配置 | `route.meta.cacheTags` |
 | 插件或业务写入 | `context.extra.cacheTags` |
 
-需要区分两套缓存键逻辑：`isrCacheMiddleware` 默认用 `ctx.path`，而 `ISRRenderer.buildCacheKey()` 会把排序后的 query 拼入 key。默认生产链路通常先经过 middleware，因此实际缓存命中行为以 middleware 的默认 key 为准。
+`isrCacheMiddleware` 与 `ISRRenderer.buildCacheKey()` 现在统一使用完整请求 URL（pathname + query），客户端 Hydration 的 `routePath` 也采用同一作用域。默认不会归一化 query 顺序，也不会纳入 Cookie、Header 或租户身份；需要其他缓存维度时应自定义 `generateCacheKey()`。
 
 ---
 
@@ -531,10 +588,9 @@ Streaming SSR 基于 React 18 的 `renderToPipeableStream()`。它不是单独�
 ```typescript
 mode === RenderMode.SSR
   && preferStreaming
-  && appElementFactory
 ```
 
-如果 SSR 只提供 `htmlRenderer`，不会进入 Streaming SSR，因为流式渲染需要 React 元素树。
+其中 `preferStreaming` 来自路由 `meta.streaming === true`。`appElementFactory` 已是 SSR 创建时的必需参数，因此无需再作为分支条件；Streaming SSR 与普通 SSR 始终消费同一个 `createAppElement(context)` 返回的 React 元素树。
 
 ### `render()` 与 `renderToStream()`
 
@@ -589,7 +645,7 @@ Streaming SSR -> SSR -> CSR
 
 ### 服务端注入
 
-SSR、ISR、Streaming SSR 和构建期兜底 HTML 都可能注入：
+SSR、ISR、Streaming SSR 和构建期 SSG 的正常可注水 HTML 都使用同一个注水结构：
 
 ```html
 <script>window.__NAMI_DATA__={...}</script>
@@ -601,7 +657,23 @@ SSR、ISR、Streaming SSR 和构建期兜底 HTML 都可能注入：
 export const NAMI_DATA_VARIABLE = '__NAMI_DATA__';
 ```
 
-`generateDataScript(context.initialData)` 注入的是 `initialData` 对象本身，也就是 `getServerSideProps` / `getStaticProps` 返回的 `props`。
+所有需要客户端 Hydration 的正常服务端 HTML 输出都调用 `BaseRenderer.createHydrationData(context)`，再由
+`generateDataScript()` 安全序列化：
+
+```typescript
+{
+  version: NAMI_DATA_PROTOCOL_VERSION,
+  props: context.initialData ?? {},
+  degraded: context.extra.__nami_data_degraded === true,
+  renderMode: context.route.renderMode,
+  // SSG 按构建产物 pathname 复用；SSR/ISR 精确绑定 pathname + query
+  routePath: context.route.renderMode === RenderMode.SSG
+    ? context.path
+    : context.url,
+}
+```
+
+因此页面数据与渲染元信息有稳定边界，SSR、Streaming SSR、SSG 和 ISR 不再各自决定注入形状。
 
 ### 客户端读取
 
@@ -609,7 +681,7 @@ export const NAMI_DATA_VARIABLE = '__NAMI_DATA__';
 
 ```typescript
 const rawData = hydrateData<ServerInjectedData>(NAMI_DATA_VARIABLE);
-cachedData = rawData;
+cachedData = normalizeServerData(rawData);
 ```
 
 客户端挂载入口位于 `packages/client/src/entry-client.tsx`：
@@ -618,19 +690,25 @@ cachedData = rawData;
 const serverData = readServerData();
 const renderMode = (serverData.renderMode || config.defaultRenderMode) as RenderMode;
 
-<NamiApp initialData={serverData.props} />
+<NamiApp
+  initialData={serverData.props}
+  initialDataDegraded={serverData.degraded}
+  initialRoutePath={serverData.routePath}
+  initialRenderMode={serverData.renderMode}
+/>
 ```
 
-这意味着当前类型层面把 `window.__NAMI_DATA__` 描述为可包含 `props`、`renderMode`、`routePath`，但渲染器默认注入的是 `props` 对象本身。如果业务希望客户端按 `serverData.props` 读取，需要确保注入数据结构与客户端读取约定一致。这是当前实现中需要特别注意的地方，文档不要把类型注释当成所有渲染器的实际输出形状。
+客户端与服务端现在消费同一个 envelope：`serverData.props` 作为页面首屏数据，
+`serverData.renderMode` 决定挂载方式，`serverData.routePath` 保存首屏路由。
 
 ### Hydration vs CSR 挂载
 
-客户端根据 `renderMode !== 'csr'` 且容器已有子节点决定是否 Hydration：
+客户端仅在协议版本兼容、`renderMode !== 'csr'` 且容器已有子节点时 Hydration：
 
 | 条件 | 挂载方式 |
 |------|----------|
-| 非 CSR 且 `container.childNodes.length > 0` | `hydrateApp()`，复用服务端 HTML |
-| CSR 或容器为空 | `renderApp()`，客户端创建 DOM |
+| `version === NAMI_DATA_PROTOCOL_VERSION`、非 CSR 且容器非空 | `hydrateApp()`，复用服务端 HTML |
+| 协议不兼容、CSR 或容器为空 | `renderApp()`，客户端创建 DOM |
 
 Hydration 完成后会调用 `cleanupServerData()`，删除 `window.__NAMI_DATA__` 并移除对应 script 标签，但首次读取的数据会保存在模块级缓存中。
 
@@ -657,7 +735,7 @@ GET /_nami/data/blog/hello
 |------|--------------|--------------|
 | SSR 数据函数 | `SSRRenderer.prefetchData()` | `dataPrefetchMiddleware` 执行 |
 | SSG/ISR 数据函数 | 构建期或 ISR miss/revalidate 执行 | `dataPrefetchMiddleware` 执行 |
-| `redirect` / `notFound` | SSR / Streaming SSR 会在渲染前短路为 30x / 404 | API 会转换为 307/308 或 404 |
+| `redirect` / `notFound` | SSR / Streaming SSR 在请求期短路；SSG 构建控制文档与 sidecar；GSP 显式 redirect 仅允许 301/302/303/307/308；ISR 冷 MISS 返回控制响应，后台重建则删旧 key，两者都不缓存控制响应 | API 使用显式 `statusCode` 或默认 307/308，`notFound` 为 404 |
 | 返回内容 | HTML / stream | JSON 或 204 |
 | 路径前缀 | 页面原始路径 | `/_nami/data` |
 
@@ -670,29 +748,18 @@ GET /_nami/data/blog/hello
 - `packages/server/src/middleware/render-middleware.ts`
 - `packages/core/src/error/degradation.ts`
 
-渲染抛错后，`renderMiddleware` 首先检查插件是否提供了骨架屏 HTML：
-
-```typescript
-if (typeof renderContext.extra.__skeleton_fallback === 'string') {
-  ctx.status = 200;
-  ctx.set('X-Nami-Render-Mode', 'skeleton-fallback');
-  ctx.body = skeletonHtml;
-  return;
-}
-```
-
-否则进入 `DegradationManager.executeWithDegradation()`：
+`renderMiddleware` 将首次渲染交给 `DegradationManager`，由它统一执行：
 
 | 等级 | 条件 | 返回 |
 |------|------|------|
-| Level 0 | 原始渲染重试成功 | 原始渲染结果 |
+| Level 0 | 首次渲染成功 | 原始渲染结果 |
 | Level 1 | `config.maxRetries > 0` | 重试后的结果 |
-| Level 2 | `config.ssrToCSR` | CSR 空壳 |
-| Level 3 | `context.route.skeleton` 存在 | 内置骨架屏 HTML |
+| Level 2 | `config.ssrToCSR` | 带临时骨架和客户端 JS 的 CSR Shell |
+| Level 3 | 插件静态应急内容或 `context.route.skeleton` | 无客户端 JS 的静态应急页（兼容名 Skeleton） |
 | Level 4 | `config.staticHTML` 存在 | 静态 HTML |
 | Level 5 | 全部失败 | 503 页面 |
 
-注意：`context.route.skeleton` 当前只是触发内置骨架 HTML 的条件，不是加载并渲染 skeleton 组件文件。
+注意：`__csr_shell_skeleton` 属于正常/降级 CSR 的可恢复 loading；Level 3 的插件内容不会越过 Level 1/2，且 `context.route.skeleton` 当前只是触发内置静态应急 HTML 的条件，不会加载组件文件。路由 Chunk 与业务数据的骨架属于客户端 loading，不属于 Level 3。
 
 ---
 
@@ -730,7 +797,7 @@ if (typeof renderContext.extra.__skeleton_fallback === 'string') {
 
 ### 误区二：SSG 完全不需要 server bundle
 
-运行期可以不做服务端渲染，但构建期需要 server bundle 执行页面模块、`getStaticProps`、`getStaticPaths` 或 `renderToHTML`。这也是 `NEEDS_SERVER_BUNDLE` 包含 SSG 的原因。
+运行期可以不做服务端渲染，但构建期需要 server bundle 执行页面模块、`getStaticProps`、`getStaticPaths`，并通过 `createAppElement(context)` 生成 React 元素树。这也是 `NEEDS_SERVER_BUNDLE` 包含 SSG 的原因。
 
 ### 误区三：`/_nami/data/*` 就是 SSR 的数据预取流程
 
@@ -738,15 +805,23 @@ if (typeof renderContext.extra.__skeleton_fallback === 'string') {
 
 ### 误区四：所有渲染模式都会以同样方式处理 `redirect` / `notFound`
 
-SSR 和 Streaming SSR 的 HTML 链路会把 `getServerSideProps` 的 `redirect` / `notFound` 转成 HTTP 响应；数据预取 API 也会返回对应 JSON/状态码。SSG/ISR 仍要结合构建期、缓存层和具体 renderer 的执行时机理解，不要把所有模式都简单等同于 Next.js 的完整语义。
+不是执行时机相同，但控制语义已统一：SSR / Streaming SSR 把 GSSP
+结果在请求期短路为 30x/404；SSG 把 GSP 结果写成重定向/静态 404 HTML
+与 sidecar，运行期恢复状态码和头；GSP 显式 redirect status 限于
+`301/302/303/307/308`。ISR 冷 MISS 直接返回控制响应，并以
+`X-Nami-Cache: SKIP` + `private, no-store` 禁止缓存；后台内部重建遇到控制响应
+时携带 `private, no-store` 并驱动队列删除旧 key，原用户响应仍标记为 `STALE`。
+降级/普通失败与控制响应不同，会保留旧 stale。
 
-### 误区五：ISR 默认按完整 URL 缓存
+### 误区五：ISR 的完整 URL 缓存键会自动归一化 query
 
-默认 `isrCacheMiddleware` 使用 `ctx.path` 作为缓存键，不包含 query。`ISRRenderer` 内部 helper 会拼 query，但默认生产缓存命中先经过 middleware，因此需要按 middleware 行为理解。
+不会。默认 key 是原始完整 URL，所以 `?a=1&b=2` 与 `?b=2&a=1` 是两个条目；它也不包含 Cookie、Header 或租户身份。需要其他语义时应自定义 `generateCacheKey()`。
 
-### 误区六：`window.__NAMI_DATA__` 一定是 `{ props, renderMode }`
+### 误区六：`window.__NAMI_DATA__` 只是页面 props
 
-类型允许这种结构，但渲染器默认注入的是 `context.initialData` 本身。客户端 `entry-client.tsx` 读取 `serverData.props`，因此项目如果依赖结构化注水，需要保证 server bundle 输出和客户端读取协议一致。
+不是。对正常可注水输出，框架统一注入 `{ version: 1, props, degraded, renderMode, routePath }`。页面消费
+`props` 和可选的降级状态；客户端用 `version` 做协议兼容判断，并用渲染模式与路径
+选择 Hydration/CSR 挂载、限定首屏数据作用域。应用入口不应自行覆盖这一结构。稳定静态 404 是例外，不注入该结构或客户端 Bundle。
 
 ---
 

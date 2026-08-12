@@ -22,7 +22,7 @@
  *
  * app.use(requestContextMiddleware());
  *
- * // 下游中间件中使用
+ * 下游中间件中使用
  * app.use(async (ctx, next) => {
  *   const { requestId, logger } = ctx.state;
  *   logger.info('处理请求', { url: ctx.url });
@@ -59,13 +59,8 @@ export interface RequestContextOptions {
  * @param options - 配置选项（可选）
  * @returns Koa 中间件函数
  */
-export function requestContextMiddleware(
-  options: RequestContextOptions = {},
-): Koa.Middleware {
-  const {
-    requestIdHeader = 'x-request-id',
-    loggerPrefix = '@nami/server',
-  } = options;
+export function requestContextMiddleware(options: RequestContextOptions = {}): Koa.Middleware {
+  const { requestIdHeader = 'x-request-id', loggerPrefix = '@nami/server' } = options;
 
   /** 创建基础 Logger 实例，所有请求级子 Logger 都从此派生 */
   const baseLogger = createLogger(loggerPrefix);
@@ -89,7 +84,7 @@ export function requestContextMiddleware(
     ctx.state.requestId = requestId;
 
     /**
-     * 创建携带 requestId 的子 Logger 实例
+     * TODO 创建携带 requestId 的子 Logger 实例
      *
      * 子 Logger 自动在每条日志中附加 requestId 字段，
      * 无需下游中间件手动传入，降低日志追踪的使用门槛。

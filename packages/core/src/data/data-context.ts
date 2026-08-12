@@ -21,6 +21,8 @@ import type { ReactNode, ReactElement } from 'react';
  * 通过 Provider 传递给整个组件树。
  */
 export interface NamiDataContextValue {
+  /** 是否确实位于 NamiDataProvider 内，不能用 data 是否为空来推断。 */
+  provided: boolean;
   /** 服务端预取的页面数据 */
   data: Record<string, unknown>;
   /** 数据是否处于降级状态（部分数据缺失） */
@@ -37,6 +39,7 @@ export interface NamiDataContextValue {
  * 此时应该触发客户端数据获取逻辑。
  */
 export const NamiDataContext = createContext<NamiDataContextValue>({
+  provided: false,
   data: {},
   degraded: false,
 });
@@ -94,6 +97,7 @@ export function NamiDataProvider({
   children,
 }: NamiDataProviderProps): ReactElement {
   const contextValue: NamiDataContextValue = {
+    provided: true,
     data: initialData,
     degraded,
     requestId,

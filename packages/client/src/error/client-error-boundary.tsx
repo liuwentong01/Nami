@@ -23,7 +23,7 @@
  */
 
 import React from 'react';
-import { createLogger, NamiError, ErrorCode, ErrorSeverity } from '@nami/shared';
+import { createLogger } from '@nami/shared';
 
 // ==================== 类型定义 ====================
 
@@ -52,9 +52,7 @@ export interface ClientErrorBoundaryProps {
    * 2. 渲染函数 — 动态降级内容，接收 error 和 reset 方法
    * 3. React 组件 — 接收 FallbackRenderProps
    */
-  fallback?:
-    | React.ReactNode
-    | ((props: FallbackRenderProps) => React.ReactNode);
+  fallback?: React.ReactNode | ((props: FallbackRenderProps) => React.ReactNode);
 
   /**
    * 错误回调
@@ -198,9 +196,7 @@ export class ClientErrorBoundary extends React.Component<
 
     // 检查 resetKeys 是否变化
     if (resetKeys && prevResetKeys) {
-      const hasChanged = resetKeys.some(
-        (key, index) => key !== prevResetKeys[index],
-      );
+      const hasChanged = resetKeys.some((key, index) => key !== prevResetKeys[index]);
 
       if (hasChanged) {
         logger.debug('resetKeys 变化，自动重置错误边界');
@@ -222,6 +218,22 @@ export class ClientErrorBoundary extends React.Component<
       error: null,
     });
     logger.info('错误边界已重置');
+  };
+
+  /**
+   * 完整刷新当前页面。
+   *
+   * React.lazy 会缓存已拒绝的模块 Promise，单纯重置错误边界无法保证重新请求
+   * 失败的路由 chunk，因此默认错误页同时提供显式刷新入口。
+   */
+  reloadPage = (): void => {
+    if (typeof window !== 'undefined') {
+      window.location.reload();
+      return;
+    }
+
+    // 非浏览器渲染默认错误页时保留可恢复语义。
+    this.resetErrorBoundary();
   };
 
   render(): React.ReactNode {
@@ -256,29 +268,56 @@ export class ClientErrorBoundary extends React.Component<
           textAlign: 'center' as const,
           color: '#666',
         },
+        role: 'alert',
       },
       React.createElement('h2', null, '页面出现了问题'),
       React.createElement(
         'p',
         { style: { color: '#999' } },
-        process.env.NODE_ENV !== 'production'
-          ? error.message
-          : '请刷新页面重试',
+        process.env.NODE_ENV !== 'production' ? error.message : '请刷新页面重试',
       ),
       React.createElement(
-        'button',
+        'div',
         {
-          onClick: this.resetErrorBoundary,
           style: {
-            padding: '8px 16px',
-            border: '1px solid #ddd',
-            borderRadius: '4px',
-            background: '#fff',
-            cursor: 'pointer',
             marginTop: '12px',
+            display: 'flex',
+            justifyContent: 'center',
+            gap: '8px',
+            flexWrap: 'wrap',
           },
         },
-        '重试',
+        React.createElement(
+          'button',
+          {
+            type: 'button',
+            onClick: this.resetErrorBoundary,
+            style: {
+              padding: '8px 16px',
+              border: '1px solid #ddd',
+              borderRadius: '4px',
+              background: '#fff',
+              cursor: 'pointer',
+            },
+          },
+          '重试渲染',
+        ),
+        React.createElement(
+          'button',
+          {
+            type: 'button',
+            onClick: this.reloadPage,
+            style: {
+              padding: '8px 16px',
+              border: '1px solid #2563eb',
+              borderRadius: '4px',
+              background: '#2563eb',
+              color: '#fff',
+              cursor: 'pointer',
+            },
+          },
+          '刷新页面',
+        ),
       ),
     );
   }

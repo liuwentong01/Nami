@@ -172,11 +172,14 @@ function createOfficialPlugins(target: 'server' | 'client'): NamiPlugin[] {
         '/products/:id': 'detail',
       },
       useAsFallback: true,
+      // Renderer 与客户端都会执行同一套 wrapApp waterfall，根级 Suspense
+      // 因而在两端具有一致 marker；路由级 loadingFallback 负责 chunk 加载阶段。
       enableSuspense: true,
     }),
     new NamiErrorBoundaryPlugin({
       retry: false,
-      // 当前框架内核尚未消费插件写入的服务端渐进降级标记；示例只启用真实可用的客户端边界。
+      // Showcase 聚焦 Core 的统一重试/CSR/静态应急链；这里只演示插件的客户端边界，
+      // 避免插件决策字段与 Core 的同一条服务端降级链重复记账。
       enableDegradation: false,
       onError(error, context) {
         recordClientEvent('official-error-boundary', {

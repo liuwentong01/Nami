@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { RenderMode } from '@nami/shared';
+import { DegradationLevel, RenderMode } from '@nami/shared';
 import { renderMiddleware } from '../render-middleware';
 import type { RenderMiddlewareOptions } from '../render-middleware';
 
@@ -104,7 +104,11 @@ function createMockMiddlewareOptions(
       runWaterfallHook: vi.fn((_, initial) => Promise.resolve(initial)),
     } as any,
     degradationManager: {
-      executeWithDegradation: vi.fn(),
+      executeWithDegradation: vi.fn(async (renderFn, context) => ({
+        result: await renderFn(context),
+        level: 0,
+        errors: [],
+      })),
     } as any,
     ...overrides,
   };
@@ -199,5 +203,81 @@ describe('renderMiddleware', () => {
 
     // set 应该被调用来设置 Content-Type 和 X-Nami 头
     expect(ctx.set).toHaveBeenCalled();
+  });
+
+  it('Level 2-5 降级结果标记为不可缓存并统一写入响应', async () => {
+    const degradedResult = {
+      html: '<div>skeleton</div>',
+      statusCode: 200,
+      headers: {
+        'X-Nami-Degraded': 'skeleton',
+        'Cache-Control': 'private, no-store, max-age=0',
+      },
+      meta: {
+        renderMode: RenderMode.CSR,
+        duration: 1,
+        degraded: true,
+        dataFetchDuration: 0,
+      },
+    };
+    const options = createMockMiddlewareOptions({
+      degradationManager: {
+        executeWithDegradation: vi.fn().mockResolvedValue({
+          result: degradedResult,
+          level: DegradationLevel.Skeleton,
+          errors: [new Error('render failed')],
+        }),
+      } as any,
+    });
+    const middleware = renderMiddleware(options);
+    const ctx = createMockKoaContext({ path: '/', url: '/' });
+
+    await middleware(ctx, vi.fn());
+
+    expect(ctx.body).toBe(degradedResult.html);
+    expect(ctx.state.namiCacheable).toBe(false);
+    expect(ctx.state.namiDegradationLevel).toBe(DegradationLevel.Skeleton);
+    expect(ctx.state.namiRenderResult).toBe(degradedResult);
+  });
+
+  it('重试成功可缓存，但 Level 0 的数据降级结果不可缓存', async () => {
+    const retryResult = {
+      html: '<html>retry success</html>',
+      statusCode: 200,
+      headers: {},
+      meta: {
+        renderMode: RenderMode.SSR,
+        duration: 1,
+        degraded: true,
+        dataFetchDuration: 0,
+      },
+    };
+    const retryOptions = createMockMiddlewareOptions({
+      degradationManager: {
+        executeWithDegradation: vi.fn().mockResolvedValue({
+          result: retryResult,
+          level: DegradationLevel.Retry,
+          errors: [new Error('first attempt failed')],
+        }),
+      } as any,
+    });
+    const retryContext = createMockKoaContext({ path: '/', url: '/' });
+
+    await renderMiddleware(retryOptions)(retryContext, vi.fn());
+    expect(retryContext.state.namiCacheable).toBe(true);
+
+    const dataDegradedOptions = createMockMiddlewareOptions({
+      degradationManager: {
+        executeWithDegradation: vi.fn().mockResolvedValue({
+          result: retryResult,
+          level: DegradationLevel.None,
+          errors: [],
+        }),
+      } as any,
+    });
+    const dataDegradedContext = createMockKoaContext({ path: '/', url: '/' });
+
+    await renderMiddleware(dataDegradedOptions)(dataDegradedContext, vi.fn());
+    expect(dataDegradedContext.state.namiCacheable).toBe(false);
   });
 });

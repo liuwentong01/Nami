@@ -1,16 +1,18 @@
-/**
- * 客户端入口文件
- *
- * SSR 模式下，客户端入口的作用是执行 Hydration：
- * - 服务端已经返回了完整的 HTML 标记
- * - initNamiClient 调用 hydrateRoot 为已有 DOM 附加事件监听器
- * - Hydration 完成后，页面变为可交互状态
- *
- * Hydration 过程中 React 会校验服务端与客户端的渲染结果是否一致，
- * 不一致时会在控制台输出警告并尝试修复。
- */
+/** SSR 客户端入口：恢复注水数据，并用与服务端一致的 App 外壳 Hydration。 */
 import { initNamiClient } from '@nami/client';
+import { resolveNamiConfig, type NamiPlugin } from '@nami/shared';
+import { createRuntimeConfig } from './runtime-config';
+import './global.css';
 
-initNamiClient({
+const config = resolveNamiConfig(createRuntimeConfig());
+
+const clientPlugins = config.plugins.filter(
+  (plugin): plugin is NamiPlugin => typeof plugin !== 'string',
+);
+
+void initNamiClient({
+  routes: config.routes,
+  plugins: clientPlugins,
+  config,
   containerId: 'nami-root',
 });

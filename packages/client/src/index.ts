@@ -51,6 +51,7 @@ export type {
 
 export {
   NamiRouter,
+  RouteLoadingFallback,
   NamiLink,
   useRouter,
   prefetchRoute,
@@ -59,6 +60,7 @@ export {
 } from './router';
 export type {
   NamiRouterProps,
+  RouteLoadingFallbackProps,
   ComponentResolver,
   NamiLinkProps,
   NamiRouterState,
@@ -72,23 +74,15 @@ export {
   useNamiData,
   useClientFetch,
   readServerData,
+  invalidateServerData,
   cleanupServerData,
   resetDataHydrator,
 } from './data';
-export type {
-  ClientFetchOptions,
-  ClientFetchResult,
-  ServerInjectedData,
-} from './data';
+export type { ClientFetchOptions, ClientFetchResult, ServerInjectedData } from './data';
 
 // ==================== Head 层 ====================
 
-export {
-  NamiHead,
-  HeadManagerContext,
-  createSSRHeadManager,
-  renderHeadToString,
-} from './head';
+export { NamiHead, HeadManagerContext, createSSRHeadManager, renderHeadToString } from './head';
 export type {
   NamiHeadProps,
   MetaTag,
@@ -101,11 +95,7 @@ export type {
 // ==================== Error 层 ====================
 
 export { ClientErrorBoundary, ErrorOverlay } from './error';
-export type {
-  ClientErrorBoundaryProps,
-  FallbackRenderProps,
-  ErrorOverlayProps,
-} from './error';
+export type { ClientErrorBoundaryProps, FallbackRenderProps, ErrorOverlayProps } from './error';
 
 // ==================== Performance 层 ====================
 

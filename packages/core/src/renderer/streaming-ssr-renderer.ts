@@ -34,12 +34,7 @@ import type {
   GetServerSidePropsContext,
   GetServerSidePropsResult,
 } from '@nami/shared';
-import {
-  RenderMode as RenderModeEnum,
-  RenderError,
-  ErrorCode,
-  generateDataScript,
-} from '@nami/shared';
+import { RenderMode as RenderModeEnum, RenderError, ErrorCode } from '@nami/shared';
 
 import { BaseRenderer } from './base-renderer';
 import { SSRRenderer } from './ssr-renderer';
@@ -143,6 +138,11 @@ export class StreamingSSRRenderer extends BaseRenderer {
 
     await this.callPluginHook('beforeRender', context);
 
+    const cachedResult = await this.resolvePluginCacheHit(context, timing);
+    if (cachedResult) {
+      return cachedResult;
+    }
+
     try {
       const result = await this.withTimeout(
         this.executeStreamingSSR(context, timing),
@@ -178,10 +178,20 @@ export class StreamingSSRRenderer extends BaseRenderer {
    */
   async renderToStream(context: RenderContext): Promise<StreamingRenderResult> {
     const timing = this.createRenderTiming();
+    let cleanupPendingStream: (() => void) | undefined;
 
     this.logger.debug('开始 Streaming SSR（流模式）', { url: context.url });
 
     await this.callPluginHook('beforeRender', context);
+
+    const cachedResult = await this.resolvePluginCacheHit(context, timing);
+    if (cachedResult) {
+      // resolvePluginCacheHit 已完成 afterRender，这里只补充流式结果标记。
+      return {
+        ...cachedResult,
+        isStreaming: false,
+      };
+    }
 
     try {
       // 数据预取
@@ -189,13 +199,17 @@ export class StreamingSSRRenderer extends BaseRenderer {
       const prefetchResult = await this.prefetchData(context);
       timing.dataFetchEnd = Date.now();
       context.initialData = prefetchResult.data as Record<string, unknown>;
+      context.extra.__nami_data_degraded = prefetchResult.degraded;
 
       const earlyResult = this.createEarlyDataResult(prefetchResult, context, timing);
       if (earlyResult) {
-        return {
+        const result: StreamingRenderResult = {
           ...earlyResult,
           isStreaming: false,
         };
+
+        await this.callPluginHook('afterRender', context, result);
+        return result;
       }
 
       // 构建 HTML 头部（立即发送）
@@ -203,72 +217,268 @@ export class StreamingSSRRenderer extends BaseRenderer {
 
       // 创建 React 元素
       const appElement = this.appElementFactory(context);
+      const appElementWithData = await this.prepareAppElement(appElement, context);
 
       timing.renderStart = Date.now();
 
       // 使用 renderToPipeableStream
       const { renderToPipeableStream } = await this.importStreamRenderer();
 
-      const passThrough = new PassThrough();
-      let shellReady = false;
+      const reactStream = new PassThrough();
+      const wrappedStream = new PassThrough();
+      type StreamPhase =
+        | 'waiting-shell'
+        | 'shell-ready'
+        | 'streaming'
+        | 'aborting-after-shell'
+        | 'failed-before-shell'
+        | 'completed';
+      type StreamController = {
+        pipe: (writable: Writable) => Writable;
+        abort: () => void;
+      };
 
-      const { pipe, abort } = renderToPipeableStream(
-        appElement as React.ReactElement,
-        {
-          onShellReady: () => {
-            shellReady = true;
-            // Shell 就绪，开始写入 HTML 头部
-            passThrough.write(headHTML);
-            // Pipe React 渲染的内容
-            pipe(passThrough);
-          },
+      const lifecycle: {
+        phase: StreamPhase;
+        exposed: boolean;
+        failure?: Error;
+      } = {
+        phase: 'waiting-shell',
+        exposed: false,
+      };
 
-          onShellError: (error: unknown) => {
-            const msg = error instanceof Error ? error.message : String(error);
-            this.logger.error('Streaming SSR Shell 错误', { error: msg });
-            passThrough.destroy(error instanceof Error ? error : new Error(msg));
-          },
+      let controller: StreamController | undefined;
+      let abortRequested = false;
+      let abortIssued = false;
+      let streamTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      let abortGraceHandle: ReturnType<typeof setTimeout> | undefined;
+      let resolveShell!: () => void;
+      let rejectShell!: (error: Error) => void;
 
-          onAllReady: () => {
-            // 所有 Suspense 边界 resolve 后写入尾部 HTML
-            timing.renderEnd = Date.now();
-            timing.htmlEnd = Date.now();
+      const shellReadyPromise = new Promise<void>((resolve, reject) => {
+        resolveShell = resolve;
+        rejectShell = reject;
+      });
 
-            this.logger.debug('Streaming SSR 所有内容就绪', {
+      const normalizeError = (error: unknown): Error =>
+        error instanceof Error ? error : new Error(String(error));
+
+      const clearLifecycleTimers = () => {
+        if (streamTimeoutHandle) {
+          clearTimeout(streamTimeoutHandle);
+          streamTimeoutHandle = undefined;
+        }
+        if (abortGraceHandle) {
+          clearTimeout(abortGraceHandle);
+          abortGraceHandle = undefined;
+        }
+      };
+
+      const abortReactStream = () => {
+        abortRequested = true;
+        if (!controller || abortIssued) return;
+
+        try {
+          abortIssued = true;
+          controller.abort();
+        } catch (error) {
+          this.logger.warn('Streaming SSR 中止 React 流时发生异常', {
+            url: context.url,
+            error: normalizeError(error).message,
+          });
+        }
+      };
+
+      const destroyUnexposedStreams = () => {
+        if (!reactStream.destroyed) reactStream.destroy();
+        if (!wrappedStream.destroyed) wrappedStream.destroy();
+      };
+
+      const rejectBeforeShell = (error: Error) => {
+        if (lifecycle.phase !== 'waiting-shell') return;
+
+        lifecycle.phase = 'failed-before-shell';
+        lifecycle.failure = error;
+        clearLifecycleTimers();
+        abortReactStream();
+        destroyUnexposedStreams();
+        rejectShell(error);
+      };
+
+      const terminateAfterShell = (error: Error, source: string) => {
+        if (lifecycle.phase !== 'shell-ready' && lifecycle.phase !== 'streaming') {
+          return;
+        }
+
+        lifecycle.phase = 'aborting-after-shell';
+        lifecycle.failure = error;
+        clearLifecycleTimers();
+
+        this.logger.error('Streaming SSR Shell 就绪后流异常，中止当前流', {
+          url: context.url,
+          source,
+          error: error.message,
+        });
+
+        abortReactStream();
+
+        // 结果尚未交给 Koa 时，销毁已缓冲的字节，上层仍可安全降级。
+        if (!lifecycle.exposed) {
+          destroyUnexposedStreams();
+          return;
+        }
+
+        // 响应已开始后不能再写第二份 HTML。先让 React abort 收尾，
+        // 如底层流未在宽限期内结束，再强制关闭输出避免连接永久悬挂。
+        if (lifecycle.phase === 'aborting-after-shell') {
+          abortGraceHandle = setTimeout(() => {
+            if (lifecycle.phase !== 'aborting-after-shell') return;
+
+            this.logger.warn('Streaming SSR abort 后流未结束，强制关闭输出', {
               url: context.url,
-              duration: Date.now() - timing.startTime,
             });
-          },
+            if (!reactStream.destroyed) reactStream.destroy();
+            if (!wrappedStream.destroyed) wrappedStream.destroy();
+            clearLifecycleTimers();
+          }, 1000);
+        }
 
-          onError: (error: unknown) => {
-            const msg = error instanceof Error ? error.message : String(error);
-            this.logger.warn('Streaming SSR 渲染错误（非致命）', { error: msg });
-          },
+        // 已向上层暴露的流发生错误时，renderToStream 已无法 reject；
+        // 补发 renderError 供监控插件观测，且不尝试生成新响应。
+        const renderError = this.wrapError(error, context);
+        void this.callPluginHook('renderError', context, renderError);
+      };
+
+      cleanupPendingStream = () => {
+        clearLifecycleTimers();
+        abortReactStream();
+        destroyUnexposedStreams();
+      };
+
+      controller = renderToPipeableStream(appElementWithData, {
+        onShellReady: () => {
+          if (lifecycle.phase !== 'waiting-shell') return;
+
+          lifecycle.phase = 'shell-ready';
+          timing.renderEnd = Date.now();
+          timing.htmlEnd = Date.now();
+          resolveShell();
         },
-      );
 
-      // 设置超时
-      const timeoutHandle = setTimeout(() => {
-        if (!shellReady) {
-          this.logger.warn('Streaming SSR shell 超时，中止流', {
+        onShellError: (error: unknown) => {
+          const shellError = normalizeError(error);
+          this.logger.error('Streaming SSR Shell 错误', {
+            url: context.url,
+            error: shellError.message,
+          });
+          rejectBeforeShell(shellError);
+        },
+
+        onAllReady: () => {
+          this.logger.debug('Streaming SSR 所有内容就绪', {
+            url: context.url,
+            duration: Date.now() - timing.startTime,
+          });
+        },
+
+        onError: (error: unknown) => {
+          const streamError = normalizeError(error);
+
+          if (lifecycle.phase === 'waiting-shell') {
+            // React 可能在 Shell 就绪前恢复某个 Suspense 边界；
+            // 是否为致命错误由随后的 onShellReady/onShellError 决定。
+            this.logger.warn('Streaming SSR Shell 就绪前发生渲染错误', {
+              url: context.url,
+              error: streamError.message,
+            });
+            return;
+          }
+
+          terminateAfterShell(streamError, 'react-onError');
+        },
+      }) as StreamController;
+
+      if (abortRequested) {
+        abortReactStream();
+      }
+
+      // 同一绝对截止时间同时保护 Shell 和完整流：Shell 前超时拒绝 Promise
+      // 交给 DegradationManager；Shell 后超时则 abort 当前流，不会二次写响应。
+      streamTimeoutHandle = setTimeout(() => {
+        const timeoutError = new RenderError(
+          `Streaming SSR 流式渲染超时（${this.streamTimeout}ms）`,
+          ErrorCode.RENDER_SSR_TIMEOUT,
+          { timeout: this.streamTimeout, url: context.url },
+        );
+
+        if (lifecycle.phase === 'waiting-shell') {
+          this.logger.warn('Streaming SSR Shell 超时，交给降级管线', {
+            url: context.url,
             timeout: this.streamTimeout,
           });
-          abort();
+          rejectBeforeShell(timeoutError);
+          return;
         }
+
+        terminateAfterShell(timeoutError, 'stream-timeout');
       }, this.streamTimeout);
 
-      // 流结束时写入尾部 HTML 并清理
-      passThrough.on('end', () => {
-        clearTimeout(timeoutHandle);
+      await shellReadyPromise;
+      if (lifecycle.failure) {
+        throw lifecycle.failure;
+      }
+
+      reactStream.on('error', (error: Error) => {
+        terminateAfterShell(normalizeError(error), 'react-stream');
       });
 
-      // 在 pipe 完成后追加尾部 HTML
-      const wrappedStream = new PassThrough();
-      passThrough.pipe(wrappedStream, { end: false });
-      passThrough.on('end', () => {
-        wrappedStream.write(tailHTML);
-        wrappedStream.end();
+      reactStream.on('end', () => {
+        const aborted = lifecycle.phase === 'aborting-after-shell';
+        if (lifecycle.phase === 'failed-before-shell' || lifecycle.phase === 'completed') {
+          return;
+        }
+
+        lifecycle.phase = 'completed';
+        clearLifecycleTimers();
+        timing.renderEnd = Date.now();
+        timing.htmlEnd = Date.now();
+
+        if (!wrappedStream.destroyed) {
+          wrappedStream.end(tailHTML);
+        }
+
+        this.logger.debug(aborted ? 'Streaming SSR 已中止并完成流收尾' : 'Streaming SSR 流已完成', {
+          url: context.url,
+          duration: Date.now() - timing.startTime,
+        });
       });
+
+      wrappedStream.on('error', (error: Error) => {
+        terminateAfterShell(normalizeError(error), 'output-stream');
+      });
+
+      wrappedStream.on('close', () => {
+        if (
+          lifecycle.phase === 'completed' ||
+          lifecycle.phase === 'failed-before-shell' ||
+          lifecycle.phase === 'aborting-after-shell'
+        ) {
+          return;
+        }
+
+        // 客户端提前断开时及时取消 React 工作，避免继续占用 CPU/内存。
+        lifecycle.phase = 'completed';
+        clearLifecycleTimers();
+        abortReactStream();
+        if (!reactStream.destroyed) reactStream.destroy();
+      });
+
+      // 先把 Document 头部写入输出缓冲，再连接 React 流。此时结果尚未
+      // 暴露给 Koa，同步/早期异步错误仍可丢弃缓冲内容并进入降级。
+      lifecycle.phase = 'streaming';
+      wrappedStream.write(headHTML);
+      reactStream.pipe(wrappedStream, { end: false });
+      controller.pipe(reactStream);
 
       const result: StreamingRenderResult = {
         ...this.createDefaultResult(
@@ -289,8 +499,22 @@ export class StreamingSSRRenderer extends BaseRenderer {
         isStreaming: true,
       };
 
+      if (lifecycle.failure) {
+        throw lifecycle.failure;
+      }
+
+      // afterRender 必须在结果交给 Koa 前执行，否则插件无法稳定追加响应头。
+      await this.callPluginHook('afterRender', context, result);
+
+      if (lifecycle.failure) {
+        throw lifecycle.failure;
+      }
+
+      lifecycle.exposed = true;
+      cleanupPendingStream = undefined;
       return result;
     } catch (error) {
+      cleanupPendingStream?.();
       const renderError = this.wrapError(error, context);
       await this.callPluginHook('renderError', context, renderError);
       throw renderError;
@@ -317,10 +541,14 @@ export class StreamingSSRRenderer extends BaseRenderer {
       };
 
       // 通过 ModuleLoader 从 server bundle 中解析 getServerSideProps 函数
-      let gsspFn: ((ctx: GetServerSidePropsContext) => Promise<GetServerSidePropsResult>) | null = null;
+      let gsspFn: ((ctx: GetServerSidePropsContext) => Promise<GetServerSidePropsResult>) | null =
+        null;
 
       if (this.moduleLoader) {
-        gsspFn = await this.moduleLoader.getExportedFunction(route.component, route.getServerSideProps);
+        gsspFn = await this.moduleLoader.getExportedFunction(
+          route.component,
+          route.getServerSideProps,
+        );
       }
 
       if (!gsspFn) {
@@ -383,6 +611,7 @@ export class StreamingSSRRenderer extends BaseRenderer {
     const prefetchResult = await this.prefetchData(context);
     timing.dataFetchEnd = Date.now();
     context.initialData = prefetchResult.data as Record<string, unknown>;
+    context.extra.__nami_data_degraded = prefetchResult.degraded;
 
     const earlyResult = this.createEarlyDataResult(prefetchResult, context, timing);
     if (earlyResult) {
@@ -393,7 +622,9 @@ export class StreamingSSRRenderer extends BaseRenderer {
     timing.renderStart = Date.now();
 
     const appElement = this.appElementFactory(context);
-    const html = await this.renderToStringFromStream(appElement as React.ReactElement);
+    const html = await this.renderToStringFromStream(
+      await this.prepareAppElement(appElement, context),
+    );
 
     timing.renderEnd = Date.now();
 
@@ -401,19 +632,13 @@ export class StreamingSSRRenderer extends BaseRenderer {
     const fullHTML = this.assembleHTML(html, context);
     timing.htmlEnd = Date.now();
 
-    return this.createDefaultResult(
-      fullHTML,
-      200,
-      RenderModeEnum.SSR,
-      timing,
-      {
-        headers: {
-          'Cache-Control': this.buildCacheControl(prefetchResult.cache),
-          ...prefetchResult.headers,
-        },
-        degraded: prefetchResult.degraded,
+    return this.createDefaultResult(fullHTML, 200, RenderModeEnum.SSR, timing, {
+      headers: {
+        'Cache-Control': this.buildCacheControl(prefetchResult.cache),
+        ...prefetchResult.headers,
       },
-    );
+      degraded: prefetchResult.degraded,
+    });
   }
 
   /**
@@ -472,11 +697,13 @@ export class StreamingSSRRenderer extends BaseRenderer {
       // 超时保护
       timeoutHandle = setTimeout(() => {
         abort();
-        safeReject(new RenderError(
-          `Streaming SSR 流式渲染超时（${this.streamTimeout}ms）`,
-          ErrorCode.RENDER_SSR_TIMEOUT,
-          { timeout: this.streamTimeout },
-        ));
+        safeReject(
+          new RenderError(
+            `Streaming SSR 流式渲染超时（${this.streamTimeout}ms）`,
+            ErrorCode.RENDER_SSR_TIMEOUT,
+            { timeout: this.streamTimeout },
+          ),
+        );
       }, this.streamTimeout);
     });
   }
@@ -488,28 +715,22 @@ export class StreamingSSRRenderer extends BaseRenderer {
   ): RenderResult | null {
     if (prefetchResult.redirect) {
       timing.htmlEnd = Date.now();
-      const statusCode = prefetchResult.redirect.statusCode
-        ?? (prefetchResult.redirect.permanent ? 308 : 307);
-      return this.createDefaultResult(
-        '',
-        statusCode,
-        RenderModeEnum.SSR,
-        timing,
-        {
-          headers: {
-            ...prefetchResult.headers,
-            Location: prefetchResult.redirect.destination,
-            'Cache-Control': 'private, no-cache',
-          },
-          degraded: prefetchResult.degraded,
+      const statusCode =
+        prefetchResult.redirect.statusCode ?? (prefetchResult.redirect.permanent ? 308 : 307);
+      return this.createDefaultResult('', statusCode, RenderModeEnum.SSR, timing, {
+        headers: {
+          ...prefetchResult.headers,
+          Location: prefetchResult.redirect.destination,
+          'Cache-Control': 'private, no-cache',
         },
-      );
+        degraded: prefetchResult.degraded,
+      });
     }
 
     if (prefetchResult.notFound) {
       timing.htmlEnd = Date.now();
       return this.createDefaultResult(
-        this.assembleHTML('', context),
+        this.assembleHTML(this.createNotFoundAppHTML(), context, { hydrate: false }),
         404,
         RenderModeEnum.SSR,
         timing,
@@ -559,11 +780,17 @@ export class StreamingSSRRenderer extends BaseRenderer {
     }
   }
 
-  private buildHTMLShell(context: RenderContext): { headHTML: string; tailHTML: string } {
-    const title =
-      (context.route.meta?.title as string) ?? this.config.title ?? this.config.appName;
-    const description =
-      (context.route.meta?.description as string) ?? this.config.description ?? '';
+  private buildHTMLShell(
+    context: RenderContext,
+    options: { hydrate?: boolean } = {},
+  ): { headHTML: string; tailHTML: string } {
+    const hydrate = options.hydrate !== false;
+    const title = hydrate
+      ? ((context.route.meta?.title as string) ?? this.config.title ?? this.config.appName)
+      : `404 - ${this.config.title ?? this.config.appName}`;
+    const description = hydrate
+      ? ((context.route.meta?.description as string) ?? this.config.description ?? '')
+      : '';
 
     const { cssLinks, jsScripts } = this.resolveAssets();
 
@@ -574,10 +801,8 @@ export class StreamingSSRRenderer extends BaseRenderer {
       '  <meta charset="utf-8">',
       '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
       `  <title>${this.escapeHTML(title)}</title>`,
-      description
-        ? `  <meta name="description" content="${this.escapeHTML(description)}">`
-        : '',
-      '  <meta name="renderer" content="streaming-ssr">',
+      description ? `  <meta name="description" content="${this.escapeHTML(description)}">` : '',
+      `  <meta name="renderer" content="${hydrate ? 'streaming-ssr' : 'static-404'}">`,
       cssLinks,
       '</head>',
       '<body>',
@@ -586,14 +811,12 @@ export class StreamingSSRRenderer extends BaseRenderer {
       .filter(Boolean)
       .join('\n');
 
-    const dataScript = context.initialData
-      ? generateDataScript(context.initialData)
-      : '';
+    const dataScript = hydrate ? this.createHydrationDataScript(context) : '';
 
     const tailHTML = [
       '  </div>',
       dataScript ? `  ${dataScript}` : '',
-      jsScripts,
+      hydrate ? jsScripts : '',
       '</body>',
       '</html>',
     ]
@@ -603,8 +826,12 @@ export class StreamingSSRRenderer extends BaseRenderer {
     return { headHTML, tailHTML };
   }
 
-  private assembleHTML(appHTML: string, context: RenderContext): string {
-    const { headHTML, tailHTML } = this.buildHTMLShell(context);
+  private assembleHTML(
+    appHTML: string,
+    context: RenderContext,
+    options: { hydrate?: boolean } = {},
+  ): string {
+    const { headHTML, tailHTML } = this.buildHTMLShell(context, options);
     return headHTML + appHTML + '\n' + tailHTML;
   }
 

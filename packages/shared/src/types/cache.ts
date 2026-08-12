@@ -35,6 +35,12 @@ export interface CacheEntry {
    * 用于条件请求和缓存验证
    */
   etag?: string;
+
+  /** 原始可缓存响应状态码；缓存命中时需要恢复 */
+  statusCode?: number;
+
+  /** 经过安全过滤、可在缓存命中时重放的端到端响应头 */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -111,6 +117,21 @@ export interface ISRCacheResult {
 
   /** 缓存条目的 ETag */
   etag?: string;
+
+  /**
+   * 当前缓存条目实际采用的重验证间隔（秒）。
+   * 它可能来自 getStaticProps 的动态返回值，而非路由默认配置。
+   */
+  revalidateAfter?: number;
+
+  /** 本次渲染结果是否因不可缓存而跳过写入 */
+  cacheSkipped?: boolean;
+
+  /** 缓存未命中时，下游渲染返回的原始状态码 */
+  statusCode?: number;
+
+  /** 缓存未命中时，下游渲染返回的响应头 */
+  headers?: Record<string, string>;
 }
 
 /**

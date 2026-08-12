@@ -8,7 +8,6 @@
  * 客户端加载 JS 后通过 Hydration 恢复交互能力。
  */
 import React from 'react';
-import './global.css';
 
 interface AppProps {
   children: React.ReactNode;

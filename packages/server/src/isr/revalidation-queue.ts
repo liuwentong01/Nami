@@ -44,9 +44,10 @@
  * ```
  */
 
-import { createLogger } from '@nami/shared';
+import { createLogger, generateETag } from '@nami/shared';
 import type { CacheEntry, CacheStore } from '@nami/shared';
 import type { ISRRenderPayload } from './isr-manager';
+import { sanitizeCachedResponseHeaders } from './response-headers';
 
 /** 模块级日志实例 */
 const logger = createLogger('@nami/server:revalidation-queue');
@@ -187,7 +188,7 @@ export class RevalidationQueue {
     const job: RevalidationJob = {
       key,
       renderFn,
-      revalidateSeconds,
+      revalidateSeconds: normalizeRevalidate(revalidateSeconds, 0),
       tags,
       enqueuedAt: Date.now(),
     };
@@ -295,11 +296,55 @@ export class RevalidationQueue {
           this.activeTimers.add(timeoutHandle);
         }),
       ]);
-      const normalized = typeof payload === 'string'
-        ? { html: payload, tags: job.tags ?? [] }
-        : { html: payload.html, tags: payload.tags ?? job.tags ?? [] };
+
+      if (typeof payload !== 'string' && payload.invalidate) {
+        await this.cacheStore.delete(job.key);
+        logger.info('重验证得到控制响应，旧缓存已失效', {
+          key: job.key,
+          statusCode: payload.statusCode,
+          duration: Date.now() - startTime,
+        });
+        await this.notifyRevalidated(job.key, payload.html);
+        return;
+      }
+
+      if (
+        typeof payload !== 'string' &&
+        (payload.cacheable === false ||
+          (payload.statusCode !== undefined &&
+            (payload.statusCode < 200 || payload.statusCode >= 300)))
+      ) {
+        throw new Error('重验证结果不可缓存，保留现有 stale 内容');
+      }
+
+      const normalized =
+        typeof payload === 'string'
+          ? {
+              html: payload,
+              tags: job.tags ?? [],
+              revalidate: job.revalidateSeconds,
+              statusCode: 200,
+              headers: undefined,
+            }
+          : {
+              html: payload.html,
+              tags: payload.tags ?? job.tags ?? [],
+              revalidate: normalizeRevalidate(payload.revalidate, job.revalidateSeconds),
+              statusCode: payload.statusCode ?? 200,
+              headers: sanitizeCachedResponseHeaders(payload.headers),
+            };
 
       const duration = Date.now() - startTime;
+
+      if (normalized.revalidate === 0) {
+        await this.cacheStore.delete(job.key);
+        logger.info('重验证返回 revalidate=0，旧缓存已失效且不写入新条目', {
+          key: job.key,
+          duration,
+        });
+        await this.notifyRevalidated(job.key, normalized.html);
+        return;
+      }
 
       /**
        * 重验证成功 → 更新缓存
@@ -309,35 +354,24 @@ export class RevalidationQueue {
       const cacheEntry: CacheEntry = {
         content: normalized.html,
         createdAt: Date.now(),
-        revalidateAfter: job.revalidateSeconds,
+        revalidateAfter: normalized.revalidate,
         tags: normalized.tags,
+        etag: generateETag(normalized.html),
+        statusCode: normalized.statusCode,
+        headers: normalized.headers,
       };
 
-      await this.cacheStore.set(job.key, cacheEntry, job.revalidateSeconds * 2);
+      await this.cacheStore.set(job.key, cacheEntry, normalized.revalidate * 2);
 
       logger.info('重验证成功，缓存已更新', {
         key: job.key,
         duration,
-        revalidateSeconds: job.revalidateSeconds,
+        revalidateSeconds: normalized.revalidate,
       });
 
-      // 执行成功回调
-      if (this.onRevalidated) {
-        try {
-          await this.onRevalidated(job.key, normalized.html);
-        } catch (callbackError) {
-          logger.warn('重验证成功回调执行失败', {
-            key: job.key,
-            error: callbackError instanceof Error
-              ? callbackError.message
-              : String(callbackError),
-          });
-        }
-      }
+      await this.notifyRevalidated(job.key, normalized.html);
     } catch (error) {
-      const normalizedError = error instanceof Error
-        ? error
-        : new Error(String(error));
+      const normalizedError = error instanceof Error ? error : new Error(String(error));
 
       const duration = Date.now() - startTime;
 
@@ -373,4 +407,37 @@ export class RevalidationQueue {
       this.processQueue();
     }
   }
+
+  private async notifyRevalidated(key: string, html: string): Promise<void> {
+    if (!this.onRevalidated) {
+      return;
+    }
+
+    try {
+      await this.onRevalidated(key, html);
+    } catch (callbackError) {
+      logger.warn('重验证成功回调执行失败', {
+        key,
+        error: callbackError instanceof Error ? callbackError.message : String(callbackError),
+      });
+    }
+  }
+}
+
+function normalizeRevalidate(value: number | undefined, fallback: number): number {
+  const normalizedFallback = isValidRevalidate(fallback) ? fallback : 0;
+  if (value === undefined || isValidRevalidate(value)) {
+    return value ?? normalizedFallback;
+  }
+
+  logger.warn('忽略非法 ISR revalidate，使用上游默认值', {
+    value,
+    fallback: normalizedFallback,
+    requirement: '单位为秒，必须是非负有限整数',
+  });
+  return normalizedFallback;
+}
+
+function isValidRevalidate(value: number): boolean {
+  return Number.isFinite(value) && Number.isInteger(value) && value >= 0;
 }

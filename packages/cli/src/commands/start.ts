@@ -9,6 +9,7 @@
  */
 
 import type { Command } from 'commander';
+import { NEEDS_SERVER_BUNDLE } from '@nami/shared';
 import { loadConfig } from '../config/load-config';
 import { cliLogger } from '../utils/logger';
 import { findAvailablePort } from '../utils/port-finder';
@@ -65,11 +66,13 @@ export function registerStartCommand(program: Command): void {
           projectRoot: process.cwd(),
           config,
           fresh: false,
+          requireServerEntry: config.routes.some((route) => (
+            NEEDS_SERVER_BUNDLE.includes(route.renderMode)
+          )),
         });
 
         await startServer(config, {
           appElementFactory: runtime.appElementFactory,
-          htmlRenderer: runtime.htmlRenderer,
           moduleLoader: runtime.moduleLoader,
           assetManifest: runtime.assetManifest,
         });

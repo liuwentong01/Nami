@@ -23,68 +23,8 @@
  *
  * @see https://nami.dev/docs/config
  */
-import { defineConfig, RenderMode } from '@nami/core';
-import pluginCache from '@nami/plugin-cache';
-import pluginMonitor from '@nami/plugin-monitor';
+import { defineConfig } from '@nami/core';
+import { createRuntimeConfig } from './src/runtime-config';
 
-export default defineConfig({
-  appName: 'nami-isr-demo',
-  defaultRenderMode: RenderMode.ISR,
-
-  routes: [
-    {
-      path: '/',
-      component: './pages/home',
-      renderMode: RenderMode.ISR,
-      getStaticProps: 'getStaticProps',
-      /** 首页每 60 秒重验证一次 */
-      revalidate: 60,
-    },
-    {
-      path: '/products',
-      component: './pages/products',
-      renderMode: RenderMode.ISR,
-      getStaticProps: 'getStaticProps',
-      /** 商品列表每 30 秒重验证一次（更新较频繁） */
-      revalidate: 30,
-    },
-    {
-      path: '/products/:id',
-      component: './pages/product-detail',
-      renderMode: RenderMode.ISR,
-      getStaticProps: 'getStaticProps',
-      getStaticPaths: 'getStaticPaths',
-      /** 商品详情每 30 秒重验证一次 */
-      revalidate: 30,
-      /** 未预渲染的商品页面使用阻塞式渲染（等待渲染完成后返回） */
-      fallback: 'blocking',
-    },
-  ],
-
-  server: {
-    port: 3004,
-  },
-
-  /** ISR 全局配置 */
-  isr: {
-    /** ISR 缓存存储策略 */
-    cacheStrategy: 'memory',
-    /** 最大缓存条目数 */
-    maxCacheSize: 1000,
-  },
-
-  plugins: [
-    pluginCache({
-      strategy: 'lru',
-      maxSize: 500,
-      /** ISR 缓存的默认过期时间 */
-      maxAge: 60,
-    }),
-    pluginMonitor({
-      /** 开启性能监控，追踪 ISR 重验证的耗时和频率 */
-      enabled: true,
-      sampleRate: 1.0,
-      reportUrl: '/api/monitor/report',
-    }),
-  ],
-});
+/** CLI/构建端入口；浏览器只读取 client-safe 的 runtime-config。 */
+export default defineConfig(createRuntimeConfig());

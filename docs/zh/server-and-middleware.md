@@ -111,7 +111,7 @@ app.use(async (ctx, next) => {
 | ③ | `security` | 注册靠前，但真正写头在出站阶段，可以拿到下游最终缓存语义 |
 | ④ | `requestContext` | 后续健康检查、数据预取、渲染、日志都能使用同一个 `requestId` |
 | ⑤ | `healthCheck` | 探针请求不应触发静态资源查找、插件逻辑或渲染 |
-| ⑥ | `staticServe` | 静态资源由框架统一兜底发送；包装层会按最终路径为 2xx 响应补缓存头 |
+| ⑥ | `staticServe` | 静态资源由框架统一兜底发送；包装层只为 `koa-static` 真正命中的 2xx 文件响应补缓存头 |
 | ⑦ | 用户中间件 | 业务可在插件前注入 Koa 逻辑，例如鉴权、代理、API mock |
 | ⑧ | 插件中间件 | 插件按 `enforce: pre -> normal -> post` 注册顺序提供服务端扩展 |
 | ⑨ | `dataPrefetch` | 数据预取 API 是路由数据接口，位于业务/插件中间件之后，命中后返回 JSON |
@@ -317,9 +317,9 @@ export const HEALTH_CHECK_PATH = '/_health';
   └─ staticServe 回退查找 {outDir}/client/assets/main.abcdef12.js 并发送
 ```
 
-这种设计让静态资源作为框架兜底能力存在，同时避免无条件抢占后续业务中间件。需要注意的是，当前包装层并不额外判断“文件是否由 `koa-static` 命中”，而是在 `koa-static` 返回后检查最终 `ctx.status` 是否为 2xx，并根据 `ctx.path` 写入缓存头。因此它既会给静态文件补缓存策略，也可能给下游成功生成的页面补上默认 `public, no-cache`；如果渲染结果或 ISR 中间件设置了 `ctx.state.namiCacheControl`，外层 `securityMiddleware` 会在更后的出站阶段把最终缓存语义重新写回。
+这种设计让静态资源作为框架兜底能力存在，同时避免无条件抢占后续业务中间件。包装层会在传入 `koa-static` 的 `next` 边界记录下游是否已处理请求；只有下游未处理、且 `koa-static` 真正命中文件并返回 2xx 时，才根据 `ctx.path` 补写静态资源 `Cache-Control`。因此 SSR、SSG、ISR 或数据 API 等下游响应保留自己的缓存语义，不会被静态资源默认值覆盖。
 
-| 最终 `ctx.path` | 匹配规则 | `Cache-Control` |
+| `koa-static` 命中的 `ctx.path` | 匹配规则 | `Cache-Control` |
 |------------------|----------|-----------------|
 | `/assets/main.abcdef12.js` | 包含 8 位以上十六进制 hash：`/\.[a-f0-9]{8,}\.\w+$/i` | `public, max-age=31536000, immutable` |
 | `/index.html`、`/dashboard`、`/asset-manifest.json` 等 | 不匹配 hash 规则 | `public, no-cache` |
@@ -409,8 +409,17 @@ route.renderMode === RenderMode.SSR && route.getServerSideProps
 |----------------------|-----------|
 | 函数导出不存在 | `404 { message: 'getStaticProps not found' }` |
 | `{ notFound: true }` | `404 { notFound: true }` |
-| `{ redirect }` | 永久跳转 `308`，临时跳转 `307`，Body 为 `{ redirect }` |
+| `{ redirect }` | `statusCode` 优先，否则永久跳转 `308`、临时跳转 `307`，Body 为 `{ redirect }` |
 | `{ props }` 或空结果 | `200`，Body 为 `props ?? {}` |
+
+这张表只描述 `/_nami/data/*` JSON 接口。HTML 链路中，SSG 会在构建期把
+GSP `redirect` / `notFound` 生成重定向/静态 404 HTML 及 `.html.nami.json`
+sidecar，运行期据此恢复状态码和响应头。Core 的 GSP/HTML 契约只允许显式
+redirect 状态 `301/302/303/307/308`（省略时 permanent 为 `308`、临时为
+`307`）；这项白名单不要外推到本表的 JSON API 或 GSSP。ISR 冷 MISS 会短路
+控制响应并返回 `X-Nami-Cache: SKIP` 与 `private, no-store`；后台内部重建得到
+控制响应时只携带 `private, no-store` 并驱动队列删除旧 key，原用户响应仍是
+`STALE`。
 
 如果路由存在但不需要页面数据，返回：
 
@@ -425,7 +434,7 @@ route.renderMode === RenderMode.SSR && route.getServerSideProps
 | 机制 | 位置 | 用途 |
 |------|------|------|
 | `/_nami/data/*` | Koa 中间件 | 客户端路由预取数据 |
-| `window.__NAMI_DATA__` | HTML 注入脚本 | 首屏 SSR/SSG/ISR 把服务端数据带给浏览器 hydration |
+| `window.__NAMI_DATA__` | HTML 注入脚本 | 正常可注水输出统一携带 `{ version: 1, props, degraded, renderMode, routePath }`；稳定静态 404 不注入 |
 
 ### ⑧ `config.server.middlewares`：用户自定义中间件
 
@@ -557,10 +566,10 @@ route.renderMode === RenderMode.ISR && config.isr.enabled
 缓存键默认是：
 
 ```typescript
-ctx.path
+ctx.url
 ```
 
-也就是说默认不包含 query、Cookie 或 Header。如果页面内容依赖这些因素，需要通过 `generateCacheKey` 自定义缓存键，否则不同变体可能共用同一份缓存。
+这是原始完整请求 URL，因此会包含 query，且不规范化 query 顺序：`?a=1&b=2` 与 `?b=2&a=1` 是两个缓存键。默认不包含 Cookie、Header 或租户身份；如果页面内容依赖这些维度，应自定义 `generateCacheKey()`，需要同时失效一组 URL 变体时使用 tag。
 
 #### 命中流程
 
@@ -582,7 +591,8 @@ isrManager.getOrRevalidate(cacheKey, renderFn, revalidateSeconds, backgroundReva
 | `Fresh` | 缓存年龄 `<= revalidateAfter` | 直接返回缓存 HTML |
 | `Stale` | 超过 `revalidateAfter`，但未超过 `revalidateAfter * staleMultiplier` | 返回旧 HTML，同时后台重新验证 |
 | `Expired` | 超过 stale 宽限期 | 不返回旧 HTML，同步重新渲染 |
-| 缓存不存在 | 无缓存条目 | 同步渲染并异步写入缓存 |
+| 缓存不存在 | 无缓存条目 | 同步渲染，等待缓存写入完成后再释放同 key singleflight |
+| 有效 `revalidate = 0` | 路由或本次 GSP 明确禁用持久 ISR 缓存 | 不读写 CacheStore、清旧 key，只做同进程 in-flight 合并 |
 
 默认 `staleMultiplier` 是 `2`。例如 `revalidate = 60`：
 
@@ -605,16 +615,37 @@ isrManager.getOrRevalidate(cacheKey, renderFn, revalidateSeconds, backgroundReva
 | `ETag` | 缓存条目里的 ETag，可选 |
 | `X-Nami-Cache-Age` | 缓存创建至今秒数，可选 |
 
+除这些 ISR 自有头外，HIT/STALE 还会恢复 `CacheEntry.statusCode` 与经过安全
+过滤的端到端业务响应头。hop-by-hop、`Set-Cookie`、压缩/长度、
+`Cache-Control`、ETag 和 Nami 诊断头不会持久化；同步冷渲染和后台成功重建
+都会按 HTML 生成新 ETag。
+
 缓存未命中时，`renderFn` 会执行 `await next()` 进入 `renderMiddleware`。渲染完成后，ISR 中间件读取：
 
 ```typescript
+const renderResult = ctx.state.namiRenderResult as RenderResult | undefined;
+const statusCode = renderResult?.statusCode ?? ctx.status;
+
 {
   html: typeof ctx.body === 'string' ? ctx.body : String(ctx.body || ''),
   tags: ctx.state.namiCacheTags,
+  cacheable: ctx.state.namiCacheable === true
+    && renderResult?.meta.renderMode === RenderMode.ISR,
+  statusCode,
+  headers: renderResult ? { ...renderResult.headers } : undefined,
+  revalidate: renderResult?.cacheControl?.revalidate,
+  invalidate:
+    renderResult?.meta.degraded !== true
+    && (statusCode === 404 || [301, 302, 303, 307, 308].includes(statusCode)),
 }
 ```
 
-然后由 `ISRManager` 写入缓存。写缓存是异步的，不阻塞本次响应。
+可缓存的冷 MISS 会优先采用本次 GSP 动态返回的 `revalidate`，过滤并保存
+status/headers、生成 ETag，再在 `ISRManager` 中 `await cacheStore.set(...)`；
+写入完成后才释放同 key 的 singleflight Promise。redirect/notFound 会尽力
+删除旧 key 且不缓存控制响应；最终 `revalidate = 0` 也清旧 key、不写持久
+CacheStore，只复用当前进程的 in-flight Promise。其他不可缓存或降级结果返回
+`SKIP + no-store`。
 
 #### 后台重验证
 
@@ -624,6 +655,7 @@ Stale 状态下，中间件不会直接在当前请求里重新渲染，而是�
 fetch(internalURL, {
   method: 'GET',
   headers: {
+    ...buildInternalRevalidateHeaders(ctx),
     [NAMI_ISR_REVALIDATE_HEADER]: '1',
     'x-nami-isr-revalidate-token': process.env.NAMI_ISR_REVALIDATE_TOKEN,
     'X-Requested-With': 'nami-isr-revalidate',
@@ -631,9 +663,29 @@ fetch(internalURL, {
 });
 ```
 
-内部 URL 不使用浏览器入站请求的 `Host`。源码会把监听 host 规范化为本机地址（例如 `0.0.0.0`/`::` 会使用 `127.0.0.1`），端口优先取 `config.server.port`，否则取当前 socket 的本地端口，并拼接当前请求的 path 和 querystring。
+内部 URL 的网络目标不使用浏览器入站请求的 `Host`。源码会把监听 host 规范化为本机地址（例如 `0.0.0.0`/`::` 会使用 `127.0.0.1`），端口优先取 `config.server.port`，否则取当前 socket 的本地端口，并拼接当前请求的 path 和 querystring。
+
+请求头则会从触发 STALE 的原始请求端到端转发，包括 `Cookie`、
+`Authorization`、原始 `Host` 和 tenant/locale 等业务头；只剔除 hop-by-hop、
+`Content-Length`、条件请求头和 `Range` 等不能安全重放的字段。这样，即使
+`generateCacheKey()` 把身份、租户或语言作为 vary 维度，后台渲染仍使用同一
+变体的上下文，不会把另一个用户或租户的 HTML 写回当前缓存键。
 
 该请求带有 `x-nami-isr-revalidate: 1`，但再次经过 ISR 中间件时还需要满足可信来源校验：请求源 IP 必须是回环地址或与明确配置的本机 host 匹配；如果配置了 `NAMI_ISR_REVALIDATE_TOKEN`，还必须携带匹配的 token。校验通过后才会绕过缓存层，直接进入渲染中间件生成新 HTML，避免“后台重验证又命中 stale 缓存”的循环。
+任何 `RenderResult.meta.degraded === true` 的响应都会被 `renderMiddleware`
+显式标记为 `X-Nami-Degraded`（保留已有语义值，无值时为 `1`）和 `Cache-Control: private, no-store,
+max-age=0`。内部请求发现降级标记或普通 `private/no-store` 失败结果时会拒绝，
+后台队列继续保留旧 stale；但合法 GSP redirect 或 `404 notFound` 是控制响应，
+会删除旧 key 而不是继续提供已经失效的页面，也不会把 30x/404 本身缓存起来。
+内部响应的 `s-maxage` 会被解析为本次新 `revalidate`，后台队列用新值
+更新 `revalidateAfter` 和存储 TTL；若新值为 `0` 则删除旧 key 且不写新条目，
+未提供新值时才继承旧间隔。普通成功重建会保存安全 status/headers 并生成
+ETag。
+
+后台队列的去重和同步 singleflight 都只覆盖当前 Node 进程。
+`Promise.race([renderFn(), timeout])` 超时只停止等待并释放队列槽位，不会取消
+已经开始的 render/internal fetch；底层任务可能继续运行，甚至与之后的新任务
+重叠，真正取消需要业务调用链显式传播 `AbortSignal`。
 
 缓存查询失败时，ISR 中间件不会让页面失败，而是降级为直接 `await next()` 渲染，并设置：
 
@@ -706,13 +758,34 @@ matchResult.route.renderMode || config.defaultRenderMode
 |------|------|
 | `config` | 全局配置 |
 | `pluginManager` | 让渲染器内部触发插件生命周期 |
-| `appElementFactory` | 新 SSR 协议下创建 React 元素树 |
-| `htmlRenderer` | 兼容 `entry-server.renderToHTML()` |
+| `appElementFactory` | 由 `entry-server.createAppElement(context)` 解析得到，负责创建 React 元素树 |
 | `moduleLoader` | 加载页面数据函数 |
 | `isrManager` | ISR 渲染器使用 |
 | `preferStreaming` | 当 SSR 路由 `meta.streaming === true` 时启用流式偏好 |
 
-创建渲染器失败时，会记录错误并退回 CSR 渲染器。
+`createAppElement(context)` 是服务端应用的唯一元素工厂契约：运行期 SSR/ISR 与构建期 SSG 共享它；框架负责 `renderToString()` 或 Streaming、完整 Document、manifest 资源和统一注水 envelope。创建渲染器失败时，会记录错误并进入降级流程。
+
+#### SSG 静态响应协议
+
+构建期为每个 SSG/ISR 预生成路径写入 `page.html` 与
+`page.html.nami.json` sidecar。sidecar 保存 `page | redirect | not-found`、状态码、
+响应头和可选 `revalidate`，`SSGRenderer` 运行期读取它来恢复构建期
+GSP 的控制响应语义；显式 redirect status 仅允许 `301/302/303/307/308`。
+
+动态 SSG/ISR 构建识别完整路由 token：`:param`、`:param?`、
+`:param(约束)`、`:path+`、`*` 和 `(.*)`。`getStaticPaths.params` 被
+materialize 为 canonical URL 后，还必须通过正式 `matchPath(..., { exact: true })`
+及参数 round-trip 校验；缺少必填参数、值不满足约束、生成 URL 不匹配，或两个
+页面映射到同一静态产物路径，都会记录构建错误并使 build 失败。该增强不改变
+既有 URL→文件规则：`/` → `index.html`、`/about` → `about.html`、
+`/blog/hello` → `blog/hello.html`，每个 HTML 仍配套 `.html.nami.json`。
+
+| 动态模式 | 支持的 `getStaticPaths.fallback` | 未预生成路径 |
+|----------|-----------------------------------|------------------|
+| SSG | `false` | 返回无 Hydration/客户端 Bundle 的稳定静态 404 |
+| ISR | `'blocking'` | 冷 MISS 同步执行 GSP + React，可缓存成功页写 CacheStore |
+
+`true` 或其他组合尚未支持，与路由配置不一致也会导致构建生成错误。
 
 #### Streaming SSR
 
@@ -733,7 +806,7 @@ renderMode === RenderMode.SSR
 
 | 字段 | 行为 |
 |------|------|
-| `__cache_hit === true` 且 `__cache_content` 是字符串 | 用插件缓存内容替换 `result.html`，并写 `X-Nami-Plugin-Cache: HIT` |
+| `__cache_hit === true` 且 `__cache_content` 是字符串 | Renderer 在数据预取前短路；这里兼容写 `X-Nami-Plugin-Cache: HIT` |
 | `__custom_headers` | 合并到 `result.headers` |
 | `__retry_attempted === true` | 写 `X-Nami-Retry: 1` |
 | 任意 `extra` | 挂到 `ctx.state.namiExtra`，供后续逻辑读取 |
@@ -756,11 +829,11 @@ renderMode === RenderMode.SSR
 
 #### 渲染失败降级
 
-渲染过程抛错时，中间件会先记录错误。随后按顺序尝试：
+中间件把首次渲染函数交给 `DegradationManager`，随后按顺序执行：
 
-1. 如果插件提供了 `renderContext.extra.__skeleton_fallback`，直接返回骨架屏 HTML，状态码 `200`，响应头 `X-Nami-Render-Mode: skeleton-fallback`。
-2. 否则调用 `degradationManager.executeWithDegradation()`，按 `config.fallback` 执行框架降级策略。
-3. 将降级结果通过 `setResponse()` 写回。
+1. Level 0 首次渲染，失败后按配置重试并尝试 CSR。
+2. Level 2 返回带临时骨架并继续加载 JS 的 CSR Shell；`renderContext.extra.__skeleton_fallback` 只作为 Level 3 无 JS 静态应急候选。
+3. 将统一的 `RenderResult` 通过 `setResponse()` 写回；Level 2–5 响应使用 `no-store`。
 
 如果渲染异常没有在这里被降级处理并继续抛出，外层 `errorIsolationMiddleware` 会兜底返回 500 错误页。
 
@@ -793,7 +866,7 @@ GET /_nami/data/products/1
   -> staticServe 入站，因 defer 先进入下游
   -> 用户/插件中间件
   -> dataPrefetch 匹配数据 API，执行页面数据函数并返回 JSON
-  <- staticServe 通常不会覆盖已生成的数据响应
+  <- staticServe 识别下游已处理，不覆盖响应或 Cache-Control
   <- security / timing 出站补头
 ```
 
@@ -988,6 +1061,12 @@ process.send({
 
 每个 Worker 都有独立的 Node.js 进程、事件循环和内存空间。使用内存 ISR 缓存时，各 Worker 的缓存互不共享；如果生产环境多 Worker 或多机器部署且要求 ISR 内容一致，应使用 Redis 等共享缓存适配器。
 
+公开的 `startWorker(options)` 也遵循同一运行时入口：`WorkerOptions` 继承
+`CreateServerOptions`，并把 `appElementFactory`（由
+`createAppElement(context)` 解析）、`moduleLoader`、`assetManifest` 或
+`runtimeProvider` 原样透传给 `createNamiServer()`，不会建立另一套 Worker
+专用 HTML 渲染协议。
+
 ### 异常重启
 
 主进程监听 `cluster.on('exit')`。以下情况不会重启：
@@ -1086,7 +1165,12 @@ createWebpackDevMiddleware(clientCompiler, {
 activeServerCompiler.watch({ aggregateTimeout: 300 }, callback);
 ```
 
-服务端 bundle 重新编译后，`renderMiddleware` 可以通过 `runtimeProvider` 在每个请求前拿到最新的 `appElementFactory`、`htmlRenderer`、`moduleLoader`，避免 SSR 使用旧入口或旧页面模块。
+服务端 bundle 重新编译后，`renderMiddleware` 可以通过 `runtimeProvider` 在每个请求前拿到最新的 `appElementFactory`（即 `entry-server.createAppElement`）和 `moduleLoader`，避免 SSR 使用旧入口或旧页面模块。开发态和生产态 CLI 都只解析这一元素工厂入口。
+
+`nami dev` 会按合并后路由是否命中 `NEEDS_SERVER_BUNDLE` 设置
+`requireServerEntry`。只要存在 SSR/SSG/ISR 路由，开发态 runtime 就会强校验
+最新 server bundle 存在且导出 `createAppElement(context)`；缺失入口不会静默
+退回旧的 `renderToHTML` 协议。
 
 ---
 

@@ -5,7 +5,7 @@
  * - 全局 React 错误边界（wrapApp）
  * - 路由级错误边界组件
  * - 可配置的重试策略
- * - 渐进式降级策略（SSR → CSR → 骨架屏 → 静态页 → 503）
+ * - 渐进式降级策略（SSR → 带 loading 的 CSR Shell → 静态应急页 → 503）
  *
  * @example
  * ```typescript

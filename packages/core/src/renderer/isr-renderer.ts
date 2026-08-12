@@ -42,17 +42,17 @@ import type {
   GetStaticPropsContext,
   GetStaticPropsResult,
 } from '@nami/shared';
-import {
-  RenderMode as RenderModeEnum,
-  RenderError,
-  ErrorCode,
-  generateDataScript,
-} from '@nami/shared';
+import { RenderMode as RenderModeEnum, RenderError, ErrorCode } from '@nami/shared';
 import type { ReactElement } from 'react';
 
 import { BaseRenderer } from './base-renderer';
 import { CSRRenderer } from './csr-renderer';
-import type { RendererOptions, AppElementFactory, HTMLRenderer, ModuleLoaderLike } from './types';
+import {
+  assertValidStaticPropsResult,
+  resolveStaticRedirectStatus,
+  resolveStaticRevalidate,
+} from '../data/static-props-result';
+import type { RendererOptions, AppElementFactory, ModuleLoaderLike } from './types';
 
 /**
  * ISR 渲染器配置
@@ -64,15 +64,7 @@ export interface ISRRendererOptions extends RendererOptions {
    * 在缓存未命中时用于执行 React 渲染。
    * 缓存命中时不需要（直接返回缓存的 HTML）。
    */
-  appElementFactory?: AppElementFactory;
-
-  /**
-   * 服务端 HTML 渲染函数
-   *
-   * 用于兼容 `entry-server.renderToHTML()` 风格的历史接入方式。
-   * 当缓存未命中或后台重验证时，ISR 可以直接复用这个入口产出 HTML。
-   */
-  htmlRenderer?: HTMLRenderer;
+  appElementFactory: AppElementFactory;
 
   /**
    * 模块加载器
@@ -91,10 +83,7 @@ export interface ISRRendererOptions extends RendererOptions {
  */
 export class ISRRenderer extends BaseRenderer {
   /** React 组件树工厂函数 */
-  private readonly appElementFactory?: AppElementFactory;
-
-  /** 兼容 entry-server.renderToHTML() 的 HTML 渲染函数 */
-  private readonly htmlRenderer?: HTMLRenderer;
+  private readonly appElementFactory: AppElementFactory;
 
   /** 模块加载器 — 用于从 server bundle 中加载数据预取函数 */
   private readonly moduleLoader?: ModuleLoaderLike;
@@ -105,15 +94,13 @@ export class ISRRenderer extends BaseRenderer {
   constructor(options: ISRRendererOptions) {
     super(options);
     this.appElementFactory = options.appElementFactory;
-    this.htmlRenderer = options.htmlRenderer;
     this.moduleLoader = options.moduleLoader;
     this.defaultRevalidate = options.config.isr.defaultRevalidate;
 
     this.logger.debug('ISR 渲染器已初始化', {
       defaultRevalidate: this.defaultRevalidate,
       cacheAdapter: options.config.isr.cacheAdapter,
-      hasAppElementFactory: !!this.appElementFactory,
-      hasHtmlRenderer: !!this.htmlRenderer,
+      hasAppElementFactory: true,
     });
   }
 
@@ -154,6 +141,11 @@ export class ISRRenderer extends BaseRenderer {
 
     // 触发渲染前钩子
     await this.callPluginHook('beforeRender', context);
+
+    const cachedResult = await this.resolvePluginCacheHit(context, timing);
+    if (cachedResult) {
+      return cachedResult;
+    }
 
     try {
       // 默认服务端链路中的缓存命中与后台重验证由上游 isr-cache-middleware 处理。
@@ -229,6 +221,7 @@ export class ISRRenderer extends BaseRenderer {
       }
 
       const result = await gspFn(gspContext);
+      assertValidStaticPropsResult(result);
       const duration = Date.now() - startTime;
 
       this.logger.debug('ISR 数据预取完成', {
@@ -243,6 +236,9 @@ export class ISRRenderer extends BaseRenderer {
         errors: [],
         degraded: false,
         duration,
+        redirect: result.redirect,
+        notFound: result.notFound,
+        revalidate: result.revalidate,
         details: [
           {
             key: 'getStaticProps',
@@ -328,6 +324,42 @@ export class ISRRenderer extends BaseRenderer {
     timing.dataFetchEnd = Date.now();
 
     context.initialData = prefetchResult.data as Record<string, unknown>;
+    context.extra.__nami_data_degraded = prefetchResult.degraded;
+
+    if (prefetchResult.redirect) {
+      timing.htmlEnd = Date.now();
+      return this.createDefaultResult(
+        '',
+        resolveStaticRedirectStatus(prefetchResult.redirect),
+        RenderModeEnum.ISR,
+        timing,
+        {
+          headers: {
+            Location: prefetchResult.redirect.destination,
+            'Cache-Control': 'private, no-store, max-age=0',
+          },
+          degraded: prefetchResult.degraded,
+        },
+      );
+    }
+
+    if (prefetchResult.notFound) {
+      timing.htmlEnd = Date.now();
+      return this.createDefaultResult(
+        this.assembleHTML(this.createNotFoundAppHTML(), context, { hydrate: false }),
+        404,
+        RenderModeEnum.ISR,
+        timing,
+        {
+          headers: {
+            'Cache-Control': 'private, no-store, max-age=0',
+          },
+          degraded: prefetchResult.degraded,
+        },
+      );
+    }
+
+    const effectiveRevalidate = resolveStaticRevalidate(prefetchResult.revalidate, revalidate);
 
     // ========== 服务端渲染 ==========
     timing.renderStart = Date.now();
@@ -336,7 +368,7 @@ export class ISRRenderer extends BaseRenderer {
     timing.renderEnd = Date.now();
 
     // ========== HTML 组装 ==========
-    const fullHTML = this.ensureDocumentHTML(renderedHTML, context);
+    const fullHTML = this.assembleHTML(renderedHTML, context);
     timing.htmlEnd = Date.now();
 
     this.logger.debug('ISR 实际渲染完成', {
@@ -345,55 +377,37 @@ export class ISRRenderer extends BaseRenderer {
       totalDuration: Date.now() - timing.startTime,
     });
 
-    return this.createDefaultResult(
-      fullHTML,
-      200,
-      RenderModeEnum.ISR,
-      timing,
-      {
-        headers: {
-          // 响应头仍声明 ISR 语义，便于上游 CDN / 缓存层保持一致策略。
-          'Cache-Control': `public, s-maxage=${revalidate}, stale-while-revalidate=${revalidate * 2}`,
-        },
-        cacheHit: false,
-        cacheStale: false,
-        degraded: prefetchResult.degraded,
-        degradeReason: prefetchResult.degraded
-          ? `数据预取降级: ${prefetchResult.errors.map((error: Error) => error.message).join('; ')}`
-          : undefined,
-        cacheControl: {
-          revalidate,
-          staleWhileRevalidate: revalidate * 2,
-          tags: this.extractCacheTags(context),
-        },
+    return this.createDefaultResult(fullHTML, 200, RenderModeEnum.ISR, timing, {
+      headers: {
+        // 响应头仍声明 ISR 语义，便于上游 CDN / 缓存层保持一致策略。
+        'Cache-Control': `public, s-maxage=${effectiveRevalidate}, stale-while-revalidate=${effectiveRevalidate * 2}`,
       },
-    );
+      cacheHit: false,
+      cacheStale: false,
+      degraded: prefetchResult.degraded,
+      degradeReason: prefetchResult.degraded
+        ? `数据预取降级: ${prefetchResult.errors.map((error: Error) => error.message).join('; ')}`
+        : undefined,
+      cacheControl: {
+        revalidate: effectiveRevalidate,
+        staleWhileRevalidate: effectiveRevalidate * 2,
+        tags: this.extractCacheTags(context),
+      },
+    });
   }
 
   /**
    * 构建缓存键
    *
-   * ISR 缓存键由请求路径和查询参数组成。
-   * 相同路径不同查询参数视为不同的缓存条目。
+   * ISR 缓存键使用完整请求 URL（pathname + query）。
+   * 相同路径不同查询参数视为不同的缓存条目；它与 server 外层缓存键
+   * 及客户端 Hydration 数据作用域保持同一语义。
    *
    * @param context - 渲染上下文
    * @returns 缓存键字符串
    */
   private buildCacheKey(context: RenderContext): string {
-    // 基础键 = 路径
-    let key = context.path;
-
-    // 如果有查询参数，将其排序后附加到键中
-    // 排序确保 ?a=1&b=2 和 ?b=2&a=1 使用同一个缓存条目
-    const queryEntries = Object.entries(context.query).sort(([a], [b]) => a.localeCompare(b));
-    if (queryEntries.length > 0) {
-      const queryString = queryEntries
-        .map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(',') : v}`)
-        .join('&');
-      key += `?${queryString}`;
-    }
-
-    return key;
+    return context.url;
   }
 
   /**
@@ -425,22 +439,23 @@ export class ISRRenderer extends BaseRenderer {
   /**
    * 组装完整的 HTML 文档
    */
-  private assembleHTML(appHTML: string, context: RenderContext): string {
+  private assembleHTML(
+    appHTML: string,
+    context: RenderContext,
+    options: { hydrate?: boolean } = {},
+  ): string {
+    const hydrate = options.hydrate !== false;
     const containerId = 'nami-root';
 
-    const title =
-      (context.route.meta?.title as string) ??
-      this.config.title ??
-      this.config.appName;
+    const title = hydrate
+      ? ((context.route.meta?.title as string) ?? this.config.title ?? this.config.appName)
+      : `404 - ${this.config.title ?? this.config.appName}`;
 
-    const description =
-      (context.route.meta?.description as string) ??
-      this.config.description ??
-      '';
-
-    const dataScript = context.initialData
-      ? generateDataScript(context.initialData)
+    const description = hydrate
+      ? ((context.route.meta?.description as string) ?? this.config.description ?? '')
       : '';
+
+    const dataScript = hydrate ? this.createHydrationDataScript(context) : '';
 
     const { cssLinks, jsScripts } = this.resolveAssets();
 
@@ -451,16 +466,14 @@ export class ISRRenderer extends BaseRenderer {
       '  <meta charset="utf-8">',
       '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
       `  <title>${this.escapeHTML(title)}</title>`,
-      description
-        ? `  <meta name="description" content="${this.escapeHTML(description)}">`
-        : '',
-      '  <meta name="renderer" content="isr">',
+      description ? `  <meta name="description" content="${this.escapeHTML(description)}">` : '',
+      `  <meta name="renderer" content="${hydrate ? 'isr' : 'static-404'}">`,
       cssLinks,
       '</head>',
       '<body>',
       `  <div id="${containerId}">${appHTML}</div>`,
       dataScript ? `  ${dataScript}` : '',
-      jsScripts,
+      hydrate ? jsScripts : '',
       '</body>',
       '</html>',
     ]
@@ -491,41 +504,12 @@ export class ISRRenderer extends BaseRenderer {
   /**
    * 执行实际的页面渲染
    *
-   * ISR 在缓存未命中和后台重验证时都会走到这里。
-   * 为了兼容老项目，这里同时支持 React 元素工厂和 HTML 渲染函数两套协议。
+   * ISR 在缓存未命中和后台重验证时都会通过统一 React 元素工厂渲染。
    */
   private async renderAppHTML(context: RenderContext): Promise<string> {
-    if (this.htmlRenderer) {
-      return await this.htmlRenderer(context, context.initialData ?? {});
-    }
-
-    if (!this.appElementFactory) {
-      throw new RenderError(
-        'ISR 渲染缺少可用的服务端渲染入口',
-        ErrorCode.RENDER_ISR_REVALIDATE_FAILED,
-        {
-          hint: '请提供 appElementFactory，或在 entry-server 中导出 renderToHTML()',
-        },
-      );
-    }
-
     const { renderToString } = await this.importRenderToString();
     const appElement = this.appElementFactory(context);
-    return renderToString(appElement as ReactElement);
-  }
-
-  /**
-   * 将渲染结果规范化为完整 HTML 文档
-   *
-   * 对 `htmlRenderer` 返回的完整 HTML 文档直接透传；
-   * 对仅返回页面片段的情况，再由框架补齐文档外壳和数据注入。
-   */
-  private ensureDocumentHTML(renderedHTML: string, context: RenderContext): string {
-    if (/<!doctype html>/i.test(renderedHTML) || /<html[\s>]/i.test(renderedHTML)) {
-      return renderedHTML;
-    }
-
-    return this.assembleHTML(renderedHTML, context);
+    return renderToString(await this.prepareAppElement(appElement, context));
   }
 
   /**
@@ -575,10 +559,7 @@ export class ISRRenderer extends BaseRenderer {
       return error;
     }
 
-    const message =
-      error instanceof Error
-        ? error.message
-        : `ISR 渲染未知错误: ${String(error)}`;
+    const message = error instanceof Error ? error.message : `ISR 渲染未知错误: ${String(error)}`;
 
     return new RenderError(message, ErrorCode.RENDER_ISR_REVALIDATE_FAILED, {
       url: context.url,

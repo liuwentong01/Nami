@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@nami/core": "workspace:*",
+    "@nami/shared": "workspace:*",
     "@nami/client": "workspace:*",
     "@nami/server": "workspace:*",
     "@nami/plugin-cache": "workspace:*",

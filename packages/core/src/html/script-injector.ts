@@ -24,12 +24,14 @@ const logger = createLogger('@nami/core:script-injector');
  */
 export interface AssetManifest {
   /** 入口文件映射 */
-  entrypoints?: {
-    /** JS 入口文件列表 */
-    js?: string[];
-    /** CSS 入口文件列表 */
-    css?: string[];
-  } | string[];
+  entrypoints?:
+    | {
+        /** JS 入口文件列表 */
+        js?: string[];
+        /** CSS 入口文件列表 */
+        css?: string[];
+      }
+    | string[];
   /** 所有资源文件映射（chunk name → 文件路径） */
   files?: Record<string, string>;
   /** JS chunk 文件列表 */
@@ -63,13 +65,13 @@ export interface ScriptAttributes {
  * ```typescript
  * const injector = new ScriptInjector('/static/');
  *
- * // 注入初始数据
+ * 注入初始数据
  * const dataScript = injector.injectInitialData({ user: { name: '张三' } });
  *
- * // 注入 JS chunks
+ * 注入 JS chunks
  * const jsScripts = injector.injectChunks(manifest, { defer: true });
  *
- * // 注入 CSS 样式
+ * 注入 CSS 样式
  * const cssLinks = injector.injectStyles(manifest);
  * ```
  */
@@ -212,9 +214,9 @@ export class ScriptInjector {
     }
 
     if (
-      !Array.isArray(manifest.entrypoints)
-      && manifest.entrypoints?.js
-      && manifest.entrypoints.js.length > 0
+      !Array.isArray(manifest.entrypoints) &&
+      manifest.entrypoints?.js &&
+      manifest.entrypoints.js.length > 0
     ) {
       return manifest.entrypoints.js;
     }
@@ -245,9 +247,9 @@ export class ScriptInjector {
     }
 
     if (
-      !Array.isArray(manifest.entrypoints)
-      && manifest.entrypoints?.css
-      && manifest.entrypoints.css.length > 0
+      !Array.isArray(manifest.entrypoints) &&
+      manifest.entrypoints?.css &&
+      manifest.entrypoints.css.length > 0
     ) {
       return manifest.entrypoints.css;
     }

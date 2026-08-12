@@ -11,7 +11,9 @@
   },
   "dependencies": {
     "@nami/core": "workspace:*",
+    "@nami/shared": "workspace:*",
     "@nami/client": "workspace:*",
+    "@nami/server": "workspace:*",
     "@nami/plugin-request": "workspace:*",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"

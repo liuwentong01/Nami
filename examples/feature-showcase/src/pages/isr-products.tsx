@@ -212,11 +212,11 @@ export default function ISRProductsPage(props: ISRProductsPageProps = {}) {
           响应可见。浏览器刷新或 curl 都会发起真实文档请求。
         </p>
         <pre className="code-block">
-          <code>{`curl -sI http://localhost:3100/products | grep -i "x-nami-cache\\|cache-control"
+          <code>{`curl -sD - -o /dev/null http://localhost:3100/products | grep -i "x-nami-cache\\|cache-control"
 sleep 9
-curl -sI http://localhost:3100/products | grep -i "x-nami-cache\\|cache-control"
+curl -sD - -o /dev/null http://localhost:3100/products | grep -i "x-nami-cache\\|cache-control"
 sleep 1
-curl -sI http://localhost:3100/products | grep -i "x-nami-cache\\|cache-control"`}</code>
+curl -sD - -o /dev/null http://localhost:3100/products | grep -i "x-nami-cache\\|cache-control"`}</code>
         </pre>
       </section>
     </main>

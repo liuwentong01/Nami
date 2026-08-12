@@ -24,7 +24,7 @@ packages/
 ├── plugin-cache/     Cache plugin
 ├── plugin-monitor/   Monitoring plugin
 ├── plugin-request/   Request plugin
-├── plugin-skeleton/  Skeleton screen plugin
+├── plugin-skeleton/  CSR/loading skeleton and static-emergency fallback plugin
 └── plugin-error-boundary/ Error boundary plugin
 ```
 
@@ -84,7 +84,7 @@ Example: Streaming SSR rendering fails
   2. Call createFallbackRenderer() → get an SSRRenderer instance
   3. SSRRenderer.render() also fails
   4. Call createFallbackRenderer() → get a CSRRenderer instance
-  5. CSRRenderer.render() → returns shell HTML (it will not fail at this point because React rendering is not executed)
+  5. CSRRenderer.render() → returns an HTML shell with a temporary skeleton and client JavaScript (page React rendering does not run on the server)
 ```
 
 **RendererFactory**: `RendererFactory.create(options)` selects the concrete renderer implementation based on `RenderMode`. It is the unified entry for the server and CLI. Upper-level code does not need to know which renderer is used; it only needs to call `renderer.render(context)`.
@@ -198,17 +198,11 @@ The full journey of an HTTP GET request in Nami:
 ### Degradation Flow When Rendering Fails
 
 ```
-renderer.render() fails
-        │
-        ▼
-Check context.extra.__skeleton_fallback? → return skeleton screen if present
-        │ Not present
-        ▼
 DegradationManager.executeWithDegradation()
-  Level 0: retry the provided normal renderFn
+  Level 0: perform the first renderFn attempt
   Level 1: retry (maxRetries times)
-  Level 2: CSR degradation (shell HTML + JS/CSS)
-  Level 3: skeleton screen (route.skeleton configuration)
+  Level 2: CSR degradation (temporary-skeleton HTML shell + JS/CSS, followed by client takeover)
+  Level 3: static emergency page (compatibility name: Skeleton; no client JavaScript)
   Level 4: static HTML (fallback.staticHTML)
   Level 5: 503 Service Unavailable
 ```
@@ -236,20 +230,26 @@ NamiBuilder.build('production')
     │
     ├── 5. Create Webpack configurations
     │      ├── createClientConfig()  → dist/client/
-    │      ├── createServerConfig()  → dist/server/
-    │      └── createSSGConfig()     → reuse server config
+    │      └── createServerConfig()  → dist/server/ (required by SSR/SSG/ISR)
     │
     ├── 6. pluginManager.runWaterfallHook('modifyWebpackConfig', config)
     │
     ├── 7. Run webpack compilation in parallel
     │
-    ├── 8. SSG routes → generateStaticPages()
+    ├── 8. SSG/ISR routes → generateStaticPages()
     │      ├── require('dist/server/entry-server.js')
-    │      ├── call renderToString for each static path
-    │      └── write dist/static/xxx/index.html
+    │      ├── wire ModuleLoader, asset manifest, and SSGRenderer
+    │      ├── call SSGRenderer.generateStatic(routes)
+    │      ├── createAppElement(context) → NamiDataProvider → wrapApp waterfall
+    │      │      → renderToString → Document/hydration envelope
+    │      └── write dist/static/xxx.html
     │
     └── 9. Write nami-manifest.json (route→rendering mode mapping)
 ```
+
+`createSSGConfig()` remains exported, but it is not part of this build path.
+Static generation is not a third Webpack compilation: it runs
+`SSGRenderer.generateStatic()` after the client/server compilations succeed.
 
 ### Key Build Outputs
 
@@ -266,12 +266,12 @@ dist/
 │   └── asset-manifest.json    # File name → URL mapping
 │
 ├── server/                    # Server-side outputs
-│   ├── entry-server.js        # Server entry (includes createAppElement / renderToHTML)
+│   ├── entry-server.js        # Server entry (exports createAppElement)
 │   └── [page-chunks].js       # Page-level server code
 │
 ├── static/                    # SSG / ISR pre-generated HTML
 │   ├── index.html
-│   └── xxx/index.html
+│   └── xxx.html
 │
 └── nami-manifest.json         # route→rendering mode mapping table
 ```
@@ -353,9 +353,9 @@ dist/
 │   └── pages/product-detail.js
 │
 ├── static/
-│   ├── docs/index.html
-│   ├── products/1001/index.html
-│   └── products/1002/index.html
+│   ├── docs.html
+│   ├── products/1001.html
+│   └── products/1002.html
 │
 └── nami-manifest.json
 ```
@@ -416,7 +416,9 @@ This way, even when file names include content hash after deployment, the server
 
 This layer is used by the Node.js runtime and is not sent to the browser:
 
-- `entry-server.js`: unified server entry that carries capabilities such as `renderToHTML()`
+- `entry-server.js`: unified server entry exporting `createAppElement(context)`. The
+  entry returns a React element tree; Nami owns string/stream rendering, the outer
+  Document, manifest assets, and hydration-data injection.
 - `pages/*.js`: page-level server modules used by `ModuleLoader` to load `getServerSideProps`, `getStaticProps`, and `getStaticPaths`
 
 This is also why SSR / SSG / ISR routes all need a server bundle: SSR / ISR perform server rendering or revalidation at runtime, while SSG also executes page modules and data prefetch functions through the server bundle during the build.
@@ -425,8 +427,8 @@ This is also why SSR / SSG / ISR routes all need a server bundle: SSR / ISR perf
 
 This is the HTML additionally generated after the build ends:
 
-- `/docs/index.html`: from the SSG route `/docs`
-- `/products/1001/index.html`, `/products/1002/index.html`: from the initial pre-generated paths of the ISR route `/products/:id`
+- `/docs.html`: from the SSG route `/docs`
+- `/products/1001.html`, `/products/1002.html`: from the initial pre-generated paths of the ISR route `/products/:id`
 
 If `getStaticPaths()` returns:
 
@@ -545,10 +547,17 @@ getServerSideProps()
 context.initialData = { title, items }
    │
    ▼
-generateDataScript(data)           window.__NAMI_DATA__ = { title, items }
-   │ (XSS-safe serialization:              │ (JSON deserialized into a JS object)
-   │  escape dangerous characters          │
-   │  such as </script>)                   │
+createHydrationData(context)        window.__NAMI_DATA__ = {
+   │                                │   version: 1,
+   │ { version, props, degraded,    │   props: { title, items },
+   │   renderMode, routePath }       │   degraded: false,
+   ▼                                │   renderMode: 'ssr',
+                                    │   routePath: '/articles'
+                                    │ }
+generateDataScript(envelope)        │ (read serverData.props)
+   │ (XSS-safe serialization:       │
+   │  escape dangerous characters   │
+   │  such as </script>)            │
    ▼                                       ▼
 <script>window.__NAMI_DATA__=...</script>  hydrateData('__NAMI_DATA__')
    │                                       │ (read data from window)
@@ -557,7 +566,16 @@ renderToString(<App data={data} />)        hydrateRoot(<App data={data} />)
    │ (server renders full HTML with data)  │ (client reruns React with the same data)
 ```
 
-> **Why is XSS-safe serialization needed?** Because data is embedded in a `<script>` tag. If the data contains the string `</script>`, the HTML parser closes the script tag early, which may be exploited to execute malicious code. `generateDataScript()` escapes these dangerous characters.
+`BaseRenderer.createHydrationData()` is the shared wire-protocol boundary for normal
+hydratable server-generated HTML. `version` identifies the wire protocol, `props`
+contains page data, `degraded` records degradation state, `renderMode` tells the
+client whether to hydrate or mount, and `routePath`
+records the initial URL. The client passes only `serverData.props` to the page tree;
+it normalizes legacy bare props and safely falls back to CSR for unknown versions.
+A stable static 404 short-circuits before the business tree, injects no payload, and
+loads no client bundle.
+
+> **Why is XSS-safe serialization needed?** Because the envelope is embedded in a `<script>` tag. If the data contains the string `</script>`, the HTML parser closes the script tag early, which may be exploited to execute malicious code. `generateDataScript()` escapes these dangerous characters.
 
 ### Server Code Stripping
 
@@ -578,7 +596,7 @@ renderToString(<App data={data} />)        hydrateRoot(<App data={data} />)
 | Execute parallel hooks with `Promise.allSettled` | Ensures every plugin gets an execution opportunity; a single failure does not affect the whole |
 | Route priority scoring (instead of registration order) | Static routes > dynamic routes > wildcard, which is intuitive and does not depend on registration order |
 | Worker `worker:ready` IPC instead of `online` | `online` only means the process has started and does not guarantee the port has been bound |
-| Degradation manager accepts `assetManifest` | CSR fallback needs correct JS/CSS references, otherwise the page is blank |
+| Degradation manager accepts `assetManifest` | CSR fallback needs correct JS/CSS references; otherwise client takeover cannot complete and the page remains on the temporary skeleton |
 
 ---
 

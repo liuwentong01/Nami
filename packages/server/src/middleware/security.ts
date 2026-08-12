@@ -28,10 +28,10 @@
  * ```typescript
  * import { securityMiddleware } from '@nami/server';
  *
- * // 使用默认配置
+ * 使用默认配置
  * app.use(securityMiddleware());
  *
- * // 自定义 CSP 策略
+ * 自定义 CSP 策略
  * app.use(securityMiddleware({
  *   csp: "default-src 'self'; script-src 'self' cdn.example.com",
  * }));
@@ -168,10 +168,7 @@ export function securityMiddleware(options: SecurityOptions = {}): Koa.Middlewar
 
     // ===== 4. HSTS（HTTP Strict Transport Security） =====
     if (hsts) {
-      ctx.set(
-        'Strict-Transport-Security',
-        `max-age=${hstsMaxAge}; includeSubDomains`,
-      );
+      ctx.set('Strict-Transport-Security', `max-age=${hstsMaxAge}; includeSubDomains`);
     }
 
     // ===== 5. Content Security Policy =====

@@ -1,16 +1,18 @@
-/**
- * 客户端入口文件
- *
- * ISR 模式下，客户端入口与 SSG/SSR 相同，执行 Hydration。
- * 用户首次访问页面时看到的是预渲染的静态 HTML，
- * Hydration 完成后页面变为可交互状态。
- *
- * ISR 的重验证过程对客户端完全透明：
- * - 用户不会感知到后台正在重新生成页面
- * - 下次访问时自动获取最新生成的版本
- */
+/** ISR 客户端入口：HIT/STALE/MISS 返回的 HTML 均使用同一 App 外壳 Hydration。 */
 import { initNamiClient } from '@nami/client';
+import { resolveNamiConfig, type NamiPlugin } from '@nami/shared';
+import { createRuntimeConfig } from './runtime-config';
+import './global.css';
 
-initNamiClient({
+const config = resolveNamiConfig(createRuntimeConfig());
+
+const clientPlugins = config.plugins.filter(
+  (plugin): plugin is NamiPlugin => typeof plugin !== 'string',
+);
+
+void initNamiClient({
+  routes: config.routes,
+  plugins: clientPlugins,
+  config,
   containerId: 'nami-root',
 });

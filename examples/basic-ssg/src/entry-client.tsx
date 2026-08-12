@@ -1,17 +1,18 @@
-/**
- * 客户端入口文件
- *
- * SSG 模式下，HTML 在构建时已经生成为静态文件。
- * 客户端入口的作用是执行 Hydration，为静态 HTML 附加交互能力。
- *
- * Hydration 流程：
- * 1. 浏览器加载已预渲染的 HTML（用户可立即看到页面内容）
- * 2. JS 文件异步加载并执行
- * 3. hydrateRoot 将 React 组件树与已有 DOM 对接
- * 4. 页面变为可交互状态（按钮可点击、表单可输入等）
- */
+/** SSG 客户端入口：读取构建期注水数据，并在静态 DOM 上执行 Hydration。 */
 import { initNamiClient } from '@nami/client';
+import { resolveNamiConfig, type NamiPlugin } from '@nami/shared';
+import { createRuntimeConfig } from './runtime-config';
+import './global.css';
 
-initNamiClient({
+const config = resolveNamiConfig(createRuntimeConfig());
+
+const clientPlugins = config.plugins.filter(
+  (plugin): plugin is NamiPlugin => typeof plugin !== 'string',
+);
+
+void initNamiClient({
+  routes: config.routes,
+  plugins: clientPlugins,
+  config,
   containerId: 'nami-root',
 });

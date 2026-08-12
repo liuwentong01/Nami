@@ -1,58 +1,11 @@
 import React from 'react';
 import { initNamiClient, type FallbackRenderProps } from '@nami/client';
 import { SkeletonPage } from '@nami/plugin-skeleton';
-import type { NamiRoute } from '@nami/shared';
 import serviceWorkerUrl from './service-worker.js?service-worker';
 import { createClientPlugins } from './plugins/showcase-plugins';
 import { createRuntimeConfig } from './runtime-config';
 import { routes } from './routes';
 import './global.css';
-
-function routeMatches(pattern: string, pathname: string): boolean {
-  if (pattern === '/*') {
-    return true;
-  }
-
-  const patternSegments = pattern.split('/').filter(Boolean);
-  const pathSegments = pathname.split('/').filter(Boolean);
-
-  return (
-    patternSegments.length === pathSegments.length &&
-    patternSegments.every(
-      (segment, index) => segment.startsWith(':') || segment === pathSegments[index],
-    )
-  );
-}
-
-function routeScore(route: NamiRoute): number {
-  return route.path.split('/').reduce((score, segment) => {
-    if (!segment || segment === '*') return score;
-    return score + (segment.startsWith(':') ? 10 : 100);
-  }, 0);
-}
-
-/**
- * Core Renderer 当前会为部分 SSR/Streaming 响应注入裸 initialData；客户端入口
- * 需要 `{ props, renderMode, routePath }` 包装才能准确选择 hydrateRoot。这个桥接
- * 只属于示例，README 会明确说明对应的框架协议边界。
- */
-function normalizeInjectedData(): void {
-  const rawData = window.__NAMI_DATA__;
-  if (!rawData || Object.prototype.hasOwnProperty.call(rawData, 'props')) {
-    return;
-  }
-
-  const pathname = window.location.pathname;
-  const route = [...routes]
-    .sort((left, right) => routeScore(right) - routeScore(left))
-    .find((candidate) => routeMatches(candidate.path, pathname));
-
-  window.__NAMI_DATA__ = {
-    props: rawData,
-    renderMode: route?.renderMode ?? 'csr',
-    routePath: pathname,
-  };
-}
 
 function ClientBootstrapError({
   error,
@@ -70,8 +23,6 @@ function ClientBootstrapError({
     </section>
   );
 }
-
-normalizeInjectedData();
 
 const clientPlugins = createClientPlugins();
 const clientConfig = createRuntimeConfig(clientPlugins);

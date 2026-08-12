@@ -68,9 +68,9 @@ export interface NamiRoute {
 | `getServerSideProps` | SSR 数据函数的导出名字符串 |
 | `getStaticProps` | SSG/ISR 数据函数的导出名字符串 |
 | `getStaticPaths` | SSG/ISR 动态路径函数的导出名字符串 |
-| `revalidate` | ISR 路由级重验证间隔，秒 |
+| `revalidate` | ISR 路由级重验证间隔；必须是非负有限整数秒，`0` 表示不读写持久 CacheStore、只做同进程 in-flight 合并并清旧 key |
 | `fallback` | ISR/SSG 动态路径兜底策略 |
-| `skeleton` | 路由骨架屏配置，目前降级管理器只判断该字段是否存在 |
+| `skeleton` | Level 3 静态应急配置标记；目前只判断是否存在，不加载组件，也不负责路由 Chunk loading |
 | `errorBoundary` | 自定义错误边界组件路径，类型层面预留 |
 | `meta` | 路由元信息，例如 `title`、`description`、`streaming`、`cacheTags` |
 | `children` | 嵌套路由 |
@@ -144,6 +144,19 @@ Nami 自带一个无外部依赖的 path-to-regexp 风格匹配器，核心 API�
 | 正则分组 | `/file/(.*)` | 正则分组参数名为 `$0`、`$1` |
 
 注意：`/docs/*` 中的 `*` 编译为 `(.+)`，需要至少一个后续路径段，因此它不匹配 `/docs` 本身。
+
+### 动态 SSG 的反向路径生成
+
+`SSGRenderer` 构建期复用同一组 token，并约定 `getStaticPaths.params` 的键：
+普通/可选/约束/`+` 参数使用名字，`*` 使用 `'*'`，正则分组依次使用
+`$0`、`$1`。框架不会做字符串替换，而是把 params 逐段编码并 materialize 为
+canonical URL，再调用 `matchPath(..., { exact: true })` 检查匹配结果和参数值能否
+round-trip。
+
+缺少必填参数、单段参数含 `/`、值不满足约束、生成 URL 不匹配，以及两个页面
+映射到同一最终静态文件都会形成构建错误。URL→文件映射本身不变，例如
+`/blog/hello` 仍写到 `dist/static/blog/hello.html`（并配套
+`.html.nami.json`）。
 
 ### 标准化与编译缓存
 
@@ -259,11 +272,13 @@ return { isExact: exact };
 客户端使用 `react-router-dom` v6：
 
 ```text
-NamiRouter
-  -> BrowserRouter
-       -> RouteChangeListener
-       -> Routes
-            -> Route
+wrapApp wrappers
+  → ClientErrorBoundary
+       → BrowserRouter
+            → NamiDataProvider
+                 ├─ RouteChangeListener
+                 ├─ NamiHead
+                 └─ Routes → Route → Suspense → Page
 ```
 
 每条 `NamiRoute` 会被转换成 `<Route>`。组件加载流程：
@@ -549,6 +564,11 @@ route.renderMode === RenderMode.SSR && route.getServerSideProps
 调用 `getStaticProps({ params })`。当前数据 API 链路只传 `params`，不传 query、headers、cookies、locale。
 
 返回处理同样支持 `notFound` 和 `redirect`。
+
+需要区分 JSON API 与 Core HTML 契约：SSG/ISR 的 GSP 在构建/渲染链中会校验
+显式 redirect status 只能是 `301/302/303/307/308`，省略时 permanent 为
+`308`、临时为 `307`；当前 `/_nami/data/*` 表格只是直接呈现数据函数结果，
+不要把该白名单描述成 GSSP 或所有数据 API 的全局规则。
 
 ### 无数据函数
 

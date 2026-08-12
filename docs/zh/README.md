@@ -97,13 +97,16 @@
 构建阶段                服务端阶段                客户端阶段
 ────────               ────────                ────────
 modifyRoutes      →    onServerStart      →    onClientInit
-modifyWebpackConfig    onRequest               wrapApp
+modifyWebpackConfig    onRequest
 onBuildStart           onBeforeRender          onHydrated
 onBuildEnd             onAfterRender           onRouteChange
                        onRenderError
 
+                  双端 Waterfall：wrapApp
                   通用：onError / onDispose
 ```
+
+`wrapApp` 不是仅客户端 Hook：正常可渲染页面会在服务端与客户端按相同顺序执行 waterfall。稳定静态 404 在业务树之前短路，因此不执行 `wrapApp`。
 
 ---
 

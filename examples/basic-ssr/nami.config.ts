@@ -13,49 +13,8 @@
  *
  * @see https://nami.dev/docs/config
  */
-import { defineConfig, RenderMode } from '@nami/core';
-import pluginRequest from '@nami/plugin-request';
-import pluginCache from '@nami/plugin-cache';
+import { defineConfig } from '@nami/core';
+import { createRuntimeConfig } from './src/runtime-config';
 
-export default defineConfig({
-  appName: 'nami-ssr-demo',
-  defaultRenderMode: RenderMode.SSR,
-
-  routes: [
-    {
-      path: '/',
-      component: './pages/home',
-      renderMode: RenderMode.SSR,
-      getServerSideProps: 'getServerSideProps',
-    },
-    {
-      path: '/posts',
-      component: './pages/posts',
-      renderMode: RenderMode.SSR,
-      getServerSideProps: 'getServerSideProps',
-    },
-    {
-      path: '/posts/:id',
-      component: './pages/post-detail',
-      renderMode: RenderMode.SSR,
-      getServerSideProps: 'getServerSideProps',
-    },
-  ],
-
-  server: {
-    port: 3002,
-  },
-
-  plugins: [
-    pluginRequest({
-      baseURL: '/api',
-      timeout: 10000,
-    }),
-    pluginCache({
-      /** 短时缓存 SSR 结果，减轻服务端压力 */
-      maxAge: 5,
-      strategy: 'lru',
-      maxSize: 100,
-    }),
-  ],
-});
+/** CLI/构建端入口；浏览器只读取 client-safe 的 runtime-config。 */
+export default defineConfig(createRuntimeConfig());

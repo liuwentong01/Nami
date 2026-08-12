@@ -20,7 +20,6 @@ export { SSGRenderer } from './renderer/ssg-renderer';
 export { ISRRenderer } from './renderer/isr-renderer';
 export type {
   ModuleLoaderLike,
-  HTMLRenderer,
   AppElementFactory,
   PluginManagerLike,
   ISRManagerLike,
@@ -55,6 +54,15 @@ export { DocumentTemplate } from './html/document';
 export { HeadManager } from './html/head-manager';
 export { ScriptInjector } from './html/script-injector';
 export type { AssetManifest, ScriptAttributes } from './html/script-injector';
+export {
+  CSR_SHELL_LOADING_MARKER,
+  DEFAULT_CSR_SHELL_SKELETON_HTML,
+  isSafeCSRShellSkeletonFragment,
+  resolveCSRShellSkeletonHTML,
+  createCSRRootContainer,
+  createStaticEmergencyHTML,
+  resolveStaticEmergencyHTML,
+} from './html/csr-shell-loading';
 
 // 模块加载器
 export { ModuleLoader } from './module';

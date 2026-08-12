@@ -1,9 +1,4 @@
-/**
- * 构建阶段自动生成的路由模块映射。
- *
- * 这里使用静态 import 工厂而不是表达式 import，
- * 避免 webpack 对 `import(`${componentPath}`)` 发出 Critical dependency 警告。
- */
+/** 构建阶段自动生成的浏览器路由模块映射。 */
 export interface GeneratedRouteDefinition {
   path: string;
   component: string;

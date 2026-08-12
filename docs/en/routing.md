@@ -96,9 +96,9 @@ Field semantics:
 | `getServerSideProps` | Export name string of SSR data function |
 | `getStaticProps` | SSG/ISR Export name string of data function |
 | `getStaticPaths` | SSG/ISR Export name string of dynamic path function |
-| `revalidate` | ISR route-level revalidation interval, seconds |
+| `revalidate` | ISR route-level interval; a non-negative finite integer in seconds. `0` skips persistent CacheStore reads/writes, clears the old key, and keeps only same-process in-flight coalescing |
 | `fallback` | ISR/SSG Dynamic path evasion strategy |
-| `skeleton` | Routing skeleton screen configuration, currently the downgrade manager only determines whether this field exists |
+| `skeleton` | Level 3 static-emergency marker; currently only its presence is checked, with no component loading or route-chunk loading behavior |
 | `errorBoundary` | Custom error boundary component path, reserved at the type level |
 | `meta` | Routing meta information, such as `title`, `description`, `streaming`, `cacheTags` |
 | `children` | Nested routing |
@@ -194,6 +194,20 @@ Nami comes with a path-to-regexp style matcher with no external dependencies. Co
 
 
 Note: `*` in `/docs/*` compiles to `(.+)`, which requires at least one subsequent path segment, so it does not match `/docs` itself.
+
+### Reverse path generation for dynamic SSG
+
+At build time, `SSGRenderer` reuses the same token set and defines the corresponding
+`getStaticPaths.params` keys: named, optional, constrained, and `+` parameters use
+their names, `*` uses `'*'`, and regular-expression groups use `$0`, `$1`, and so on.
+Nami does not perform string replacement. It segment-encodes params, materializes a
+canonical URL, and then calls `matchPath(..., { exact: true })` to verify both the
+match and parameter-value round trip.
+
+A missing required parameter, `/` in a single-segment value, a constraint mismatch,
+a generated URL that does not match, or two pages mapping to the same final static
+file is a build error. The URL-to-file mapping itself is unchanged: `/blog/hello`
+still writes `dist/static/blog/hello.html` plus its `.html.nami.json` sidecar.
 
 
 
@@ -385,11 +399,13 @@ Client uses `react-router-dom` v6:
 
 
 ```text
-NamiRouter
-  -> BrowserRouter
-       -> RouteChangeListener
-       -> Routes
-            -> Route
+wrapApp wrappers
+  → ClientErrorBoundary
+       → BrowserRouter
+            → NamiDataProvider
+                 ├─ RouteChangeListener
+                 ├─ NamiHead
+                 └─ Routes → Route → Suspense → Page
 ```
 
 
@@ -833,6 +849,12 @@ Call `getStaticProps({ params })`. The current data API link only transmits `par
 
 
 Return handling also supports `notFound` and `redirect`.
+
+Keep the JSON API separate from the Core HTML contract. In the SSG/ISR build and
+render paths, GSP validates an explicit redirect status as one of
+`301/302/303/307/308`; omission resolves to permanent `308` or temporary `307`.
+The current `/_nami/data/*` table merely exposes the data-function result, so this
+whitelist must not be described as a global GSSP or data-API rule.
 
 
 

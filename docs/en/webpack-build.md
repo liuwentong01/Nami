@@ -8,31 +8,31 @@ This chapter is based on the source code in `packages/webpack` and `packages/cli
 
 ## 1. Source Map
 
-| Topic | Source |
-|------|------|
-| Builder orchestration | `packages/webpack/src/builder.ts` |
-| Package export entry | `packages/webpack/src/index.ts` |
-| Base Webpack config | `packages/webpack/src/configs/base.config.ts` |
-| Client config | `packages/webpack/src/configs/client.config.ts` |
-| Server config | `packages/webpack/src/configs/server.config.ts` |
-| Development config wrapper | `packages/webpack/src/configs/dev.config.ts` |
-| SSG config export | `packages/webpack/src/configs/ssg.config.ts` |
-| TS / style / asset rules | `packages/webpack/src/rules/*.ts` |
-| Code splitting strategy | `packages/webpack/src/optimization/split-chunks.ts` |
-| Asset manifest plugin | `packages/webpack/src/plugins/manifest-plugin.ts` |
-| CSR HTML plugin | `packages/webpack/src/plugins/html-inject-plugin.ts` |
-| Route collection plugin | `packages/webpack/src/plugins/route-collect-plugin.ts` |
-| SSR externals plugin | `packages/webpack/src/plugins/ssr-externals-plugin.ts` |
-| Page metadata loader | `packages/webpack/src/loaders/page-loader.ts` |
-| Data function stripping loader | `packages/webpack/src/loaders/data-fetch-loader.ts` |
-| CLI build | `packages/cli/src/commands/build.ts` |
-| CLI dev | `packages/cli/src/commands/dev.ts` |
-| CLI generate | `packages/cli/src/commands/generate.ts` |
-| CLI analyze | `packages/cli/src/commands/analyze.ts` |
-| CLI start | `packages/cli/src/commands/start.ts` |
-| Server runtime resolution | `packages/cli/src/utils/server-runtime.ts` |
-| Development server | `packages/server/src/dev/dev-server.ts` |
-| webpack-dev-middleware adapter | `packages/server/src/dev/webpack-dev.ts` |
+| Topic                          | Source                                                 |
+| ------------------------------ | ------------------------------------------------------ |
+| Builder orchestration          | `packages/webpack/src/builder.ts`                      |
+| Package export entry           | `packages/webpack/src/index.ts`                        |
+| Base Webpack config            | `packages/webpack/src/configs/base.config.ts`          |
+| Client config                  | `packages/webpack/src/configs/client.config.ts`        |
+| Server config                  | `packages/webpack/src/configs/server.config.ts`        |
+| Development config wrapper     | `packages/webpack/src/configs/dev.config.ts`           |
+| SSG config export              | `packages/webpack/src/configs/ssg.config.ts`           |
+| TS / style / asset rules       | `packages/webpack/src/rules/*.ts`                      |
+| Code splitting strategy        | `packages/webpack/src/optimization/split-chunks.ts`    |
+| Asset manifest plugin          | `packages/webpack/src/plugins/manifest-plugin.ts`      |
+| CSR HTML plugin                | `packages/webpack/src/plugins/html-inject-plugin.ts`   |
+| Route collection plugin        | `packages/webpack/src/plugins/route-collect-plugin.ts` |
+| SSR externals plugin           | `packages/webpack/src/plugins/ssr-externals-plugin.ts` |
+| Page metadata loader           | `packages/webpack/src/loaders/page-loader.ts`          |
+| Data function stripping loader | `packages/webpack/src/loaders/data-fetch-loader.ts`    |
+| CLI build                      | `packages/cli/src/commands/build.ts`                   |
+| CLI dev                        | `packages/cli/src/commands/dev.ts`                     |
+| CLI generate                   | `packages/cli/src/commands/generate.ts`                |
+| CLI analyze                    | `packages/cli/src/commands/analyze.ts`                 |
+| CLI start                      | `packages/cli/src/commands/start.ts`                   |
+| Server runtime resolution      | `packages/cli/src/utils/server-runtime.ts`             |
+| Development server             | `packages/server/src/dev/dev-server.ts`                |
+| webpack-dev-middleware adapter | `packages/server/src/dev/webpack-dev.ts`               |
 
 ---
 
@@ -46,30 +46,26 @@ Source locations:
 Nami decides build tasks according to route rendering modes. The key constant is:
 
 ```typescript
-export const NEEDS_SERVER_BUNDLE = [
-  RenderMode.SSR,
-  RenderMode.SSG,
-  RenderMode.ISR,
-];
+export const NEEDS_SERVER_BUNDLE = [RenderMode.SSR, RenderMode.SSG, RenderMode.ISR];
 ```
 
 This means:
 
-| Mode | Client Bundle | Server Bundle | Static generation |
-|------|---------------|---------------|----------|
-| CSR | Required | Not required | Not required |
-| SSR | Required | Required | Not required |
-| SSG | Required | Required | Required |
-| ISR | Required | Required | Requires initial pre-generation and runtime revalidation |
+| Mode | Client Bundle | Server Bundle | Static generation                                        |
+| ---- | ------------- | ------------- | -------------------------------------------------------- |
+| CSR  | Required      | Not required  | Not required                                             |
+| SSR  | Required      | Required      | Not required                                             |
+| SSG  | Required      | Required      | Required                                                 |
+| ISR  | Required      | Required      | Requires initial pre-generation and runtime revalidation |
 
 The two Bundles have different targets:
 
-| Bundle | Runtime environment | Main responsibilities |
-|--------|----------|----------|
-| client | Browser | Start React, Hydration, client routing, load page chunks |
-| server | Node.js | SSR/ISR runtime rendering, SSG build-time rendering, execute data functions |
+| Bundle | Runtime environment | Main responsibilities                                                       |
+| ------ | ------------------- | --------------------------------------------------------------------------- |
+| client | Browser             | Start React, Hydration, client routing, load page chunks                    |
+| server | Node.js             | SSR/ISR runtime rendering, SSG build-time rendering, execute data functions |
 
-SSG can return only static files at runtime, but the build phase still needs the server bundle to execute page modules, `getStaticProps`, `getStaticPaths`, or `renderToHTML`.
+SSG can return only static files at runtime, but the build phase still needs the server bundle to execute page modules, `getStaticProps`, `getStaticPaths`, and the application-level `createAppElement(context)` factory.
 
 ---
 
@@ -119,13 +115,13 @@ Note: `buildStart` / `buildEnd` are short names for `PluginManager.callHook()`. 
 
 `BuildResult` contains:
 
-| Field | Meaning |
-|------|------|
-| `success` | Whether the build succeeded |
-| `duration` | Total duration |
-| `errors` | Webpack and SSG errors |
-| `warnings` | Webpack warnings |
-| `stats` | Webpack Stats for each build task |
+| Field      | Meaning                           |
+| ---------- | --------------------------------- |
+| `success`  | Whether the build succeeded       |
+| `duration` | Total duration                    |
+| `errors`   | Webpack and SSG errors            |
+| `warnings` | Webpack warnings                  |
+| `stats`    | Webpack Stats for each build task |
 
 Route-level errors in the SSG phase are collected into `this.ssgErrors` and finally merged into `BuildResult.errors`, so CI can detect partial page generation failures.
 
@@ -156,12 +152,12 @@ ssg:
 
 Key points:
 
-| Fact | Description |
-|------|------|
-| dev mode does not add the `ssg` task | Development does not perform build-time static generation |
-| Both SSG and ISR enter static generation | ISR also generates the initial static HTML |
+| Fact                                                      | Description                                                        |
+| --------------------------------------------------------- | ------------------------------------------------------------------ |
+| dev mode does not add the `ssg` task                      | Development does not perform build-time static generation          |
+| Both SSG and ISR enter static generation                  | ISR also generates the initial static HTML                         |
 | `options.ssgRoutes` only filters static-generation routes | client/server Webpack still builds according to the overall config |
-| The `ssg` task has no Webpack config | It reuses the already compiled server bundle | TODO |
+| The `ssg` task has no Webpack config                      | It reuses the already compiled server bundle (TODO)                |
 
 ---
 
@@ -183,20 +179,23 @@ dist/
 │   │       ├── main.[contenthash:8].css
 │   │       └── *.chunk.css
 │   ├── asset-manifest.json
-│   └── index.html                 # Generated by NamiHtmlInjectPlugin only when CSR routes exist
+│   ├── index.html                 # Generated for CSR routes, with a temporary CSR skeleton
+│   └── emergency.html             # Always emitted for proxy/CDN fallback when Node is unavailable
 │
 ├── server/
-│   ├── entry-server.js             # If src/entry-server.* exists
+│   ├── entry-server.js             # Required for SSR/SSG/ISR routes
 │   └── pages/xxx.tsx.js            # Page component server entry, corresponding to route.component
 │
 ├── static/
 │   ├── index.html                  # Generated by SSG/ISR
-│   └── about/index.html
+│   └── about.html
 │
 └── nami-manifest.json
 ```
 
-SSG/ISR static HTML is written to `dist/static/.../index.html`, not `dist/client/...html`.
+SSG/ISR static HTML is written to `dist/static`, not `dist/client`. The mapping is
+`/` → `dist/static/index.html`, `/about` → `dist/static/about.html`, and
+`/blog/hello` → `dist/static/blog/hello.html`.
 
 ---
 
@@ -206,17 +205,17 @@ Source location: `packages/webpack/src/configs/base.config.ts`
 
 `createBaseConfig()` is the shared baseline for client and server:
 
-| Config | Behavior |
-|------|------|
-| `mode` | `development` in dev, `production` in production |
-| `resolve.extensions` | `.tsx`, `.ts`, `.jsx`, `.js`, `.json` |
-| `resolve.alias` | `@` and `~` point to `srcDir` |
-| `resolve.modules` | `node_modules` and project root `node_modules` |
-| `module.rules` | TypeScript, assets, SVG |
-| `module.noParse` | Skips `jquery|lodash` |
-| `performance` | Enables asset size warnings in production mode |
-| `stats` | `minimal` in dev, `normal` in production |
-| `cache` | Webpack 5 filesystem cache |
+| Config               | Behavior                                         |
+| -------------------- | ------------------------------------------------ |
+| `mode`               | `development` in dev, `production` in production |
+| `resolve.extensions` | `.tsx`, `.ts`, `.jsx`, `.js`, `.json`            |
+| `resolve.alias`      | `@` and `~` point to `srcDir`                    |
+| `resolve.modules`    | `node_modules` and project root `node_modules`   |
+| `module.rules`       | TypeScript, assets, SVG                          |
+| `module.noParse`     | Skips `jquery` and `lodash`                     |
+| `performance`        | Enables asset size warnings in production mode   |
+| `stats`              | `minimal` in dev, `normal` in production         |
+| `cache`              | Webpack 5 filesystem cache                       |
 
 Browser builds additionally disable Node built-in module fallback:
 
@@ -261,21 +260,19 @@ The client config is created by `createClientConfig()`.
 
 Calling the config factory generates two files:
 
-| File | Purpose |
-|------|------|
-| `.nami/generated-route-modules.ts` | Mapping from route component paths to dynamic import factories |
-| `.nami/generated-core-client-shim.ts` | Browser-only lightweight entry for `@nami/core` |
+| File                                  | Purpose                                                        |
+| ------------------------------------- | -------------------------------------------------------------- |
+| `.nami/generated-route-modules.ts`    | Mapping from route component paths to dynamic import factories |
+| `.nami/generated-core-client-shim.ts` | Browser-only lightweight entry for `@nami/core`                |
 
 `generated-route-modules.ts` exports:
 
 ```typescript
 export const generatedComponentLoaders = {
-  "./pages/home": () => import(/* webpackChunkName: "route-pages-home" */ "..."),
+  './pages/home': () => import(/* webpackChunkName: "route-pages-home" */ '...'),
 } as Record<string, () => Promise<unknown>>;
 
-export const generatedRouteDefinitions = [
-  { path: "/", component: "./pages/home", exact: true },
-];
+export const generatedRouteDefinitions = [{ path: '/', component: './pages/home', exact: true }];
 ```
 
 The value of `exact` comes from `route.exact === false ? false : true`.
@@ -283,30 +280,30 @@ The value of `exact` comes from `route.exact === false ? false : true`.
 `generated-core-client-shim.ts` exports:
 
 ```typescript
-export { PluginManager } from ".../dist/plugin/plugin-manager";
-export { NamiDataProvider } from ".../dist/data/data-context";
-export { matchPath } from ".../dist/router/path-matcher";
+export { PluginManager } from '.../dist/plugin/plugin-manager';
+export { NamiDataProvider } from '.../dist/data/data-context';
+export { matchPath } from '.../dist/router/path-matcher';
 ```
 
 The goal is to avoid the browser bundle importing the full `@nami/core` entry and pulling in Node-only modules.
 
 ### Entry and Output
 
-| Item | dev | production |
-|------|-----|------------|
-| entry | `webpack-hot-middleware/client` + `src/entry-client` | `src/entry-client` |
-| filename | `static/js/[name].js` | `static/js/[name].[contenthash:8].js` |
-| chunkFilename | `static/js/[name].chunk.js` | `static/js/[name].[contenthash:8].chunk.js` |
-| publicPath | `config.assets.publicPath` | Same as left |
-| clean | `false` | `true` |
+| Item          | dev                                                  | production                                  |
+| ------------- | ---------------------------------------------------- | ------------------------------------------- |
+| entry         | `webpack-hot-middleware/client` + `src/entry-client` | `src/entry-client`                          |
+| filename      | `static/js/[name].js`                                | `static/js/[name].[contenthash:8].js`       |
+| chunkFilename | `static/js/[name].chunk.js`                          | `static/js/[name].[contenthash:8].chunk.js` |
+| publicPath    | `config.assets.publicPath`                           | Same as left                                |
+| clean         | `false`                                              | `true`                                      |
 
 ### DefinePlugin
 
 The client injects:
 
 ```typescript
-process.env.NODE_ENV
-process.env.NAMI_RENDER_MODE = "client"
+process.env.NODE_ENV;
+process.env.NAMI_RENDER_MODE = 'client';
 ```
 
 It also injects all variables in `config.env` with the `NAMI_PUBLIC_` prefix. Variables without that prefix do not enter the client bundle.
@@ -317,19 +314,21 @@ Production uses `MiniCssExtractPlugin` to extract CSS. Development uses `style-l
 
 Production code splitting comes from `createSplitChunksConfig()`:
 
-| cacheGroup | Match | Output name |
-|------------|------|--------|
-| `react` | `react`, `react-dom`, `scheduler` | `vendor-react` |
-| `vendor` | Other `node_modules` | `vendor` |
-| `commons` | Referenced by at least two chunks | `commons` |
-| `default` | Default reuse group | Webpack default naming |
+| cacheGroup | Match                             | Output name            |
+| ---------- | --------------------------------- | ---------------------- |
+| `react`    | `react`, `react-dom`, `scheduler` | `vendor-react`         |
+| `vendor`   | Other `node_modules`              | `vendor`               |
+| `commons`  | Referenced by at least two chunks | `commons`              |
+| `default`  | Default reuse group               | Webpack default naming |
 
 Production also enables:
 
 ```typescript
-runtimeChunk: { name: 'runtime' }
-moduleIds: 'deterministic'
-minimizer: [createTerserPlugin()]
+runtimeChunk: {
+  name: 'runtime';
+}
+moduleIds: 'deterministic';
+minimizer: [createTerserPlugin()];
 ```
 
 ---
@@ -351,7 +350,11 @@ entry: {
 }
 ```
 
-`entry-server` is added only when `src/entry-server.tsx|ts|jsx|js` exists. Page entries come from the deduplicated list of `config.routes[*].component`, for example:
+`entry-server` exports the single application rendering contract,
+`createAppElement(context)`. A project containing any SSR, SSG, or ISR route must
+provide `src/entry-server.tsx|ts|jsx|js`; server config creation fails early when it
+is missing. Pure CSR projects may omit it. Page entries come from the deduplicated
+list of `config.routes[*].component`, for example:
 
 ```text
 route.component = "./pages/Home.tsx"
@@ -363,16 +366,16 @@ This stays consistent with the rules in `NamiBuilder.buildModuleManifest()`.
 
 ### Output and Module Format
 
-| Config | Value |
-|------|----|
-| `target` | `node` |
-| `output.path` | `{outDir}/server` |
-| `filename` | `[name].js` |
-| `libraryTarget` | `commonjs2` |
-| `devtool` | `source-map` |
-| `optimization.minimize` | `false` |
-| `optimization.splitChunks` | `false` |
-| `LimitChunkCountPlugin` | `maxChunks: 1` |
+| Config                     | Value             |
+| -------------------------- | ----------------- |
+| `target`                   | `node`            |
+| `output.path`              | `{outDir}/server` |
+| `filename`                 | `[name].js`       |
+| `libraryTarget`            | `commonjs2`       |
+| `devtool`                  | `source-map`      |
+| `optimization.minimize`    | `false`           |
+| `optimization.splitChunks` | `false`           |
+| `LimitChunkCountPlugin`    | `maxChunks: 1`    |
 
 The server does not need browser code splitting. The Node runtime loads artifacts through CommonJS.
 
@@ -382,11 +385,8 @@ Default server externalization uses `webpack-node-externals`:
 
 ```typescript
 nodeExternals({
-  allowlist: [
-    /\.css$/,
-    /^@nami\//,
-  ],
-})
+  allowlist: [/\.css$/, /^@nami\//],
+});
 ```
 
 This marks most `node_modules` as runtime `require`, while keeping CSS and `@nami/*` packages handled by Webpack.
@@ -434,15 +434,26 @@ The renderer's `BaseRenderer.resolveAssets()` and `ScriptInjector` read this man
 
 Source location: `packages/webpack/src/plugins/html-inject-plugin.ts`
 
-`NamiBuilder.enhanceConfig()` injects this plugin only for client builds with CSR routes:
+`NamiBuilder.enhanceConfig()` injects this plugin into every client build and uses
+`emitIndex` to decide whether a CSR entry is needed:
 
 ```typescript
-const hasCSR = this.config.routes.some(
-  route => route.renderMode === RenderMode.CSR
-);
+const hasCSR = this.config.routes.some((route) => route.renderMode === RenderMode.CSR);
+
+new NamiHtmlInjectPlugin({
+  emitIndex: hasCSR,
+  staticEmergencyHTML: this.config.fallback?.staticHTML,
+});
 ```
 
-It generates `dist/client/index.html`. The default mount container ID comes from `DEFAULT_CONTAINER_ID`, namely `nami-root`.
+When CSR routes exist, it generates `dist/client/index.html`. The default mount
+container ID comes from `DEFAULT_CONTAINER_ID`, namely `nami-root`; the container
+includes a lightweight temporary skeleton that React replaces on initial mount.
+
+It always emits `dist/client/emergency.html`, which does not depend on business
+JavaScript. Nami does not route traffic to this file automatically: deployment must
+explicitly configure the reverse proxy or CDN to return it only when the Node service
+is completely unavailable.
 
 SSR/SSG/ISR HTML is not generated by this plugin.
 
@@ -468,14 +479,14 @@ The filename constant comes from `NAMI_MANIFEST_FILENAME`.
 
 Main fields:
 
-| Field | Description |
-|------|------|
-| `appName` | Application name |
-| `generatedAt` | Generation time |
-| `routes` | Route path, component, renderMode, data function names, revalidate, fallback |
-| `moduleManifest` | Mapping from `route.component` to server page module file |
-| `buildInfo.nodeVersion` | Node version |
-| `buildInfo.namiVersion` | Framework version |
+| Field                   | Description                                                                  |
+| ----------------------- | ---------------------------------------------------------------------------- |
+| `appName`               | Application name                                                             |
+| `generatedAt`           | Generation time                                                              |
+| `routes`                | Route path, component, renderMode, data function names, revalidate, fallback |
+| `moduleManifest`        | Mapping from `route.component` to server page module file                    |
+| `buildInfo.nodeVersion` | Node version                                                                 |
+| `buildInfo.namiVersion` | Framework version                                                            |
 
 `moduleManifest` rule:
 
@@ -500,7 +511,9 @@ When starting the production server, `packages/cli/src/utils/server-runtime.ts` 
 
 Source location: `packages/webpack/src/builder.ts`
 
-Static generation in the current build main path is completed by `NamiBuilder.generateStaticPages()`. It does not run a separate `createSSGConfig()` Webpack compilation.
+The current build starts static generation in `NamiBuilder.generateStaticPages()`
+and delegates the actual route generation to Core's `SSGRenderer.generateStatic()`.
+It does not run a separate `createSSGConfig()` Webpack compilation.
 
 Flow:
 
@@ -508,27 +521,49 @@ Flow:
 generateStaticPages(routes)
   -> primaryServerBundlePath = {outDir}/server/entry-server.js
   -> staticOutputDir = {outDir}/static
+  -> require createAppElement(context) from entry-server.js
   -> moduleManifest = buildModuleManifest()
-  -> serverBundlePath = entry-server.js or first page module fallback
   -> create ModuleLoader
-  -> iterate SSG/ISR routes
+  -> read client/asset-manifest.json
+  -> create SSGRenderer with the factory, modules, assets, and staticDir
+  -> SSGRenderer.generateStatic(routes)
        -> dynamic routes execute getStaticPaths()
+       -> materialize params into a canonical URL
+       -> matchPath(..., { exact: true }) parameter round-trip
        -> each path executes getStaticProps()
-       -> actualPath = route.path with :param replaced
-       -> render HTML
-       -> write {outDir}/static/{actualPath}/index.html
+       -> createAppElement(context)
+       -> framework renderToString + Document/assets/{ version: 1, props, degraded, renderMode, routePath } hydration assembly
+       -> write the resolved dist/static/*.html path
 ```
 
-HTML rendering strategy order:
+There is no separate Builder-side HTML protocol or fallback shell. The server entry
+must return the React tree from `createAppElement(context)`. Reusing
+`SSGRenderer.generateStatic()` keeps SSG/ISR pre-generation consistent with SSR:
+Nami controls React string rendering, the outer Document, manifest-derived assets,
+and serialized hydration data.
 
-| Priority | Condition | Behavior |
-|--------|------|------|
-| 1 | `serverBundle.renderToHTML` is a function | Call `renderToHTML(actualPath, props)` |
-| 2 | `pageModule.render` is a function | Call `pageModule.render({ path, props })` |
-| 3 | `pageModule.default` is a function | `React.createElement(default, props)` then `renderToString()` |
-| 4 | None of the above | Generate a minimal HTML shell and inject `window.__NAMI_DATA__` |
+Static routes generate one default path. Dynamic routes must declare a
+`getStaticPaths` export resolvable through `ModuleLoader`. A missing declaration,
+unresolved export, or degraded data-prefetch result is recorded as an SSG error;
+other routes continue, and the Builder merges failures into `BuildResult.errors`.
 
-Dynamic routes read paths only when `route.path` contains `:` and `getStaticPaths` is declared. If the function is not found, the route is warned and skipped.
+Dynamic detection is aligned with runtime `matchPath` and supports `:param`,
+`:param?`, `:param(constraint)`, `:path+`, `*`, and `(.*)`. Every params object is
+materialized into a canonical URL and then checked with exact matching plus parameter
+round-trip validation. Missing required params, a constraint mismatch, a generated
+URL that does not match, or different pages resolving to the same final output path
+enters `BuildResult.errors` and fails the build. This strengthens validation without
+changing the existing URL-to-file mapping:
+
+| URL           | HTML file                     | Response sidecar                        |
+| ------------- | ----------------------------- | --------------------------------------- |
+| `/`           | `dist/static/index.html`      | `dist/static/index.html.nami.json`      |
+| `/about`      | `dist/static/about.html`      | `dist/static/about.html.nami.json`      |
+| `/blog/hello` | `dist/static/blog/hello.html` | `dist/static/blog/hello.html.nami.json` |
+
+An explicit GSP redirect `statusCode` is limited to `301/302/303/307/308`; omission
+selects `308` for permanent redirects and `307` otherwise. Control responses write an
+HTML file plus sidecar but are not treated as ordinary successful-page semantics.
 
 ### `createSSGConfig()`
 
@@ -574,7 +609,9 @@ export async function getStaticPaths() { ... }
 with:
 
 ```typescript
-export async function getServerSideProps() { return { props: {} }; }
+export async function getServerSideProps() {
+  return { props: {} };
+}
 ```
 
 In server builds, if `options.isServer` is true, it returns the source unchanged.
@@ -586,17 +623,17 @@ The current default TypeScript rule only has `ts-loader`; it does not chain `pag
 Published packages usually only contain `dist`. External projects should reference loaders through published paths, for example:
 
 ```typescript
-require.resolve('@nami/webpack/dist/loaders/page-loader')
+require.resolve('@nami/webpack/dist/loaders/page-loader');
 ```
 
 Only use `packages/webpack/src/loaders/*` directly when debugging source inside the monorepo.
 
 ### Other Plugins Not Registered by Default
 
-| Plugin | Source | Registered by default | Description |
-|------|------|--------------|------|
-| `NamiRouteCollectPlugin` | `plugins/route-collect-plugin.ts` | No | Scans the pages directory and writes `routes-manifest.json` |
-| `NamiSSRExternalsPlugin` | `plugins/ssr-externals-plugin.ts` | No | Finer-grained externals control |
+| Plugin                   | Source                            | Registered by default | Description                                                 |
+| ------------------------ | --------------------------------- | --------------------- | ----------------------------------------------------------- |
+| `NamiRouteCollectPlugin` | `plugins/route-collect-plugin.ts` | No                    | Scans the pages directory and writes `routes-manifest.json` |
+| `NamiSSRExternalsPlugin` | `plugins/ssr-externals-plugin.ts` | No                    | Finer-grained externals control                             |
 
 The default build uses config-based routes and `webpack-node-externals`. Do not describe these non-default plugins as main-path behavior.
 
@@ -688,11 +725,16 @@ Source locations:
 ```text
 resolveServerRuntime({ fresh: false })
   -> read {outDir}/server/entry-server.js
-  -> resolve createAppElement / appElementFactory / renderToHTML
+  -> resolve createAppElement(context)
   -> read moduleManifest from nami-manifest.json
+  -> read client/asset-manifest.json
   -> create ModuleLoader
   -> startServer(config, runtime)
 ```
+
+`nami dev` uses the same single factory contract while reloading the compiled
+server entry on each request. `nami start` validates that the entry exists and
+exports the factory whenever the route table contains SSR, SSG, or ISR modes.
 
 ---
 
@@ -707,7 +749,7 @@ rawConfig
   -> enhanceConfig(rawConfig, name)
        -> createProgressPlugin
        -> client: NamiManifestPlugin
-       -> client and has CSR: NamiHtmlInjectPlugin
+       -> client: NamiHtmlInjectPlugin (index.html for CSR; emergency.html always)
   -> if client and options.minimize is boolean, override optimization.minimize
   -> config.webpack.client or config.webpack.server
   -> pluginManager.runWaterfallHook('modifyWebpackConfig', config, { isServer, isDev })
@@ -722,11 +764,17 @@ Therefore, a plugin's `modifyWebpackConfig` sees the config after framework buil
 
 ### Misconception 1: `createSSGConfig()` is the SSG main path of `nami build`
 
-No. It is currently exported but not called by Builder/CLI. The main path is `generateStaticPages()` reusing the already compiled server bundle.
+No. It is currently exported but not called by Builder/CLI. The main path is
+`generateStaticPages()`, which loads the compiled server entry and delegates to
+`SSGRenderer.generateStatic()`.
 
 ### Misconception 2: SSG HTML is written under `dist/client`
 
-No. It is currently written to `{outDir}/static/.../index.html`. `dist/client/index.html` is the entry page generated by the CSR HTML plugin.
+No. It is written under `{outDir}/static` using the renderer's request-path mapping:
+`/` becomes `index.html`, while `/about` becomes `about.html`.
+`dist/client/index.html` is the entry page generated by the CSR HTML plugin, while
+`dist/client/emergency.html` is the deployment-level static fallback for complete
+Node service outages.
 
 ### Misconception 3: `page-loader` and `data-fetch-loader` are enabled by default
 

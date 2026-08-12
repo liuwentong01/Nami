@@ -121,8 +121,9 @@ export function dataPrefetchMiddleware(
         const gsp = await activeModuleLoader.getExportedFunction<
           (context: { params: Record<string, string> }) => Promise<{
             props?: Record<string, unknown>;
-            redirect?: { destination: string; permanent?: boolean };
+            redirect?: { destination: string; permanent?: boolean; statusCode?: number };
             notFound?: boolean;
+            revalidate?: number;
           }>
         >(route.component, route.getStaticProps);
 
@@ -143,12 +144,15 @@ export function dataPrefetchMiddleware(
         }
 
         if (result.redirect) {
-          ctx.status = result.redirect.permanent ? 308 : 307;
+          ctx.status = result.redirect.statusCode ?? (result.redirect.permanent ? 308 : 307);
           ctx.body = { redirect: result.redirect };
           return;
         }
 
         ctx.status = 200;
+        if (result.revalidate !== undefined) {
+          ctx.set('X-Nami-Revalidate', String(result.revalidate));
+        }
         ctx.body = result.props ?? {};
         return;
       }

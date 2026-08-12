@@ -8,31 +8,31 @@ Nami 的构建系统不是简单地把 React 应用打成一个浏览器 Bundle�
 
 ## 1. 源码地图
 
-| 主题 | 源码 |
-|------|------|
-| Builder 总控 | `packages/webpack/src/builder.ts` |
-| 包导出入口 | `packages/webpack/src/index.ts` |
-| 基础 Webpack 配置 | `packages/webpack/src/configs/base.config.ts` |
-| 客户端配置 | `packages/webpack/src/configs/client.config.ts` |
-| 服务端配置 | `packages/webpack/src/configs/server.config.ts` |
-| 开发配置封装 | `packages/webpack/src/configs/dev.config.ts` |
-| SSG 配置导出 | `packages/webpack/src/configs/ssg.config.ts` |
-| TS / 样式 / 资源规则 | `packages/webpack/src/rules/*.ts` |
-| 代码分割策略 | `packages/webpack/src/optimization/split-chunks.ts` |
-| 资源清单插件 | `packages/webpack/src/plugins/manifest-plugin.ts` |
-| CSR HTML 插件 | `packages/webpack/src/plugins/html-inject-plugin.ts` |
-| 路由收集插件 | `packages/webpack/src/plugins/route-collect-plugin.ts` |
-| SSR externals 插件 | `packages/webpack/src/plugins/ssr-externals-plugin.ts` |
-| 页面元信息 loader | `packages/webpack/src/loaders/page-loader.ts` |
-| 数据函数剥离 loader | `packages/webpack/src/loaders/data-fetch-loader.ts` |
-| CLI build | `packages/cli/src/commands/build.ts` |
-| CLI dev | `packages/cli/src/commands/dev.ts` |
-| CLI generate | `packages/cli/src/commands/generate.ts` |
-| CLI analyze | `packages/cli/src/commands/analyze.ts` |
-| CLI start | `packages/cli/src/commands/start.ts` |
-| 服务端运行时解析 | `packages/cli/src/utils/server-runtime.ts` |
-| 开发服务器 | `packages/server/src/dev/dev-server.ts` |
-| webpack-dev-middleware 适配 | `packages/server/src/dev/webpack-dev.ts` |
+| 主题                        | 源码                                                   |
+| --------------------------- | ------------------------------------------------------ |
+| Builder 总控                | `packages/webpack/src/builder.ts`                      |
+| 包导出入口                  | `packages/webpack/src/index.ts`                        |
+| 基础 Webpack 配置           | `packages/webpack/src/configs/base.config.ts`          |
+| 客户端配置                  | `packages/webpack/src/configs/client.config.ts`        |
+| 服务端配置                  | `packages/webpack/src/configs/server.config.ts`        |
+| 开发配置封装                | `packages/webpack/src/configs/dev.config.ts`           |
+| SSG 配置导出                | `packages/webpack/src/configs/ssg.config.ts`           |
+| TS / 样式 / 资源规则        | `packages/webpack/src/rules/*.ts`                      |
+| 代码分割策略                | `packages/webpack/src/optimization/split-chunks.ts`    |
+| 资源清单插件                | `packages/webpack/src/plugins/manifest-plugin.ts`      |
+| CSR HTML 插件               | `packages/webpack/src/plugins/html-inject-plugin.ts`   |
+| 路由收集插件                | `packages/webpack/src/plugins/route-collect-plugin.ts` |
+| SSR externals 插件          | `packages/webpack/src/plugins/ssr-externals-plugin.ts` |
+| 页面元信息 loader           | `packages/webpack/src/loaders/page-loader.ts`          |
+| 数据函数剥离 loader         | `packages/webpack/src/loaders/data-fetch-loader.ts`    |
+| CLI build                   | `packages/cli/src/commands/build.ts`                   |
+| CLI dev                     | `packages/cli/src/commands/dev.ts`                     |
+| CLI generate                | `packages/cli/src/commands/generate.ts`                |
+| CLI analyze                 | `packages/cli/src/commands/analyze.ts`                 |
+| CLI start                   | `packages/cli/src/commands/start.ts`                   |
+| 服务端运行时解析            | `packages/cli/src/utils/server-runtime.ts`             |
+| 开发服务器                  | `packages/server/src/dev/dev-server.ts`                |
+| webpack-dev-middleware 适配 | `packages/server/src/dev/webpack-dev.ts`               |
 
 ---
 
@@ -46,30 +46,26 @@ Nami 的构建系统不是简单地把 React 应用打成一个浏览器 Bundle�
 Nami 会根据路由渲染模式决定构建任务。关键常量是：
 
 ```typescript
-export const NEEDS_SERVER_BUNDLE = [
-  RenderMode.SSR,
-  RenderMode.SSG,
-  RenderMode.ISR,
-];
+export const NEEDS_SERVER_BUNDLE = [RenderMode.SSR, RenderMode.SSG, RenderMode.ISR];
 ```
 
 这说明：
 
-| 模式 | Client Bundle | Server Bundle | 静态生成 |
-|------|---------------|---------------|----------|
-| CSR | 需要 | 不需要 | 不需要 |
-| SSR | 需要 | 需要 | 不需要 |
-| SSG | 需要 | 需要 | 需要 |
-| ISR | 需要 | 需要 | 需要首轮预生成，运行期还要重验证 |
+| 模式 | Client Bundle | Server Bundle | 静态生成                         |
+| ---- | ------------- | ------------- | -------------------------------- |
+| CSR  | 需要          | 不需要        | 不需要                           |
+| SSR  | 需要          | 需要          | 不需要                           |
+| SSG  | 需要          | 需要          | 需要                             |
+| ISR  | 需要          | 需要          | 需要首轮预生成，运行期还要重验证 |
 
 两套 Bundle 的目标不同：
 
-| Bundle | 运行环境 | 主要职责 |
-|--------|----------|----------|
-| client | 浏览器 | 启动 React、Hydration、客户端路由、加载页面 chunk |
-| server | Node.js | SSR/ISR 运行期渲染、SSG 构建期渲染、执行数据函数 |
+| Bundle | 运行环境 | 主要职责                                          |
+| ------ | -------- | ------------------------------------------------- |
+| client | 浏览器   | 启动 React、Hydration、客户端路由、加载页面 chunk |
+| server | Node.js  | SSR/ISR 运行期渲染、SSG 构建期渲染、执行数据函数  |
 
-SSG 运行期可以只返回静态文件，但构建期仍需要 server bundle 来执行页面模块、`getStaticProps`、`getStaticPaths` 或 `renderToHTML`。
+SSG 运行期可以只返回静态文件，但构建期仍需要 server bundle 来执行页面模块、`getStaticProps`、`getStaticPaths`，并调用 `entry-server.createAppElement(context)` 创建 React 元素树。
 
 ---
 
@@ -119,13 +115,13 @@ build('production')
 
 `BuildResult` 包含：
 
-| 字段 | 含义 |
-|------|------|
-| `success` | 是否成功 |
-| `duration` | 总耗时 |
-| `errors` | Webpack 和 SSG 错误 |
-| `warnings` | Webpack 警告 |
-| `stats` | 各构建任务的 Webpack Stats |
+| 字段       | 含义                       |
+| ---------- | -------------------------- |
+| `success`  | 是否成功                   |
+| `duration` | 总耗时                     |
+| `errors`   | Webpack 和 SSG 错误        |
+| `warnings` | Webpack 警告               |
+| `stats`    | 各构建任务的 Webpack Stats |
 
 SSG 阶段的路由级错误会收集到 `this.ssgErrors`，最后并入 `BuildResult.errors`，这样 CI 能感知部分页面生成失败。
 
@@ -156,12 +152,12 @@ ssg:
 
 关键点：
 
-| 事实 | 说明 |
-|------|------|
-| dev 模式不会加入 `ssg` 任务 | 开发环境不做构建期静态生成 |
-| SSG/ISR 都会进入静态生成 | ISR 也会生成首轮静态 HTML |
+| 事实                                   | 说明                                     |
+| -------------------------------------- | ---------------------------------------- |
+| dev 模式不会加入 `ssg` 任务            | 开发环境不做构建期静态生成               |
+| SSG/ISR 都会进入静态生成               | ISR 也会生成首轮静态 HTML                |
 | `options.ssgRoutes` 只过滤静态生成路由 | client/server Webpack 仍会按整体配置构建 |
-| `ssg` 任务没有 Webpack config | 它复用已经编译好的 server bundle | TODO
+| `ssg` 任务没有 Webpack config          | 它复用已经编译好的 server bundle（TODO） |
 
 ---
 
@@ -183,20 +179,21 @@ dist/
 │   │       ├── main.[contenthash:8].css
 │   │       └── *.chunk.css
 │   ├── asset-manifest.json
-│   └── index.html                 # 仅存在 CSR 路由时由 NamiHtmlInjectPlugin 生成
+│   ├── index.html                 # 仅存在 CSR 路由时生成，内含临时 CSR 骨架
+│   └── emergency.html             # 始终生成；供代理/CDN 在 Node 不可用时兜底
 │
 ├── server/
-│   ├── entry-server.js             # 如果 src/entry-server.* 存在
+│   ├── entry-server.js             # SSR/SSG/ISR 必需，导出 createAppElement
 │   └── pages/xxx.tsx.js            # 页面组件 server entry，对应 route.component
 │
 ├── static/
 │   ├── index.html                  # SSG/ISR 生成
-│   └── about/index.html
+│   └── about.html
 │
 └── nami-manifest.json
 ```
 
-SSG/ISR 静态 HTML 写入的是 `dist/static/.../index.html`，不是 `dist/client/...html`。
+SSG/ISR 静态 HTML 写入 `dist/static`：根路径 `/` 对应 `dist/static/index.html`，非根路径直接追加 `.html`，例如 `/about` 对应 `dist/static/about.html`。
 
 ---
 
@@ -206,17 +203,17 @@ SSG/ISR 静态 HTML 写入的是 `dist/static/.../index.html`，不是 `dist/cli
 
 `createBaseConfig()` 是 client 和 server 共用基线：
 
-| 配置 | 行为 |
-|------|------|
-| `mode` | dev 为 `development`，生产为 `production` |
-| `resolve.extensions` | `.tsx`、`.ts`、`.jsx`、`.js`、`.json` |
-| `resolve.alias` | `@` 和 `~` 指向 `srcDir` |
-| `resolve.modules` | `node_modules` 和项目根 `node_modules` |
-| `module.rules` | TypeScript、资源、SVG |
-| `module.noParse` | 跳过 `jquery|lodash` |
-| `performance` | 生产模式开启资源大小警告 |
-| `stats` | dev `minimal`，生产 `normal` |
-| `cache` | Webpack 5 filesystem cache |
+| 配置                 | 行为                                      |
+| -------------------- | ----------------------------------------- |
+| `mode`               | dev 为 `development`，生产为 `production` |
+| `resolve.extensions` | `.tsx`、`.ts`、`.jsx`、`.js`、`.json`     |
+| `resolve.alias`      | `@` 和 `~` 指向 `srcDir`                  |
+| `resolve.modules`    | `node_modules` 和项目根 `node_modules`    |
+| `module.rules`       | TypeScript、资源、SVG                     |
+| `module.noParse`     | 跳过 `jquery` 和 `lodash`                |
+| `performance`        | 生产模式开启资源大小警告                  |
+| `stats`              | dev `minimal`，生产 `normal`              |
+| `cache`              | Webpack 5 filesystem cache                |
 
 浏览器端额外禁用 Node 内建模块 fallback：
 
@@ -261,21 +258,19 @@ fallback: {
 
 调用配置工厂时会生成两个文件：
 
-| 文件 | 作用 |
-|------|------|
-| `.nami/generated-route-modules.ts` | 路由组件路径到动态 import 工厂的映射 |
-| `.nami/generated-core-client-shim.ts` | 浏览器端专用 `@nami/core` 精简入口 |
+| 文件                                  | 作用                                 |
+| ------------------------------------- | ------------------------------------ |
+| `.nami/generated-route-modules.ts`    | 路由组件路径到动态 import 工厂的映射 |
+| `.nami/generated-core-client-shim.ts` | 浏览器端专用 `@nami/core` 精简入口   |
 
 `generated-route-modules.ts` 导出：
 
 ```typescript
 export const generatedComponentLoaders = {
-  "./pages/home": () => import(/* webpackChunkName: "route-pages-home" */ "..."),
+  './pages/home': () => import(/* webpackChunkName: "route-pages-home" */ '...'),
 } as Record<string, () => Promise<unknown>>;
 
-export const generatedRouteDefinitions = [
-  { path: "/", component: "./pages/home", exact: true },
-];
+export const generatedRouteDefinitions = [{ path: '/', component: './pages/home', exact: true }];
 ```
 
 `exact` 的值来自 `route.exact === false ? false : true`。
@@ -283,30 +278,30 @@ export const generatedRouteDefinitions = [
 `generated-core-client-shim.ts` 导出：
 
 ```typescript
-export { PluginManager } from ".../dist/plugin/plugin-manager";
-export { NamiDataProvider } from ".../dist/data/data-context";
-export { matchPath } from ".../dist/router/path-matcher";
+export { PluginManager } from '.../dist/plugin/plugin-manager';
+export { NamiDataProvider } from '.../dist/data/data-context';
+export { matchPath } from '.../dist/router/path-matcher';
 ```
 
 目的是避免浏览器 bundle 引入完整 `@nami/core` 入口，把 Node 专属模块一起卷入。
 
 ### Entry 和输出
 
-| 项目 | dev | production |
-|------|-----|------------|
-| entry | `webpack-hot-middleware/client` + `src/entry-client` | `src/entry-client` |
-| filename | `static/js/[name].js` | `static/js/[name].[contenthash:8].js` |
-| chunkFilename | `static/js/[name].chunk.js` | `static/js/[name].[contenthash:8].chunk.js` |
-| publicPath | `config.assets.publicPath` | 同左 |
-| clean | `false` | `true` |
+| 项目          | dev                                                  | production                                  |
+| ------------- | ---------------------------------------------------- | ------------------------------------------- |
+| entry         | `webpack-hot-middleware/client` + `src/entry-client` | `src/entry-client`                          |
+| filename      | `static/js/[name].js`                                | `static/js/[name].[contenthash:8].js`       |
+| chunkFilename | `static/js/[name].chunk.js`                          | `static/js/[name].[contenthash:8].chunk.js` |
+| publicPath    | `config.assets.publicPath`                           | 同左                                        |
+| clean         | `false`                                              | `true`                                      |
 
 ### DefinePlugin
 
 客户端注入：
 
 ```typescript
-process.env.NODE_ENV
-process.env.NAMI_RENDER_MODE = "client"
+process.env.NODE_ENV;
+process.env.NAMI_RENDER_MODE = 'client';
 ```
 
 以及 `config.env` 中所有 `NAMI_PUBLIC_` 前缀变量。没有该前缀的变量不会进入客户端 bundle。
@@ -317,19 +312,21 @@ process.env.NAMI_RENDER_MODE = "client"
 
 生产代码分割来自 `createSplitChunksConfig()`：
 
-| cacheGroup | 匹配 | 输出名 |
-|------------|------|--------|
-| `react` | `react`、`react-dom`、`scheduler` | `vendor-react` |
-| `vendor` | 其他 `node_modules` | `vendor` |
-| `commons` | 被至少两个 chunk 引用 | `commons` |
-| `default` | 默认复用组 | Webpack 默认命名 |
+| cacheGroup | 匹配                              | 输出名           |
+| ---------- | --------------------------------- | ---------------- |
+| `react`    | `react`、`react-dom`、`scheduler` | `vendor-react`   |
+| `vendor`   | 其他 `node_modules`               | `vendor`         |
+| `commons`  | 被至少两个 chunk 引用             | `commons`        |
+| `default`  | 默认复用组                        | Webpack 默认命名 |
 
 生产还会开启：
 
 ```typescript
-runtimeChunk: { name: 'runtime' }
-moduleIds: 'deterministic'
-minimizer: [createTerserPlugin()]
+runtimeChunk: {
+  name: 'runtime';
+}
+moduleIds: 'deterministic';
+minimizer: [createTerserPlugin()];
 ```
 
 ---
@@ -351,7 +348,7 @@ entry: {
 }
 ```
 
-`entry-server` 只有在 `src/entry-server.tsx|ts|jsx|js` 存在时才加入。页面 entry 来自 `config.routes[*].component` 去重后的列表，例如：
+存在 SSR/SSG/ISR 路由时，`src/entry-server.tsx|ts|jsx|js` 是必需入口，必须导出 `createAppElement(context)`；缺失时构建会直接失败。纯 CSR 项目不需要该入口。页面 entry 来自 `config.routes[*].component` 去重后的列表，例如：
 
 ```text
 route.component = "./pages/Home.tsx"
@@ -363,16 +360,16 @@ output file     = "pages/Home.tsx.js"
 
 ### 输出和模块格式
 
-| 配置 | 值 |
-|------|----|
-| `target` | `node` |
-| `output.path` | `{outDir}/server` |
-| `filename` | `[name].js` |
-| `libraryTarget` | `commonjs2` |
-| `devtool` | `source-map` |
-| `optimization.minimize` | `false` |
-| `optimization.splitChunks` | `false` |
-| `LimitChunkCountPlugin` | `maxChunks: 1` |
+| 配置                       | 值                |
+| -------------------------- | ----------------- |
+| `target`                   | `node`            |
+| `output.path`              | `{outDir}/server` |
+| `filename`                 | `[name].js`       |
+| `libraryTarget`            | `commonjs2`       |
+| `devtool`                  | `source-map`      |
+| `optimization.minimize`    | `false`           |
+| `optimization.splitChunks` | `false`           |
+| `LimitChunkCountPlugin`    | `maxChunks: 1`    |
 
 服务端不需要浏览器代码分割，Node 运行时通过 CommonJS 加载产物。
 
@@ -382,11 +379,8 @@ output file     = "pages/Home.tsx.js"
 
 ```typescript
 nodeExternals({
-  allowlist: [
-    /\.css$/,
-    /^@nami\//,
-  ],
-})
+  allowlist: [/\.css$/, /^@nami\//],
+});
 ```
 
 这会把大多数 `node_modules` 标为运行时 `require`，但保留 CSS 和 `@nami/*` 包给 Webpack 处理。
@@ -434,15 +428,20 @@ dist/client/asset-manifest.json
 
 源码位置：`packages/webpack/src/plugins/html-inject-plugin.ts`
 
-`NamiBuilder.enhanceConfig()` 只在 client 构建且存在 CSR 路由时注入该插件：
+`NamiBuilder.enhanceConfig()` 会在每次 client 构建中注入该插件，并用 `emitIndex` 区分是否需要 CSR 入口：
 
 ```typescript
-const hasCSR = this.config.routes.some(
-  route => route.renderMode === RenderMode.CSR
-);
+const hasCSR = this.config.routes.some((route) => route.renderMode === RenderMode.CSR);
+
+new NamiHtmlInjectPlugin({
+  emitIndex: hasCSR,
+  staticEmergencyHTML: this.config.fallback?.staticHTML,
+});
 ```
 
-它生成 `dist/client/index.html`，默认挂载容器 ID 来自 `DEFAULT_CONTAINER_ID`，即 `nami-root`。
+存在 CSR 路由时，它生成 `dist/client/index.html`，默认挂载容器 ID 来自 `DEFAULT_CONTAINER_ID`，即 `nami-root`；容器内置轻量临时骨架，在客户端完成首次挂载后自然被替换。
+
+无论是否存在 CSR 路由，它都会生成不依赖业务 JavaScript 的 `dist/client/emergency.html`。这个文件不会由 Nami 自动接管流量，部署时需要显式配置反向代理或 CDN：只有 Node 服务彻底不可用时才返回它。
 
 SSR/SSG/ISR 的 HTML 不靠这个插件生成。
 
@@ -468,14 +467,14 @@ SSR/SSG/ISR 的 HTML 不靠这个插件生成。
 
 主要字段：
 
-| 字段 | 说明 |
-|------|------|
-| `appName` | 应用名 |
-| `generatedAt` | 生成时间 |
-| `routes` | 路由 path、component、renderMode、数据函数名、revalidate、fallback |
-| `moduleManifest` | `route.component` 到 server 页面模块文件的映射 |
-| `buildInfo.nodeVersion` | Node 版本 |
-| `buildInfo.namiVersion` | 框架版本 |
+| 字段                    | 说明                                                               |
+| ----------------------- | ------------------------------------------------------------------ |
+| `appName`               | 应用名                                                             |
+| `generatedAt`           | 生成时间                                                           |
+| `routes`                | 路由 path、component、renderMode、数据函数名、revalidate、fallback |
+| `moduleManifest`        | `route.component` 到 server 页面模块文件的映射                     |
+| `buildInfo.nodeVersion` | Node 版本                                                          |
+| `buildInfo.namiVersion` | 框架版本                                                           |
 
 `moduleManifest` 规则：
 
@@ -500,7 +499,7 @@ value = route.component 去掉开头 "./" 后追加 ".js"
 
 源码位置：`packages/webpack/src/builder.ts`
 
-当前构建主链路的静态生成由 `NamiBuilder.generateStaticPages()` 完成，不是单独运行一套 `createSSGConfig()` Webpack 编译。
+当前构建主链路由 `NamiBuilder.generateStaticPages()` 发起，并复用 Core 中的 `SSGRenderer.generateStatic()`；它不是单独运行一套 `createSSGConfig()` Webpack 编译。
 
 流程：
 
@@ -508,27 +507,45 @@ value = route.component 去掉开头 "./" 后追加 ".js"
 generateStaticPages(routes)
   -> primaryServerBundlePath = {outDir}/server/entry-server.js
   -> staticOutputDir = {outDir}/static
+  -> 校验 entry-server.createAppElement(context)
   -> moduleManifest = buildModuleManifest()
-  -> serverBundlePath = entry-server.js 或第一个页面模块兜底
   -> 创建 ModuleLoader
-  -> 遍历 SSG/ISR 路由
+  -> 读取 client/asset-manifest.json
+  -> new SSGRenderer({ appElementFactory, moduleLoader, assetManifest, staticDir })
+  -> SSGRenderer.generateStatic(routes)
        -> 动态路由执行 getStaticPaths()
+       -> materialize params 为 canonical URL
+       -> matchPath(..., { exact: true }) 参数 round-trip
        -> 每个 path 执行 getStaticProps()
-       -> actualPath = route.path 替换 :param
-       -> 渲染 HTML
-       -> 写入 {outDir}/static/{actualPath}/index.html
+       -> createAppElement(context)
+       -> renderToString() + 完整 Document/资源/{ version: 1, props, degraded, renderMode, routePath } 注水
+       -> 写入 static 路径
 ```
 
-渲染 HTML 的策略顺序：
+静态生成不再维护另一套页面渲染优先级。应用入口只返回 React 元素树，`SSGRenderer` 统一负责字符串渲染与 HTML 组装，因此构建期与运行期 SSR/ISR 使用同一份入口契约和 Document 规则。
 
-| 优先级 | 条件 | 行为 |
-|--------|------|------|
-| 1 | `serverBundle.renderToHTML` 是函数 | 调用 `renderToHTML(actualPath, props)` |
-| 2 | `pageModule.render` 是函数 | 调用 `pageModule.render({ path, props })` |
-| 3 | `pageModule.default` 是函数 | `React.createElement(default, props)` 后 `renderToString()` |
-| 4 | 以上都没有 | 生成最小 HTML 壳，注入 `window.__NAMI_DATA__` |
+典型输出映射：
 
-动态路由只有在 `route.path` 包含 `:` 且声明了 `getStaticPaths` 时才读取路径。找不到函数会 warn 并跳过该动态路由。
+| URL           | HTML 文件                     | 响应 sidecar                            |
+| ------------- | ----------------------------- | --------------------------------------- |
+| `/`           | `dist/static/index.html`      | `dist/static/index.html.nami.json`      |
+| `/about`      | `dist/static/about.html`      | `dist/static/about.html.nami.json`      |
+| `/blog/hello` | `dist/static/blog/hello.html` | `dist/static/blog/hello.html.nami.json` |
+
+静态路由会生成一个默认路径；动态路由必须声明并能通过 `ModuleLoader` 解析
+`getStaticPaths`。缺少声明、导出解析失败或数据预取降级都会记入 SSG 生成错误，
+其他路由继续处理，Builder 最终把失败项合并到 `BuildResult.errors`。
+
+动态识别与运行期 `matchPath` 对齐，支持 `:param`、`:param?`、
+`:param(约束)`、`:path+`、`*` 与 `(.*)`。每组 params 会先 materialize 为
+canonical URL，再做 exact match 与参数 round-trip；缺少必填参数、不满足约束、
+生成 URL 不匹配，或不同页面落到同一个最终 outputPath 都会进入
+`BuildResult.errors` 并使构建失败。该流程只加强校验，不改变上表既有 URL→文件
+映射格式。
+
+GSP redirect 的显式 `statusCode` 仅支持 `301/302/303/307/308`；省略时按
+permanent 选择 `308`，否则为 `307`。控制响应写入 HTML + sidecar，但不会当作
+普通成功页语义。
 
 ### `createSSGConfig()`
 
@@ -574,7 +591,9 @@ export async function getStaticPaths() { ... }
 替换成：
 
 ```typescript
-export async function getServerSideProps() { return { props: {} }; }
+export async function getServerSideProps() {
+  return { props: {} };
+}
 ```
 
 服务端构建时如果 `options.isServer` 为 true，则原样返回源码。
@@ -586,17 +605,17 @@ export async function getServerSideProps() { return { props: {} }; }
 发布包通常只包含 `dist`，外部项目引用 loader 时应使用发布后的路径，例如：
 
 ```typescript
-require.resolve('@nami/webpack/dist/loaders/page-loader')
+require.resolve('@nami/webpack/dist/loaders/page-loader');
 ```
 
 在 monorepo 内部调试源码时才直接看 `packages/webpack/src/loaders/*`。
 
 ### 其他未默认注册的插件
 
-| 插件 | 源码 | 默认是否注册 | 说明 |
-|------|------|--------------|------|
-| `NamiRouteCollectPlugin` | `plugins/route-collect-plugin.ts` | 否 | 扫描 pages 目录并写 `routes-manifest.json` |
-| `NamiSSRExternalsPlugin` | `plugins/ssr-externals-plugin.ts` | 否 | 更细粒度 externals 控制 |
+| 插件                     | 源码                              | 默认是否注册 | 说明                                       |
+| ------------------------ | --------------------------------- | ------------ | ------------------------------------------ |
+| `NamiRouteCollectPlugin` | `plugins/route-collect-plugin.ts` | 否           | 扫描 pages 目录并写 `routes-manifest.json` |
+| `NamiSSRExternalsPlugin` | `plugins/ssr-externals-plugin.ts` | 否           | 更细粒度 externals 控制                    |
 
 默认构建使用配置式路由和 `webpack-node-externals`，不要把这些未默认接入的插件写成主链路行为。
 
@@ -688,11 +707,13 @@ webpack-hot-middleware
 ```text
 resolveServerRuntime({ fresh: false })
   -> 读取 {outDir}/server/entry-server.js
-  -> 解析 createAppElement / appElementFactory / renderToHTML
+  -> 只解析 createAppElement(context)
   -> 读取 nami-manifest.json 的 moduleManifest
   -> 创建 ModuleLoader
   -> startServer(config, runtime)
 ```
+
+`nami dev` 的热更新运行时也遵循相同规则，只解析最新 bundle 的 `createAppElement`，不再识别旧的 HTML 字符串入口与 `appElementFactory` 导出别名。
 
 ---
 
@@ -707,7 +728,7 @@ rawConfig
   -> enhanceConfig(rawConfig, name)
        -> createProgressPlugin
        -> client: NamiManifestPlugin
-       -> client 且有 CSR: NamiHtmlInjectPlugin
+       -> client: NamiHtmlInjectPlugin（有 CSR 时额外生成 index.html，始终生成 emergency.html）
   -> 如果 client 且 options.minimize 是 boolean，覆盖 optimization.minimize
   -> config.webpack.client 或 config.webpack.server
   -> pluginManager.runWaterfallHook('modifyWebpackConfig', config, { isServer, isDev })
@@ -726,7 +747,7 @@ rawConfig
 
 ### 误区二：SSG HTML 写在 `dist/client`
 
-不是。当前写入 `{outDir}/static/.../index.html`。`dist/client/index.html` 是 CSR HTML 插件生成的入口页。
+不是。当前根路由写入 `{outDir}/static/index.html`，其他路径写成对应的扁平 `.html` 文件，例如 `{outDir}/static/about.html` 与 `{outDir}/static/blog/hello.html`。`dist/client/index.html` 是 CSR HTML 插件生成的入口页，`dist/client/emergency.html` 则是部署层在 Node 不可用时使用的静态应急页。
 
 ### 误区三：`page-loader` 和 `data-fetch-loader` 默认生效
 

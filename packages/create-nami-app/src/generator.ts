@@ -59,9 +59,10 @@ export async function generateProject(
       template,
       plugins,
       author,
-      isSSR: template === 'ssr' || template === 'ssg' || template === 'full',
+      isSSR: template === 'ssr' || template === 'full',
       isSSG: template === 'ssg' || template === 'full',
       isCSR: template === 'csr' || template === 'full',
+      needsServerEntry: template !== 'csr',
       hasPluginCache: plugins.includes('@nami/plugin-cache'),
       hasPluginMonitor: plugins.includes('@nami/plugin-monitor'),
       hasPluginSkeleton: plugins.includes('@nami/plugin-skeleton'),
@@ -89,9 +90,15 @@ export async function generateProject(
 
     // 生成入口文件
     await writeTemplate(path.join(srcDir), 'app.tsx', generateAppTsx(templateData));
+    await writeTemplate(path.join(srcDir), 'app-shell-plugin.tsx', generateAppShellPlugin());
+    await writeTemplate(
+      path.join(srcDir),
+      'runtime-config.ts',
+      generateRuntimeConfig(templateData),
+    );
     await writeTemplate(path.join(srcDir), 'entry-client.tsx', generateEntryClient());
 
-    if (templateData.isSSR) {
+    if (templateData.needsServerEntry) {
       await writeTemplate(path.join(srcDir), 'entry-server.tsx', generateEntryServer());
     }
 
@@ -146,13 +153,12 @@ function generatePackageJson(data: Record<string, unknown>): string {
     '@nami/core': '^0.1.0',
     '@nami/shared': '^0.1.0',
     '@nami/client': '^0.1.0',
-    'react': '^18.2.0',
+    react: '^18.2.0',
     'react-dom': '^18.2.0',
   };
 
-  if (data.isSSR) {
-    deps['@nami/server'] = '^0.1.0';
-  }
+  // nami start 对所有渲染模式都通过 @nami/server 提供 HTTP 运行时。
+  deps['@nami/server'] = '^0.1.0';
 
   // 添加选择的插件
   for (const plugin of (data.plugins as string[]) || []) {
@@ -205,7 +211,7 @@ function generateTsConfig(): string {
           '@/*': ['src/*'],
         },
       },
-      include: ['src'],
+      include: ['nami.config.ts', 'src'],
       exclude: ['node_modules', 'dist'],
     },
     null,
@@ -214,7 +220,65 @@ function generateTsConfig(): string {
 }
 
 function generateNamiConfig(data: Record<string, unknown>): string {
-  const renderMode = data.isSSR ? 'ssr' : data.isSSG ? 'ssg' : 'csr';
+  void data;
+
+  return `/**
+ * Nami CLI/构建端配置入口。
+ * 浏览器入口只读取 src/runtime-config.ts，避免打入 @nami/core 的服务端模块。
+ * @see https://nami.dev/docs/config
+ */
+import { defineConfig } from '@nami/core';
+import { createRuntimeConfig } from './src/runtime-config';
+
+export default defineConfig(createRuntimeConfig());
+`;
+}
+
+function generateRuntimeConfig(data: Record<string, unknown>): string {
+  const template = String(data.template);
+  const renderMode = template === 'ssr' ? 'ssr' : template === 'ssg' ? 'ssg' : 'csr';
+  const routes =
+    template === 'full'
+      ? `    {
+      path: '/',
+      component: './pages/home',
+      renderMode: RenderMode.SSR,
+      getServerSideProps: 'getServerSideProps',
+    },
+    {
+      path: '/about',
+      component: './pages/about',
+      renderMode: RenderMode.CSR,
+    },
+    {
+      path: '/static-home',
+      component: './pages/home',
+      renderMode: RenderMode.SSG,
+      getStaticProps: 'getStaticProps',
+    },
+    {
+      path: '/fresh-home',
+      component: './pages/home',
+      renderMode: RenderMode.ISR,
+      getStaticProps: 'getStaticProps',
+      revalidate: 60,
+    },`
+      : `    {
+      path: '/',
+      component: './pages/home',
+      renderMode: RenderMode.${renderMode.toUpperCase()},${
+        template === 'ssr'
+          ? `\n      getServerSideProps: 'getServerSideProps',`
+          : template === 'ssg'
+            ? `\n      getStaticProps: 'getStaticProps',`
+            : ''
+      }
+    },
+    {
+      path: '/about',
+      component: './pages/about',
+      renderMode: RenderMode.CSR,
+    },`;
 
   const pluginImports = ((data.plugins as string[]) || [])
     .map((p) => {
@@ -230,40 +294,49 @@ function generateNamiConfig(data: Record<string, unknown>): string {
       return className ? `    new ${className}()` : '';
     })
     .filter(Boolean)
+    .concat('    appShellPlugin')
     .join(',\n');
+  const indentedRoutes = routes
+    .split('\n')
+    .map((line) => `  ${line}`)
+    .join('\n');
+  const indentedPluginArray = pluginArray
+    .split('\n')
+    .map((line) => `  ${line}`)
+    .join('\n');
 
   return `/**
- * Nami 框架配置文件
- * @see https://nami.dev/docs/config
+ * 浏览器与 CLI/服务端共用的纯运行时配置。
+ * 不导入 @nami/core，避免客户端 Bundle 带入 Renderer、ConfigLoader 和 Node.js 模块。
  */
-import { defineConfig, RenderMode } from '@nami/core';
+import { RenderMode, type UserNamiConfig } from '@nami/shared';
+import appShellPlugin from './app-shell-plugin';
 ${pluginImports}
 
-export default defineConfig({
-  appName: '${data.projectName}',
-  defaultRenderMode: RenderMode.${renderMode.toUpperCase()},
+export function createRuntimeConfig(): UserNamiConfig {
+  return {
+    appName: '${data.projectName}',
+    defaultRenderMode: RenderMode.${template === 'full' ? 'SSR' : renderMode.toUpperCase()},
 
-  routes: [
-    {
-      path: '/',
-      component: './pages/home',
-      renderMode: RenderMode.${renderMode.toUpperCase()},
+    routes: [
+${indentedRoutes}
+    ],
+
+    server: {
+      port: 3000,
     },
-    {
-      path: '/about',
-      component: './pages/about',
-      renderMode: RenderMode.CSR,
+
+    fallback: {
+      // 构建时还会把该内容独立产出为 dist/client/emergency.html，供反代/CDN
+      // 在 Node 服务完全不可达时使用。页面必须保持纯静态、无业务脚本。
+      staticHTML: '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>服务暂时不可用</title></head><body><main role="alert"><h1>服务暂时不可用</h1><p>请稍后重新加载。</p><a href="">重新加载</a></main></body></html>',
     },
-  ],
 
-  server: {
-    port: 3000,
-  },
-
-  plugins: [
-${pluginArray}
-  ],
-});
+    plugins: [
+${indentedPluginArray}
+    ],
+  };
+}
 `;
 }
 
@@ -282,6 +355,7 @@ function resolvePluginClassName(packageName: string): string | null {
 function generateGitignore(): string {
   return `node_modules/
 dist/
+.nami/
 .nami-cache/
 *.tsbuildinfo
 .env
@@ -295,7 +369,6 @@ function generateAppTsx(data: Record<string, unknown>): string {
  * 应用根组件
  */
 import React from 'react';
-import './global.css';
 
 interface AppProps {
   children: React.ReactNode;
@@ -322,13 +395,42 @@ export default function App({ children }: AppProps) {
 `;
 }
 
+function generateAppShellPlugin(): string {
+  return `import type { NamiPlugin } from '@nami/shared';
+import App from './app';
+
+/** 构建期、服务端运行时与客户端共用的同构应用外壳。 */
+const appShellPlugin: NamiPlugin = {
+  name: 'app-shell',
+  version: '1.0.0',
+  setup(api) {
+    api.wrapApp((app) => <App>{app}</App>);
+  },
+};
+
+export default appShellPlugin;
+`;
+}
+
 function generateEntryClient(): string {
   return `/**
- * 客户端入口
+ * 客户端入口：恢复框架注水数据，并用与服务端一致的 App 外壳挂载。
  */
 import { initNamiClient } from '@nami/client';
+import { resolveNamiConfig, type NamiPlugin } from '@nami/shared';
+import { createRuntimeConfig } from './runtime-config';
+import './global.css';
 
-initNamiClient({
+const config = resolveNamiConfig(createRuntimeConfig());
+
+const clientPlugins = config.plugins.filter(
+  (plugin): plugin is NamiPlugin => typeof plugin !== 'string',
+);
+
+void initNamiClient({
+  routes: config.routes,
+  plugins: clientPlugins,
+  config,
   containerId: 'nami-root',
 });
 `;
@@ -336,27 +438,42 @@ initNamiClient({
 
 function generateEntryServer(): string {
   return `/**
- * 服务端入口（SSR）
+ * 服务端入口：只负责从 RenderContext 创建 React 元素树。
+ * 字符串/流式渲染、Document、资源清单与数据注水由 Nami 统一处理。
  */
-import React from 'react';
-import { renderToString } from 'react-dom/server';
-import App from './app';
+import React, { type ComponentType } from 'react';
+import type { RenderContext } from '@nami/core';
+import HomePage from './pages/home';
+import AboutPage from './pages/about';
 
-export async function renderToHTML(url: string, props: Record<string, unknown>) {
-  const html = renderToString(
-    <App>
-      <div>Server rendered: {url}</div>
-    </App>
+type PageComponent = ComponentType<any>;
+
+const pageRegistry: Record<string, PageComponent> = {
+  './pages/home': HomePage,
+  './pages/about': AboutPage,
+};
+
+export function createAppElement(context: RenderContext): React.ReactElement {
+  const Page = pageRegistry[context.route.component];
+  if (!Page) {
+    throw new Error(\`未注册服务端页面组件: \${context.route.component}\`);
+  }
+
+  return (
+    <React.Suspense fallback={null}>
+      <Page {...(context.initialData ?? {})} />
+    </React.Suspense>
   );
-  return html;
 }
 `;
 }
 
 function generateHomePage(data: Record<string, unknown>): string {
-  const hasSSR = data.isSSR;
-  const exports = hasSSR
-    ? `
+  const hasServerData = data.isSSR || data.isSSG;
+  const serverExports: string[] = [];
+
+  if (data.isSSR) {
+    serverExports.push(`
 /**
  * 服务端数据预取
  */
@@ -368,8 +485,24 @@ export async function getServerSideProps() {
     },
   };
 }
-`
-    : '';
+`);
+  }
+
+  if (data.isSSG) {
+    serverExports.push(`
+/**
+ * 构建期/ISR 重验证数据预取
+ */
+export async function getStaticProps() {
+  return {
+    props: {
+      message: '来自静态生成的数据',
+      timestamp: new Date().toISOString(),
+    },
+  };
+}
+`);
+  }
 
   return `/**
  * 首页
@@ -386,11 +519,11 @@ export default function HomePage({ message, timestamp }: HomePageProps) {
     <div className="page-home">
       <h1>欢迎使用 Nami 框架</h1>
       <p>集团级前端框架 - CSR/SSR/SSG/ISR 多渲染模式</p>
-      ${hasSSR ? `{message && <p className="server-data">服务端数据: {message} ({timestamp})</p>}` : ''}
+      ${hasServerData ? `{message && <p className="server-data">预取数据: {message} ({timestamp})</p>}` : ''}
     </div>
   );
 }
-${exports}`;
+${serverExports.join('\n')}`;
 }
 
 function generateAboutPage(): string {

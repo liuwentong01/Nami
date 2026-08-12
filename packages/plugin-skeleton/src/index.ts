@@ -1,12 +1,13 @@
 /**
  * @nami/plugin-skeleton - 骨架屏插件
  *
- * Nami 框架官方骨架屏插件，提供页面加载占位与降级能力：
+ * Nami 框架官方骨架屏插件，提供页面加载占位与静态应急能力：
  * - 基础骨架组件（SkeletonText、SkeletonImage、SkeletonAvatar、SkeletonButton、SkeletonCard）
  * - 页面级骨架布局（列表、详情、仪表盘）
  * - DOM 结构自动生成骨架屏
  * - Suspense fallback 自动包裹
- * - SSR 渲染错误时的骨架屏降级
+ * - 正常/降级 CSR Shell 的临时骨架（客户端接管后替换）
+ * - SSR 与客户端接管都不可用后的静态应急兜底
  *
  * @example
  * ```typescript

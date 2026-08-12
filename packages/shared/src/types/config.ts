@@ -133,7 +133,9 @@ export interface FallbackConfig {
 
   /**
    * 兜底静态 HTML
-   * 所有降级手段失败后返回此 HTML
+   * 所有可恢复降级失败后返回此 HTML；客户端构建还会将其输出为
+   * `dist/client/emergency.html`，供反向代理/CDN 在 Node 服务不可达时使用。
+   * 应保持为不依赖业务 JavaScript 的完整静态文档。
    */
   staticHTML?: string;
 
@@ -238,7 +240,18 @@ export interface NamiConfig {
  * 用户侧配置（Partial）
  * 业务方在 nami.config.ts 中只需要填写需要覆盖默认值的字段
  */
-export type UserNamiConfig = Partial<NamiConfig> & {
+export type UserNamiConfig = Omit<
+  Partial<NamiConfig>,
+  'server' | 'webpack' | 'isr' | 'assets' | 'monitor' | 'fallback'
+> & {
   /** appName 为必填项 */
   appName: string;
+
+  /** 嵌套配置同样允许只覆盖需要的字段。 */
+  server?: Partial<ServerConfig>;
+  webpack?: WebpackCustomConfig;
+  isr?: Partial<ISRConfig>;
+  assets?: Partial<AssetsConfig>;
+  monitor?: Partial<MonitorConfig>;
+  fallback?: Partial<FallbackConfig>;
 };

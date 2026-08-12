@@ -30,8 +30,10 @@ my-app/
 │   │   └── about.tsx         # 关于页
 │   ├── layouts/
 │   │   └── default.tsx       # 默认布局
+│   ├── app.tsx                 # 同构应用外壳
+│   ├── app-shell-plugin.tsx    # 通过 wrapApp 在双端安装外壳
 │   ├── entry-client.tsx      # 客户端入口
-│   ├── entry-server.tsx      # 服务端入口（SSR/SSG 模式）
+│   ├── entry-server.tsx      # 服务端入口（SSR/SSG/ISR 模式）
 │   └── global.css            # 全局样式
 ├── nami.config.ts            # 框架配置文件
 ├── tsconfig.json
@@ -45,6 +47,7 @@ my-app/
 ```typescript
 // nami.config.ts
 import { defineConfig } from '@nami/core';
+import appShellPlugin from './src/app-shell-plugin';
 
 export default defineConfig({
   // ===== 基础信息 =====
@@ -80,7 +83,7 @@ export default defineConfig({
     {
       path: '/dashboard',
       component: './pages/dashboard',
-      renderMode: 'csr',               // 服务端返回空壳 HTML，浏览器端渲染
+      renderMode: 'csr',               // 服务端返回临时骨架 Shell，浏览器端接管渲染
     },
   ],
 
@@ -103,7 +106,7 @@ export default defineConfig({
   // ===== 降级配置 =====
   // SSR 渲染失败时的容错策略
   fallback: {
-    ssrToCSR: true,               // SSR 失败自动降级到 CSR（空壳 HTML + JS）
+    ssrToCSR: true,               // SSR 失败自动降级到 CSR（临时骨架 Shell + JS）
     maxRetries: 1,                // 渲染失败后重试 1 次（应对瞬时故障）
     timeout: 5000,                // 降级流程超时
   },
@@ -136,6 +139,8 @@ export default defineConfig({
   plugins: [
     // 可以是插件实例，如 new NamiCachePlugin({...})
     // 也可以是插件包名字符串，如 '@nami/plugin-monitor'
+    // appShellPlugin 放在最后，使其成为最外层 wrapper。
+    appShellPlugin,
   ],
 });
 ```
@@ -255,8 +260,8 @@ import React, { useState, useEffect } from 'react';
  * CSR 页面不需要 getServerSideProps 或 getStaticProps。
  * 数据在浏览器端通过 useEffect / useClientFetch 获取。
  *
- * 服务端只返回空壳 HTML（<div id="nami-root"></div> + JS），
- * 浏览器下载 JS 后执行 React 渲染。
+ * 服务端返回内含临时骨架的 HTML Shell 与 JS；骨架覆盖 Bundle 下载、
+ * 客户端初始化和首次 React 提交前的等待时间，随后由页面内容替换。
  */
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
@@ -272,18 +277,50 @@ export default function Dashboard() {
 }
 ```
 
-> **什么时候选 CSR？** 不需要 SEO、数据高度个性化（如用户仪表盘）、首屏性能不敏感的页面。CSR 的优势是服务端零负载，空壳 HTML 可以被 CDN 缓存。
+> **什么时候选 CSR？** 不需要 SEO、数据高度个性化（如用户仪表盘）、首屏性能不敏感的页面。CSR 不承担页面 React SSR 负载，带临时骨架的 Shell 可以被 CDN 缓存；路由 Chunk 和业务数据仍应分别提供客户端 loading UI。
 
 ## 4. 客户端入口
+
+先用一个同构插件声明应用外壳：
+
+```tsx
+// src/app.tsx
+import type { ReactNode } from 'react';
+
+export default function App({ children }: { children: ReactNode }) {
+  return <div className="nami-app">{children}</div>;
+}
+
+// src/app-shell-plugin.tsx
+import type { NamiPlugin } from '@nami/shared';
+import App from './app';
+
+const appShellPlugin: NamiPlugin = {
+  name: 'app-shell',
+  setup(api) {
+    api.wrapApp((app) => <App>{app}</App>);
+  },
+};
+
+export default appShellPlugin;
+```
+
+`nami.config.ts` 是服务端和客户端的共享注册源，所以两端会按同一顺序执行 `wrapApp` waterfall。
 
 ```typescript
 // src/entry-client.tsx
 import { initNamiClient } from '@nami/client';
+import { resolveNamiConfig } from '@nami/shared';
+import userConfig from '../nami.config';
+import './global.css';
 
-initNamiClient({
+const config = resolveNamiConfig(userConfig);
+
+void initNamiClient({
+  routes: config.routes,
+  plugins: config.plugins.filter((plugin) => typeof plugin !== 'string'),
+  config,
   containerId: 'nami-root',
-  // 插件会在此阶段初始化
-  // plugins: [...],
 });
 ```
 
@@ -292,21 +329,32 @@ initNamiClient({
 ```typescript
 // src/entry-server.tsx
 import React from 'react';
-import App from './app';
+import type { RenderContext } from '@nami/core';
+import HomePage from './pages/home';
+import AboutPage from './pages/about';
+
+const pageRegistry = {
+  './pages/home': HomePage,
+  './pages/about': AboutPage,
+};
 
 /**
- * 服务端渲染入口函数
- * 框架会在每次 SSR 请求时调用此函数
+ * 唯一的服务端渲染入口协议：根据框架构造的 RenderContext
+ * 返回 React 元素树。
  */
-export function createAppElement(context) {
-  return <App url={context.url} initialData={context.initialData} />;
-}
+export function createAppElement(context: RenderContext): React.ReactElement {
+  const Page = pageRegistry[context.route.component];
+  if (!Page) throw new Error(`未注册服务端页面: ${context.route.component}`);
 
-// 或者使用 renderToHTML 协议（两者二选一）
-// export async function renderToHTML(context, initialData) {
-//   return renderToString(<App />);
-// }
+  return (
+    <React.Suspense fallback={null}>
+      <Page {...(context.initialData ?? {})} />
+    </React.Suspense>
+  );
+}
 ```
+
+应用只负责创建 React 元素树。普通 SSR/SSG/ISR 的 `renderToString()`、Streaming SSR 的流式输出、完整 Document 组装、`asset-manifest.json` 资源注入与 `window.__NAMI_DATA__ = { version: 1, props, degraded, renderMode, routePath }` 注水都由框架负责。`createAppElement(context)` 是唯一入口，页面选择和 React 树创建逻辑应放在这里，应用不自行拼装 Document。服务端入口只返回 `Suspense + Page`；公共 App 外壳由同构 `appShellPlugin` 的 `wrapApp` 在两端按相同注册顺序添加（各环境独立实例）。正常可注水页面会保持同构树；稳定的静态 404 是例外，它在业务 React 树之前短路，不执行 `wrapApp`、不注入 Hydration payload 或客户端 Bundle。
 
 ## 6. CLI 命令
 
@@ -365,12 +413,25 @@ import { useClientFetch } from '@nami/client';
 function ProductList() {
   const { data, loading, error, refetch } = useClientFetch<Product[]>(
     '/api/products',
-    { staleTime: 30000 }, // 30 秒内使用缓存
+    { cacheTime: 30000, staleWhileRevalidate: true },
   );
 
-  if (loading) return <div>加载中...</div>;
-  if (error) return <div>出错了: {error.message}</div>;
-  return <ul>{data?.map(p => <li key={p.id}>{p.name}</li>)}</ul>;
+  // 首次没有数据时展示页面局部骨架。
+  if (loading && data === undefined) {
+    return <div className="product-list-skeleton" role="status">产品列表加载中...</div>;
+  }
+
+  if (error && data === undefined) {
+    return <button onClick={() => void refetch()}>加载失败，点击重试</button>;
+  }
+
+  return (
+    <section>
+      {loading && <p role="status">正在后台刷新，继续显示已有数据...</p>}
+      {error && <p role="alert">刷新失败：{error.message}</p>}
+      <ul>{data?.map(p => <li key={p.id}>{p.name}</li>)}</ul>
+    </section>
+  );
 }
 ```
 

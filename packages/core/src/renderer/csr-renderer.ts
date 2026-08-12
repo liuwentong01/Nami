@@ -4,8 +4,8 @@
  * CSR 是降级链的终点，也是最简单的渲染模式。
  *
  * 工作原理：
- * 服务端只返回一个"空壳" HTML（包含 <div id="nami-root"></div> 和
- * 客户端 JS/CSS 资源引用），所有渲染和数据获取工作都在浏览器端完成。
+ * 服务端返回一个带临时骨架的 HTML Shell（包含 #nami-root 和客户端 JS/CSS
+ * 资源引用），所有真实页面渲染和数据获取工作都在浏览器端完成。
  *
  * 适用场景：
  * - 管理后台、内部系统等不需要 SEO 的页面
@@ -22,21 +22,17 @@
  * - 不利于 SEO（搜索引擎爬虫可能无法执行 JS）
  */
 
-import type {
-  RenderMode,
-  RenderContext,
-  RenderResult,
-  PrefetchResult,
-} from '@nami/shared';
+import type { RenderMode, RenderContext, RenderResult, PrefetchResult } from '@nami/shared';
 import { RenderMode as RenderModeEnum } from '@nami/shared';
 
 import { BaseRenderer } from './base-renderer';
 import type { RendererOptions } from './types';
+import { createCSRRootContainer } from '../html/csr-shell-loading';
 
 /**
  * CSR 渲染器
  *
- * 生成包含客户端资源引用的空壳 HTML，实际渲染工作交给浏览器完成。
+ * 生成包含临时骨架和客户端资源引用的 HTML Shell，实际渲染交给浏览器完成。
  */
 export class CSRRenderer extends BaseRenderer {
   constructor(options: RendererOptions) {
@@ -57,13 +53,13 @@ export class CSRRenderer extends BaseRenderer {
    * 生成一个包含以下内容的 HTML 页面：
    * 1. DOCTYPE 和基础 meta 标签
    * 2. CSS 资源引用（link 标签）
-   * 3. 空的挂载容器 <div id="nami-root"></div>
+   * 3. 带临时 loading 骨架的挂载容器
    * 4. 客户端 JS Bundle 引用（script 标签）
    *
    * 这是一个纯模板操作，不涉及 React 渲染，因此性能稳定且极快。
    *
    * @param context - 渲染上下文
-   * @returns 包含空壳 HTML 的渲染结果
+   * @returns 包含可恢复 loading Shell 的渲染结果
    */
   async render(context: RenderContext): Promise<RenderResult> {
     const timing = this.createRenderTiming();
@@ -73,10 +69,15 @@ export class CSRRenderer extends BaseRenderer {
     // 触发渲染前钩子
     await this.callPluginHook('beforeRender', context);
 
+    const cachedResult = await this.resolvePluginCacheHit(context, timing);
+    if (cachedResult) {
+      return cachedResult;
+    }
+
     timing.renderStart = Date.now();
 
     try {
-      // 生成空壳 HTML
+      // 生成带临时骨架的 CSR HTML Shell
       const html = this.generateShellHTML(context);
 
       timing.renderEnd = Date.now();
@@ -87,18 +88,12 @@ export class CSRRenderer extends BaseRenderer {
         duration: Date.now() - timing.startTime,
       });
 
-      const result = this.createDefaultResult(
-        html,
-        200,
-        RenderModeEnum.CSR,
-        timing,
-        {
-          headers: {
-            // CSR 页面可以被 CDN 短暂缓存（但不宜太长，因为 JS Bundle 更新后需要及时生效）
-            'Cache-Control': 'public, max-age=60, s-maxage=120',
-          },
+      const result = this.createDefaultResult(html, 200, RenderModeEnum.CSR, timing, {
+        headers: {
+          // CSR 页面可以被 CDN 短暂缓存（但不宜太长，因为 JS Bundle 更新后需要及时生效）
+          'Cache-Control': 'public, max-age=60, s-maxage=120',
         },
-      );
+      });
 
       // 触发渲染后钩子
       await this.callPluginHook('afterRender', context, result);
@@ -153,31 +148,26 @@ export class CSRRenderer extends BaseRenderer {
   // ==================== 私有方法 ====================
 
   /**
-   * 生成 CSR 空壳 HTML
+   * 生成 CSR HTML Shell
    *
    * 构建一个最小化但完整的 HTML 文档，包含：
    * - 正确的 DOCTYPE 和字符编码
    * - viewport meta 标签（移动端适配）
    * - 页面标题和描述
    * - CSS 资源链接
-   * - 空的 React 挂载容器
+   * - 带临时骨架的 React 挂载容器
    * - 客户端 JS Bundle（defer 加载）
    *
    * @param context - 渲染上下文
-   * @returns 空壳 HTML 字符串
+   * @returns CSR Shell HTML 字符串
    */
   private generateShellHTML(context: RenderContext): string {
     const containerId = 'nami-root';
 
-    const title =
-      (context.route.meta?.title as string) ??
-      this.config.title ??
-      this.config.appName;
+    const title = (context.route.meta?.title as string) ?? this.config.title ?? this.config.appName;
 
     const description =
-      (context.route.meta?.description as string) ??
-      this.config.description ??
-      '';
+      (context.route.meta?.description as string) ?? this.config.description ?? '';
 
     const { cssLinks, jsScripts } = this.resolveAssets();
 
@@ -193,7 +183,7 @@ export class CSRRenderer extends BaseRenderer {
       cssLinks,
       '</head>',
       '<body>',
-      `  <div id="${containerId}"></div>`,
+      createCSRRootContainer(context.extra.__csr_shell_skeleton, containerId),
       jsScripts,
       '</body>',
       '</html>',

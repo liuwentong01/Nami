@@ -86,7 +86,7 @@ const ARTICLES: Record<string, ArticleRecord> = {
         heading: '1. getStaticPaths 枚举有限空间',
         paragraphs: [
           '动态路由 /content/:slug 无法仅凭模式知道要输出哪些文件，getStaticPaths 因此返回一组 params。',
-          '本例 fallback=false，未声明的 slug 不会在请求时临时生成；当前运行时会把缺失静态文件交给错误隔离，而不是转换为路由级 404。',
+          '本例 fallback=false，未声明的 slug 不会在请求时临时生成；SSGRenderer 会稳定返回无 Hydration 脚本的静态 404，而不是进入 CSR 或错误降级。',
         ],
       },
       {
@@ -197,7 +197,7 @@ export default function ContentArticlePage(props: ContentArticlePageProps = {}) 
         <article className="feature-card">
           <h2>Fallback</h2>
           <p>
-            <code>false</code>，未知 slug 不做运行时生成。
+            <code>false</code>，未知 slug 不做运行时生成并直接返回静态 404。
           </p>
         </article>
       </section>

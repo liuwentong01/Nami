@@ -22,3 +22,5 @@ export { safeStringify, generateDataScript, hydrateData } from './serialize';
 export { Timer, createTimer, measureAsync } from './timer';
 
 export { deepMerge, deepMergeAll } from './deep-merge';
+
+export { resolveNamiConfig } from './resolve-config';

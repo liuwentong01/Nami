@@ -7,7 +7,7 @@
  * - 页面在服务端渲染为完整 HTML，客户端直接展示
  *
  * 查看页面源代码可以看到 HTML 中已包含完整的页面内容，
- * 这与 CSR 模式返回的空壳 HTML 形成鲜明对比。
+ * 这与 CSR 模式只返回临时骨架、没有真实页面内容形成鲜明对比。
  */
 import React from 'react';
 import type { GetServerSidePropsContext, GetServerSidePropsResult } from '@nami/shared';

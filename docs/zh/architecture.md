@@ -24,7 +24,7 @@ packages/
 ├── plugin-cache/     缓存插件
 ├── plugin-monitor/   监控插件
 ├── plugin-request/   请求插件
-├── plugin-skeleton/  骨架屏插件
+├── plugin-skeleton/  CSR/loading 骨架与静态应急兜底插件
 └── plugin-error-boundary/ 错误边界插件
 ```
 
@@ -84,7 +84,7 @@ packages/
   2. 调用 createFallbackRenderer() → 得到 SSRRenderer 实例
   3. SSRRenderer.render() 也失败
   4. 调用 createFallbackRenderer() → 得到 CSRRenderer 实例
-  5. CSRRenderer.render() → 返回空壳 HTML（此时不会再失败，因为不执行 React 渲染）
+  5. CSRRenderer.render() → 返回带临时骨架和客户端 JS 的 HTML Shell（服务端不执行页面 React 渲染）
 ```
 
 **RendererFactory**：`RendererFactory.create(options)` 根据 `RenderMode` 选择具体渲染器实现，是服务端和 CLI 的统一入口。上层代码不需要知道具体是哪个渲染器，只需要调用 `renderer.render(context)`。
@@ -198,17 +198,11 @@ RouteManager
 ### 渲染失败时的降级流程
 
 ```
-renderer.render() 失败
-        │
-        ▼
-检查 context.extra.__skeleton_fallback? → 有则返回骨架屏
-        │ 没有
-        ▼
 DegradationManager.executeWithDegradation()
-  Level 0: 再尝试传入的正常 renderFn
+  Level 0: 执行首次 renderFn
   Level 1: 重试 (maxRetries 次)
-  Level 2: CSR 降级（空壳 HTML + JS/CSS）
-  Level 3: 骨架屏（route.skeleton 配置）
+  Level 2: CSR 降级（临时骨架 HTML Shell + JS/CSS，客户端继续接管）
+  Level 3: 静态应急页（兼容名 Skeleton，无客户端 JS）
   Level 4: 静态 HTML（fallback.staticHTML）
   Level 5: 503 服务不可用
 ```
@@ -236,20 +230,25 @@ NamiBuilder.build('production')
     │
     ├── 5. 创建 Webpack 配置
     │      ├── createClientConfig()  → dist/client/
-    │      ├── createServerConfig()  → dist/server/
-    │      └── createSSGConfig()     → 复用 server 配置
+    │      └── createServerConfig()  → dist/server/（SSR/SSG/ISR 需要）
     │
     ├── 6. pluginManager.runWaterfallHook('modifyWebpackConfig', config)
     │
     ├── 7. 并行执行 webpack 编译
     │
-    ├── 8. SSG 路由 → generateStaticPages()
+    ├── 8. SSG/ISR 路由 → generateStaticPages()
     │      ├── require('dist/server/entry-server.js')
-    │      ├── 对每个静态路径调用 renderToString
-    │      └── 写入 dist/static/xxx/index.html
+    │      ├── 装配 ModuleLoader、asset manifest 与 SSGRenderer
+    │      ├── 调用 SSGRenderer.generateStatic(routes)
+    │      ├── createAppElement(context) → NamiDataProvider → wrapApp waterfall
+    │      │      → renderToString → 组装 Document/注水 envelope
+    │      └── 写入 dist/static/xxx.html
     │
     └── 9. 写入 nami-manifest.json (路由→渲染模式映射)
 ```
+
+`createSSGConfig()` 虽然仍被包导出，但不在这条构建主链中；静态生成不是第三次
+Webpack 编译，而是 client/server 编译成功后调用 `SSGRenderer.generateStatic()`。
 
 ### 关键构建产物
 
@@ -266,12 +265,12 @@ dist/
 │   └── asset-manifest.json    # 文件名 → URL 映射
 │
 ├── server/                    # 服务端产物
-│   ├── entry-server.js        # 服务端入口（含 createAppElement / renderToHTML）
+│   ├── entry-server.js        # 服务端入口（导出 createAppElement）
 │   └── [page-chunks].js       # 页面级 server 代码
 │
 ├── static/                    # SSG / ISR 预生成 HTML
 │   ├── index.html
-│   └── xxx/index.html
+│   └── xxx.html
 │
 └── nami-manifest.json         # 路由→渲染模式 映射表
 ```
@@ -353,9 +352,9 @@ dist/
 │   └── pages/product-detail.js
 │
 ├── static/
-│   ├── docs/index.html
-│   ├── products/1001/index.html
-│   └── products/1002/index.html
+│   ├── docs.html
+│   ├── products/1001.html
+│   └── products/1002.html
 │
 └── nami-manifest.json
 ```
@@ -416,17 +415,17 @@ export { matchPath } from "../../../packages/core/dist/router/path-matcher";
 
 这一层是给 Node.js 运行时用的，不会发给浏览器：
 
-- `entry-server.js`：服务端统一入口，承载 `renderToHTML()` 等能力
+- `entry-server.js`：服务端统一入口，导出唯一的渲染契约 `createAppElement(context)`，负责根据 `RenderContext` 创建 React 元素树
 - `pages/*.js`：页面级 server 模块，供 `ModuleLoader` 加载 `getServerSideProps`、`getStaticProps`、`getStaticPaths`
 
-这也是为什么 SSR / SSG / ISR 路由都需要 server bundle：SSR / ISR 在运行时执行服务端渲染或重验证，SSG 在构建阶段也要通过 server bundle 执行页面模块和数据预取函数。
+框架拿到元素树后统一负责普通 SSR/SSG/ISR 的 `renderToString()` 或 Streaming SSR、完整 Document 组装、manifest 资源注入和数据注水。这也是为什么 SSR / SSG / ISR 路由都需要 server bundle：SSR / ISR 在运行时执行服务端渲染或重验证，SSG 在构建阶段也要通过 server bundle 执行页面模块和数据预取函数。
 
 #### 5) `dist/static/`
 
 这是构建结束后额外生成出来的 HTML：
 
-- `/docs/index.html`：来自 SSG 路由 `/docs`
-- `/products/1001/index.html`、`/products/1002/index.html`：来自 ISR 路由 `/products/:id` 的首批预生成路径
+- `/docs.html`：来自 SSG 路由 `/docs`
+- `/products/1001.html`、`/products/1002.html`：来自 ISR 路由 `/products/:id` 的首批预生成路径
 
 如果 `getStaticPaths()` 返回的是：
 
@@ -543,9 +542,16 @@ getServerSideProps()
 context.initialData = { title, items }
    │
    ▼
-generateDataScript(data)           window.__NAMI_DATA__ = { title, items }
-   │ (XSS 安全序列化:                     │ (JSON 反序列化为 JS 对象)
-   │  将 </script> 等危险字符转义)         │
+createHydrationData(context)        window.__NAMI_DATA__ = {
+   │                                │   version: 1,
+   │ { version, props, degraded,    │   props: { title, items },
+   │   renderMode, routePath }       │   degraded: false,
+   ▼                                │   renderMode: 'ssr',
+                                    │   routePath: '/articles'
+                                    │ }
+generateDataScript(envelope)        │ (读取 serverData.props)
+   │ (XSS 安全序列化:               │
+   │  将 </script> 等危险字符转义)   │
    ▼                                     ▼
 <script>window.__NAMI_DATA__=...</script>  hydrateData('__NAMI_DATA__')
    │                                     │ (从 window 上读取数据)
@@ -554,7 +560,13 @@ renderToString(<App data={data} />)       hydrateRoot(<App data={data} />)
    │ (服务端用数据渲染出完整 HTML)          │ (客户端用相同数据重新执行一遍 React)
 ```
 
-> **为什么需要 XSS 安全序列化？** 因为数据会被嵌入到 `<script>` 标签中。如果数据中包含 `</script>` 字符串，会导致 HTML 解析器提前关闭 script 标签，可能被利用执行恶意代码。`generateDataScript()` 会转义这些危险字符。
+`BaseRenderer.createHydrationData()` 是正常可注水服务端 HTML 路径共享的协议边界：
+`version` 标识 wire protocol 版本，`props` 保存页面数据，`degraded` 标识降级状态，`renderMode` 决定客户端使用
+`hydrateRoot` 还是 `createRoot`，`routePath` 保存首屏路径。客户端只读取
+`serverData.props` 作为页面数据；旧裸 props 会被兼容层归一化，未知未来版本会安全回退到 CSR。
+稳定静态 404 在业务树之前短路，不注入这份 payload，也不加载客户端 Bundle。
+
+> **为什么需要 XSS 安全序列化？** 因为 envelope 会被嵌入到 `<script>` 标签中。如果数据中包含 `</script>` 字符串，会导致 HTML 解析器提前关闭 script 标签，可能被利用执行恶意代码。`generateDataScript()` 会转义这些危险字符。
 
 ### 服务端代码剥离
 
@@ -575,7 +587,7 @@ renderToString(<App data={data} />)       hydrateRoot(<App data={data} />)
 | `Promise.allSettled` 执行并行钩子 | 确保所有插件都有执行机会，单个失败不影响整体 |
 | 路由优先级评分（而非注册顺序） | 静态路由 > 动态路由 > 通配，符合直觉且不依赖注册顺序 |
 | Worker `worker:ready` IPC 而非 `online` | `online` 只表示进程启动，不保证端口已绑定 |
-| 降级管理器接受 `assetManifest` | CSR fallback 需要正确的 JS/CSS 引用，否则页面空白 |
+| 降级管理器接受 `assetManifest` | CSR fallback 需要正确的 JS/CSS 引用，否则客户端无法接管，页面会停留在临时骨架 |
 
 ---
 

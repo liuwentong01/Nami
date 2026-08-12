@@ -213,4 +213,40 @@ describe('SSRRenderer', () => {
       expect.objectContaining({ html: expect.any(String) }),
     );
   });
+
+  it('插件缓存命中时在数据预取和 React 渲染前短路', async () => {
+    const cachedHTML = '<!DOCTYPE html><html><body>cached</body></html>';
+    const callHook = vi.fn(async (hookName: string, context: ReturnType<typeof createMockRenderContext>) => {
+      if (hookName === 'beforeRender') {
+        context.extra.__cache_hit = true;
+        context.extra.__cache_content = cachedHTML;
+        context.extra.__cache_status_code = 200;
+        context.extra.__cache_headers = {
+          'Cache-Control': 'public, max-age=30',
+        };
+      }
+    });
+    const appElementFactory = vi.fn(() => 'should-not-render');
+    const renderer = new SSRRenderer({
+      config,
+      pluginManager: { callHook },
+      appElementFactory,
+    });
+    const context = createMockRenderContext({
+      route: createMockRoute({ renderMode: RenderMode.SSR }),
+    });
+
+    const result = await renderer.render(context);
+
+    expect(result.html).toBe(cachedHTML);
+    expect(result.meta.cacheHit).toBe(true);
+    expect(result.headers['X-Nami-Plugin-Cache']).toBe('HIT');
+    expect(result.headers['Cache-Control']).toBe('public, max-age=30');
+    expect(appElementFactory).not.toHaveBeenCalled();
+    expect(callHook).toHaveBeenCalledWith(
+      'afterRender',
+      context,
+      expect.objectContaining({ html: cachedHTML }),
+    );
+  });
 });

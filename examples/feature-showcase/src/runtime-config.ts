@@ -30,26 +30,12 @@ export function createRuntimeConfig(plugins: NamiPlugin[] = []): NamiConfig {
     },
     webpack: {
       client(config) {
-        // 当前 @nami/webpack 的 CSS rule 固定包含 postcss-loader，但该 loader 尚未
-        // 声明为包依赖。Showcase 不依赖 PostCSS 转换，因此在示例层移除它，保证
-        // 安装现有 lockfile 后即可构建，同时保留 css-loader 与 CSS 提取能力。
-        const rulesWithoutOptionalPostCSS = (config.module?.rules ?? []).map((rule) => {
-          if (!rule || typeof rule !== 'object' || !('use' in rule) || !Array.isArray(rule.use)) {
-            return rule;
-          }
-
-          return {
-            ...rule,
-            use: rule.use.filter((loader) => loader !== 'postcss-loader'),
-          };
-        });
-
         return {
           ...config,
           module: {
             ...config.module,
             rules: [
-              ...rulesWithoutOptionalPostCSS,
+              ...(config.module?.rules ?? []),
               {
                 resourceQuery: /service-worker/,
                 type: 'asset/resource',
@@ -94,7 +80,7 @@ export function createRuntimeConfig(plugins: NamiPlugin[] = []): NamiConfig {
       timeout: 6000,
       maxRetries: 1,
       staticHTML:
-        '<!doctype html><html><body><h1>Nami 暂时不可用</h1><p>请稍后刷新。</p></body></html>',
+        '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Nami 暂时不可用</title></head><body><main role="alert"><h1>Nami 暂时不可用</h1><p>请稍后刷新。</p><a href="">重新加载</a></main></body></html>',
     },
     plugins,
     title: 'Nami Feature Showcase',

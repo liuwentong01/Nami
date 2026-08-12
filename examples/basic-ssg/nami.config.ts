@@ -13,37 +13,8 @@
  *
  * @see https://nami.dev/docs/config
  */
-import { defineConfig, RenderMode } from '@nami/core';
+import { defineConfig } from '@nami/core';
+import { createRuntimeConfig } from './src/runtime-config';
 
-export default defineConfig({
-  appName: 'nami-ssg-demo',
-  defaultRenderMode: RenderMode.SSG,
-
-  routes: [
-    {
-      path: '/',
-      component: './pages/home',
-      renderMode: RenderMode.SSG,
-      getStaticProps: 'getStaticProps',
-    },
-    {
-      path: '/blog',
-      component: './pages/blog',
-      renderMode: RenderMode.SSG,
-      getStaticProps: 'getStaticProps',
-    },
-    {
-      path: '/blog/:slug',
-      component: './pages/blog-post',
-      renderMode: RenderMode.SSG,
-      getStaticProps: 'getStaticProps',
-      getStaticPaths: 'getStaticPaths',
-    },
-  ],
-
-  server: {
-    port: 3003,
-  },
-
-  plugins: [],
-});
+/** CLI/构建端入口；浏览器只读取 client-safe 的 runtime-config。 */
+export default defineConfig(createRuntimeConfig());

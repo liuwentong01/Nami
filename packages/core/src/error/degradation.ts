@@ -13,10 +13,10 @@
  *   渲染失败后自动重试一次（短暂故障可能恢复）
  *
  * Level 2 - CSR 降级
- *   SSR 失败后返回空壳 HTML，由客户端 JS 接管渲染
+ *   SSR 失败后返回带 loading 骨架的 CSR Shell，由客户端 JS 接管渲染
  *
- * Level 3 - 骨架屏
- *   返回预渲染的骨架屏 HTML，用户体感为"加载中"
+ * Level 3 - 静态应急兜底（兼容枚举名 Skeleton）
+ *   可恢复的 CSR 也不可用时，返回不依赖客户端运行时的应急内容
  *
  * Level 4 - 静态 HTML
  *   返回预配置的兜底静态 HTML（可能是上一次成功的快照）
@@ -31,20 +31,19 @@
  */
 
 import type { RenderContext, RenderResult, FallbackConfig } from '@nami/shared';
-import {
-  DegradationLevel,
-  RenderMode,
-  NamiError,
-  ErrorCode,
-  ErrorSeverity,
-  createLogger,
-  createTimer,
-} from '@nami/shared';
+import { DegradationLevel, RenderMode, createLogger, createTimer } from '@nami/shared';
 import type { AssetManifest } from '../html/script-injector';
 import { ScriptInjector } from '../html/script-injector';
+import { createCSRRootContainer, resolveStaticEmergencyHTML } from '../html/csr-shell-loading';
 
 /** 降级管理器日志 */
 const logger = createLogger('@nami/core:degradation');
+
+/**
+ * 降级页面不能进入浏览器、CDN 或 ISR 页面缓存。
+ * 否则一次瞬时渲染故障可能把 CSR Shell、静态应急页甚至 503 固化为正常页面。
+ */
+const NO_STORE_CACHE_CONTROL = 'private, no-store, max-age=0';
 
 /**
  * 渲染函数类型
@@ -179,8 +178,17 @@ export class DegradationManager {
           const result = await renderFn(context);
 
           // 标记降级信息
+          const retryResultWasAlreadyDegraded = result.meta.degraded;
           result.meta.degraded = true;
           result.meta.degradeReason = `重试第 ${attempt} 次成功`;
+          result.headers['X-Nami-Degraded'] = 'retry';
+          context.extra.__retry_result_cacheable = !retryResultWasAlreadyDegraded;
+
+          // 如果重试只得到数据层的部分降级结果，仍不能进入页面缓存。
+          if (retryResultWasAlreadyDegraded) {
+            result.headers['Cache-Control'] = NO_STORE_CACHE_CONTROL;
+            result.cacheControl = undefined;
+          }
 
           logger.info(`Level 1: 重试成功（第 ${attempt} 次）`, {
             url: context.url,
@@ -232,14 +240,32 @@ export class DegradationManager {
       }
     }
 
-    // ===== Level 3: 骨架屏 =====
-    if (context.route.skeleton) {
+    // ===== Level 3: 静态应急兜底（保留 Skeleton 枚举以兼容历史逻辑） =====
+    // plugin-skeleton 或其他错误插件会在 onRenderError 中写入候选静态 HTML。
+    // 它只是本级的候选内容，不能越过重试和 CSR 抢占整个降级链。
+    const errorBoundarySkeletonHTML =
+      context.extra.__degradation_level === DegradationLevel.Skeleton
+        ? context.extra.__degradation_html
+        : undefined;
+    const pluginSkeletonHTML =
+      [context.extra.__skeleton_fallback, errorBoundarySkeletonHTML]
+        .find(
+          (candidate): candidate is string =>
+            typeof candidate === 'string' && candidate.trim().length > 0,
+        )
+        ?.trim() ?? '';
+
+    if (pluginSkeletonHTML || context.route.skeleton) {
       try {
-        logger.debug('Level 3: 返回骨架屏', { url: context.url });
+        logger.debug('Level 3: 返回静态应急兜底', { url: context.url });
 
-        const result = this.createSkeletonFallback(context);
+        const result = this.createSkeletonFallback(context, pluginSkeletonHTML || undefined);
 
-        logger.info('Level 3: 骨架屏返回成功', {
+        if (pluginSkeletonHTML) {
+          context.extra.__skeleton_fallback_used = true;
+        }
+
+        logger.info('Level 3: 静态应急兜底返回成功', {
           url: context.url,
           duration: timer.total(),
         });
@@ -253,7 +279,7 @@ export class DegradationManager {
         const err = error instanceof Error ? error : new Error(String(error));
         errors.push(err);
 
-        logger.warn('Level 3: 骨架屏降级失败', {
+        logger.warn('Level 3: 静态应急兜底失败', {
           url: context.url,
           error: err.message,
         });
@@ -305,8 +331,8 @@ export class DegradationManager {
   /**
    * 创建 CSR 降级响应
    *
-   * 返回一个空壳 HTML 页面，只包含必要的 JS 入口文件引用。
-   * 浏览器加载 JS 后在客户端完成完整渲染。
+   * 返回带临时 loading 骨架的 HTML Shell，并保留必要的 JS 入口文件引用。
+   * 浏览器加载 JS 后在客户端完成完整渲染并替换骨架。
    *
    * @param context - 渲染上下文
    * @returns CSR 降级的渲染结果
@@ -320,20 +346,26 @@ export class DegradationManager {
       '<head>',
       '  <meta charset="utf-8">',
       '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
+      '  <meta name="renderer" content="csr">',
       cssLinks,
       '</head>',
       '<body>',
-      '  <div id="nami-root"></div>',
+      createCSRRootContainer(context.extra.__csr_shell_skeleton),
       jsScripts,
       '</body>',
       '</html>',
-    ].filter(Boolean).join('\n');
+    ]
+      .filter(Boolean)
+      .join('\n');
 
     return {
       html,
       statusCode: 200,
       headers: {
+        'Content-Type': 'text/html; charset=utf-8',
         'X-Nami-Degraded': 'csr-fallback',
+        'X-Nami-Render-Mode': RenderMode.CSR,
+        'Cache-Control': NO_STORE_CACHE_CONTROL,
       },
       meta: {
         renderMode: RenderMode.CSR,
@@ -346,17 +378,21 @@ export class DegradationManager {
   }
 
   /**
-   * 创建骨架屏降级响应
+   * 创建静态应急兜底响应
    *
-   * 使用路由配置中定义的骨架屏组件作为降级内容。
-   * 如果骨架屏组件未配置或加载失败，此方法不会被调用。
+   * 使用插件准备的静态 HTML 或内置应急内容。此级不再表示"页面仍在加载"，
+   * 且不会依赖客户端 JS 恢复；历史枚举、响应头和值保持兼容。
    *
    * @param context - 渲染上下文
-   * @returns 骨架屏渲染结果
+   * @returns 静态应急渲染结果
    */
-  private createSkeletonFallback(context: RenderContext): RenderResult {
-    // 骨架屏内容（实际项目中应从组件渲染或静态文件加载）
-    const html = [
+  private createSkeletonFallback(
+    context: RenderContext,
+    pluginSkeletonHTML?: string,
+  ): RenderResult {
+    // route.skeleton 当前只负责开启本级；没有插件内容时使用内置应急页。
+    // 插件候选必须符合被动 HTML 允许列表；不安全内容回退到 Core 静态应急文档。
+    const builtInEmergencyHTML = [
       '<!DOCTYPE html>',
       '<html>',
       '<head>',
@@ -365,7 +401,12 @@ export class DegradationManager {
       '</head>',
       '<body>',
       '  <div id="nami-root">',
-      '    <div class="nami-skeleton" style="padding:20px;">',
+      '    <main data-nami-fallback="static-emergency" role="alert" style="padding:20px;max-width:720px;margin:0 auto;">',
+      '      <h1 style="font-size:24px;margin:0 0 8px;">页面暂时不可用</h1>',
+      '      <p style="color:#666;margin:0 0 16px;">页面渲染未能完成，请稍后重试。</p>',
+      '      <a href="" style="color:#2563eb;">重新加载</a>',
+      '    </main>',
+      '    <div class="nami-skeleton" aria-hidden="true" style="padding:20px;max-width:720px;margin:0 auto;">',
       '      <div style="height:24px;width:60%;background:#f0f0f0;border-radius:4px;margin-bottom:16px;"></div>',
       '      <div style="height:16px;width:100%;background:#f0f0f0;border-radius:4px;margin-bottom:12px;"></div>',
       '      <div style="height:16px;width:80%;background:#f0f0f0;border-radius:4px;margin-bottom:12px;"></div>',
@@ -375,18 +416,39 @@ export class DegradationManager {
       '</body>',
       '</html>',
     ].join('\n');
+    const html = pluginSkeletonHTML
+      ? resolveStaticEmergencyHTML(
+          [
+            '<!DOCTYPE html>',
+            '<html lang="zh-CN">',
+            '<head>',
+            '  <meta charset="utf-8">',
+            '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
+            '  <title>页面暂时不可用</title>',
+            '</head>',
+            '<body>',
+            pluginSkeletonHTML,
+            '</body>',
+            '</html>',
+          ].join('\n'),
+        )
+      : builtInEmergencyHTML;
 
     return {
       html,
       statusCode: 200,
       headers: {
+        'Content-Type': 'text/html; charset=utf-8',
         'X-Nami-Degraded': 'skeleton',
+        'X-Nami-Render-Mode': 'skeleton-fallback',
+        'X-Nami-Fallback-Type': 'static-emergency',
+        'Cache-Control': NO_STORE_CACHE_CONTROL,
       },
       meta: {
         renderMode: RenderMode.CSR,
         duration: 0,
         degraded: true,
-        degradeReason: '降级到骨架屏',
+        degradeReason: '降级到静态应急兜底',
         dataFetchDuration: 0,
       },
     };
@@ -402,15 +464,14 @@ export class DegradationManager {
    * @param context - 渲染上下文
    * @returns 静态 HTML 渲染结果
    */
-  private createStaticHTMLFallback(
-    staticHTML: string,
-    context: RenderContext,
-  ): RenderResult {
+  private createStaticHTMLFallback(staticHTML: string, context: RenderContext): RenderResult {
     return {
       html: staticHTML,
       statusCode: 200,
       headers: {
+        'Content-Type': 'text/html; charset=utf-8',
         'X-Nami-Degraded': 'static-html',
+        'Cache-Control': NO_STORE_CACHE_CONTROL,
       },
       meta: {
         renderMode: RenderMode.CSR,
@@ -453,8 +514,10 @@ export class DegradationManager {
       html,
       statusCode: 503,
       headers: {
+        'Content-Type': 'text/html; charset=utf-8',
         'X-Nami-Degraded': 'service-unavailable',
         'Retry-After': '30',
+        'Cache-Control': NO_STORE_CACHE_CONTROL,
       },
       meta: {
         renderMode: RenderMode.CSR,

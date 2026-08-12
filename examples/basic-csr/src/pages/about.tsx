@@ -18,10 +18,18 @@ export default function AboutPage() {
       <section className="tech-stack">
         <h2>技术栈</h2>
         <ul>
-          <li><strong>Nami 框架</strong> — 集团级前端框架，支持多渲染模式</li>
-          <li><strong>React 18</strong> — 用户界面库，支持并发特性</li>
-          <li><strong>TypeScript</strong> — 类型安全的 JavaScript 超集</li>
-          <li><strong>Webpack 5</strong> — 模块打包工具</li>
+          <li>
+            <strong>Nami 框架</strong> — 集团级前端框架，支持多渲染模式
+          </li>
+          <li>
+            <strong>React 18</strong> — 用户界面库，支持并发特性
+          </li>
+          <li>
+            <strong>TypeScript</strong> — 类型安全的 JavaScript 超集
+          </li>
+          <li>
+            <strong>Webpack 5</strong> — 模块打包工具
+          </li>
         </ul>
       </section>
 
@@ -30,7 +38,7 @@ export default function AboutPage() {
         <div className="mode-list">
           <div className="mode-item mode-active">
             <h3>CSR — 客户端渲染</h3>
-            <p>当前示例所使用的模式。服务端返回空壳 HTML，浏览器下载 JS 后执行渲染。</p>
+            <p>当前示例所使用的模式。服务端返回临时骨架 Shell，浏览器下载 JS 后渲染真实页面。</p>
           </div>
           <div className="mode-item">
             <h3>SSR — 服务端渲染</h3>

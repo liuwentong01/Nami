@@ -240,6 +240,10 @@ export async function getStaticProps(
 ): Promise<GetStaticPropsResult<ProductDetailPageProps>> {
   const { id } = context.params;
 
+  if (!id) {
+    return { notFound: true };
+  }
+
   /** 模拟 API 请求 */
   await new Promise((resolve) => setTimeout(resolve, 120));
 

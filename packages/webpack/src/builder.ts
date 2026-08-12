@@ -18,7 +18,7 @@
  * ├── [并行] Client Build → dist/client/
  * ├── [并行] Server Build → dist/server/ (如有 SSR/ISR 路由)
  * │
- * ├── [串行] SSG Generate → dist/static/ (如有 SSG/ISR 路由) // TODO 这里为什么是串行
+ * ├── [串行] SSG Generate → dist/static/ (依赖 Client/Server Bundle，故编译完成后执行)
  * │
  * └── 生成 nami-manifest.json
  * ```
@@ -32,8 +32,10 @@ import {
   RenderMode,
   createLogger,
   NAMI_MANIFEST_FILENAME,
+  ASSET_MANIFEST_FILENAME,
 } from '@nami/shared';
-import { ModuleLoader, PluginLoader, PluginManager } from '@nami/core';
+import { ModuleLoader, PluginLoader, PluginManager, SSGRenderer } from '@nami/core';
+import type { AppElementFactory, AssetManifest } from '@nami/core';
 import path from 'path';
 import fs from 'fs';
 import { createClientConfig } from './configs/client.config';
@@ -49,23 +51,6 @@ function isOutsideDirectory(relativePath: string): boolean {
   return relativePath === '..' || relativePath.startsWith(`..${path.sep}`);
 }
 
-// 确保目标路径位于指定目录内，防止通过 ../ 或绝对路径写到目录外。
-function assertPathInsideDirectory(
-  baseDir: string,
-  targetPath: string,
-  description: string,
-): string {
-  const resolvedBase = path.resolve(baseDir);
-  const resolvedTarget = path.resolve(targetPath);
-  const relative = path.relative(resolvedBase, resolvedTarget);
-
-  if (isOutsideDirectory(relative) || path.isAbsolute(relative)) {
-    throw new Error(`${description} 不能超出目标目录: ${resolvedTarget}`);
-  }
-
-  return resolvedTarget;
-}
-
 // 解析构建输出目录，并禁止输出到项目外、项目根、.git 或 node_modules。
 function resolveSafeOutDir(projectRoot: string, configuredOutDir: string): string {
   if (typeof configuredOutDir !== 'string' || configuredOutDir.trim().length === 0) {
@@ -78,26 +63,16 @@ function resolveSafeOutDir(projectRoot: string, configuredOutDir: string): strin
   const topLevelDir = relative.split(path.sep)[0];
 
   if (
-    relative === ''
-    || isOutsideDirectory(relative)
-    || path.isAbsolute(relative)
-    || topLevelDir === '.git'
-    || topLevelDir === 'node_modules'
+    relative === '' ||
+    isOutsideDirectory(relative) ||
+    path.isAbsolute(relative) ||
+    topLevelDir === '.git' ||
+    topLevelDir === 'node_modules'
   ) {
     throw new Error(`outDir 必须位于项目内的安全子目录，当前值: ${configuredOutDir}`);
   }
 
   return resolvedOutDir;
-}
-
-// 根据路由路径生成 SSG HTML 输出路径，并确保仍在 static 输出目录内。
-function resolveStaticOutputPath(staticOutputDir: string, actualPath: string): string {
-  const outputPath = path.join(
-    staticOutputDir,
-    actualPath === '/' ? 'index.html' : `${actualPath}/index.html`,
-  );
-
-  return assertPathInsideDirectory(staticOutputDir, outputPath, `SSG 输出路径 "${actualPath}"`);
 }
 
 /**
@@ -231,6 +206,12 @@ export class NamiBuilder {
         };
       }
 
+      // 所有需要 server bundle 的项目都在构建期校验唯一入口协议，
+      // 避免 SSR-only 项目到 nami start 才发现仍在导出旧 API。
+      if (tasks.some((task) => task.type === 'server')) {
+        this.resolveBuiltAppElementFactory();
+      }
+
       // 3. 执行 SSG 静态生成（需要 Server Bundle 已就绪）
       this.ssgErrors = [];
       const ssgTask = tasks.find((t) => t.type === 'ssg');
@@ -279,17 +260,18 @@ export class NamiBuilder {
     const isDev = mode === 'development';
     await this.prepareBuildContext(isDev);
 
-    const rawConfig = target === 'server'
-      ? createServerConfig({
-          config: this.config,
-          projectRoot: this.projectRoot,
-          isDev,
-        })
-      : createClientConfig({
-          config: this.config,
-          projectRoot: this.projectRoot,
-          isDev,
-        });
+    const rawConfig =
+      target === 'server'
+        ? createServerConfig({
+            config: this.config,
+            projectRoot: this.projectRoot,
+            isDev,
+          })
+        : createClientConfig({
+            config: this.config,
+            projectRoot: this.projectRoot,
+            isDev,
+          });
 
     return await this.applyWebpackConfigEnhancers(rawConfig, target, isDev, options);
   }
@@ -326,8 +308,8 @@ export class NamiBuilder {
     tasks.push({ type: 'client', config: clientConfig });
 
     // 检查是否需要服务端 Bundle
-    const needsServerBundle = routes.some(
-      (route: NamiRoute) => NEEDS_SERVER_BUNDLE.includes(route.renderMode),
+    const needsServerBundle = routes.some((route: NamiRoute) =>
+      NEEDS_SERVER_BUNDLE.includes(route.renderMode),
     );
     if (needsServerBundle) {
       const serverConfig = await this.applyWebpackConfigEnhancers(
@@ -345,7 +327,8 @@ export class NamiBuilder {
 
     // 检查是否需要 SSG
     let ssgRoutes = routes.filter(
-      (route: NamiRoute) => route.renderMode === RenderMode.SSG || route.renderMode === RenderMode.ISR,
+      (route: NamiRoute) =>
+        route.renderMode === RenderMode.SSG || route.renderMode === RenderMode.ISR,
     );
     if (options.ssgRoutes && options.ssgRoutes.length > 0) {
       const ssgRouteSet = new Set(options.ssgRoutes);
@@ -380,10 +363,9 @@ export class NamiBuilder {
 
     await this.pluginManager.registerPlugins(resolvedPlugins);
 
-    const modifiedRoutes = await this.pluginManager.runWaterfallHook(
-      'modifyRoutes',
-      [...this.config.routes],
-    );
+    const modifiedRoutes = await this.pluginManager.runWaterfallHook('modifyRoutes', [
+      ...this.config.routes,
+    ]);
 
     // modifiedRoutes 示例：插件可能追加路由，或把已有路由改成 SSG/SSR/ISR。
     // [
@@ -412,7 +394,7 @@ export class NamiBuilder {
    * - 所有构建：添加进度条插件（显示构建进度）
    * - 客户端构建额外添加：
    *   - NamiManifestPlugin：生成资源清单，供服务端渲染时引用正确的 JS/CSS 路径
-   *   - NamiHtmlInjectPlugin：为 CSR 路由生成 HTML 模板（仅当存在 CSR 路由时）
+   *   - NamiHtmlInjectPlugin：存在 CSR 路由时生成 index.html，并始终生成 emergency.html
    *
    * @param config - 原始 Webpack 配置
    * @param name - 构建任务名称（'client' | 'server'）
@@ -427,15 +409,18 @@ export class NamiBuilder {
     // 客户端构建：添加资源清单和 HTML 模板
     if (name === 'client') {
       plugins.push(new NamiManifestPlugin());
-      // CSR 模式需要 HTML 模板
-      const hasCSR = this.config.routes.some((route: NamiRoute) => route.renderMode === RenderMode.CSR);
-      if (hasCSR) {
-        plugins.push(
-          new NamiHtmlInjectPlugin({
-            title: this.config.title || this.config.appName,
-          }),
-        );
-      }
+      // CSR 模式需要 index.html；emergency.html 则始终产出，供反代/CDN 在
+      // Node 服务完全不可达时使用。
+      const hasCSR = this.config.routes.some(
+        (route: NamiRoute) => route.renderMode === RenderMode.CSR,
+      );
+      plugins.push(
+        new NamiHtmlInjectPlugin({
+          title: this.config.title || this.config.appName,
+          emitIndex: hasCSR,
+          staticEmergencyHTML: this.config.fallback.staticHTML,
+        }),
+      );
     }
 
     return { ...config, plugins };
@@ -459,19 +444,17 @@ export class NamiBuilder {
       };
     }
 
-    const customModifier = name === 'client'
-      ? this.config.webpack.client
-      : this.config.webpack.server;
+    const customModifier =
+      name === 'client' ? this.config.webpack.client : this.config.webpack.server;
     if (customModifier) {
       config = customModifier(config);
     }
 
     if (this.pluginManager) {
-      config = await this.pluginManager.runWaterfallHook(
-        'modifyWebpackConfig',
-        config,
-        { isServer: name === 'server', isDev },
-      );
+      config = await this.pluginManager.runWaterfallHook('modifyWebpackConfig', config, {
+        isServer: name === 'server',
+        isDev,
+      });
     }
 
     if (options.analyze) {
@@ -561,14 +544,20 @@ export class NamiBuilder {
           // Webpack 5 的 stats.toJson() 返回的 errors/warnings 可能是字符串或对象
           const info = stats.toJson({ errors: true, warnings: true });
           if (info.errors) {
-            errors.push(...info.errors.map((error: string | { message?: string }) => (
-              typeof error === 'string' ? error : (error.message ?? 'Unknown webpack error')
-            )));
+            errors.push(
+              ...info.errors.map((error: string | { message?: string }) =>
+                typeof error === 'string' ? error : (error.message ?? 'Unknown webpack error'),
+              ),
+            );
           }
           if (info.warnings) {
-            warnings.push(...info.warnings.map((warning: string | { message?: string }) => (
-              typeof warning === 'string' ? warning : (warning.message ?? 'Unknown webpack warning')
-            )));
+            warnings.push(
+              ...info.warnings.map((warning: string | { message?: string }) =>
+                typeof warning === 'string'
+                  ? warning
+                  : (warning.message ?? 'Unknown webpack warning'),
+              ),
+            );
           }
         }
 
@@ -581,15 +570,49 @@ export class NamiBuilder {
   }
 
   /**
+   * 解析并校验编译后的服务端入口。
+   *
+   * 同一进程可能连续执行多次构建，因此读取前清除 require cache，确保拿到
+   * 本次 compilation 产出的 createAppElement，而不是上一轮 bundle。
+   */
+  private resolveBuiltAppElementFactory(): {
+    appElementFactory: AppElementFactory;
+    serverBundlePath: string;
+  } {
+    const outDir = resolveSafeOutDir(this.projectRoot, this.config.outDir);
+    const serverBundlePath = path.resolve(outDir, 'server', 'entry-server.js');
+
+    if (!fs.existsSync(serverBundlePath)) {
+      throw new Error(
+        '构建缺少 dist/server/entry-server.js；请创建 src/entry-server 并导出 createAppElement(context)',
+      );
+    }
+
+    const resolvedBundlePath = require.resolve(serverBundlePath);
+    delete require.cache[resolvedBundlePath];
+
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const serverBundle = require(resolvedBundlePath) as {
+      createAppElement?: unknown;
+    };
+    if (typeof serverBundle.createAppElement !== 'function') {
+      throw new Error(
+        '服务端入口必须导出 createAppElement(context)，旧的 renderToHTML 协议已不再支持',
+      );
+    }
+
+    return {
+      appElementFactory: serverBundle.createAppElement as AppElementFactory,
+      serverBundlePath,
+    };
+  }
+
+  /**
    * 执行 SSG 静态页面生成
    *
-   * 在 Client/Server Webpack 编译完成后执行，从 server bundle 中加载页面模块，
-   * 遍历所有 SSG/ISR 路由执行数据预取和 HTML 渲染，将结果写入 dist/static/ 目录。
-   *
-   * 渲染策略（按优先级）：
-   * 1. serverBundle.renderToHTML() — server bundle 导出的统一渲染入口（推荐）
-   * 2. pageModule.render() / pageModule.default() — 页面级渲染函数
-   * 3. 兜底 HTML Shell — 仅包含数据注入和客户端 JS 引用，由客户端完成渲染
+   * 在 Client/Server Webpack 编译完成后执行，并复用 core 的 SSGRenderer：
+   * 页面模块负责 getStaticPaths/getStaticProps，entry-server 的 createAppElement
+   * 只负责创建 React 元素树，React 字符串渲染、Document、资源与注水均由框架负责。
    *
    * 对于动态路由（路径含 :param），需要 getStaticPaths 提供预生成的参数列表。
    *
@@ -599,177 +622,38 @@ export class NamiBuilder {
     logger.info(`开始静态页面生成，共 ${routes.length} 个路由...`);
 
     const outDir = resolveSafeOutDir(this.projectRoot, this.config.outDir);
-    const primaryServerBundlePath = path.resolve(outDir, 'server', 'entry-server.js');
     const staticOutputDir = path.resolve(outDir, 'static');
-
-    // 确保输出目录存在
-    fs.mkdirSync(staticOutputDir, { recursive: true });
+    const { appElementFactory, serverBundlePath } = this.resolveBuiltAppElementFactory();
 
     const moduleManifest = this.buildModuleManifest();
-    const fallbackServerBundlePath = Object.values(moduleManifest)[0]
-      ? path.resolve(outDir, 'server', Object.values(moduleManifest)[0]!)
-      : primaryServerBundlePath;
-    const serverBundlePath = fs.existsSync(primaryServerBundlePath)
-      ? primaryServerBundlePath
-      : fallbackServerBundlePath;
-
-    if (!fs.existsSync(serverBundlePath)) {
-      logger.warn('Server Bundle 不存在，跳过 SSG 生成');
-      return;
-    }
-
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const serverBundle = fs.existsSync(primaryServerBundlePath)
-      ? require(primaryServerBundlePath)
-      : {};
     const moduleLoader = new ModuleLoader({
       serverBundlePath,
       moduleManifest,
     });
 
-    const resolvePageModule = async (route: NamiRoute): Promise<Record<string, unknown>> => {
-      const loadedModule = await moduleLoader.loadModule(route.component);
+    const assetManifestPath = path.resolve(outDir, 'client', ASSET_MANIFEST_FILENAME);
+    if (!fs.existsSync(assetManifestPath)) {
+      throw new Error(`SSG 构建缺少客户端资源清单: ${assetManifestPath}`);
+    }
+    const assetManifest = JSON.parse(fs.readFileSync(assetManifestPath, 'utf-8')) as AssetManifest;
 
-      if (Object.keys(loadedModule).length > 0) {
-        return loadedModule;
-      }
+    const renderer = new SSGRenderer({
+      config: this.config,
+      pluginManager: this.pluginManager,
+      moduleLoader,
+      assetManifest,
+      appElementFactory,
+      staticDir: staticOutputDir,
+    });
+    const generationResult = await renderer.generateStatic(routes);
 
-      const manifestPath = moduleManifest[route.component];
-      if (manifestPath) {
-        const absolutePageModulePath = path.resolve(path.dirname(serverBundlePath), manifestPath);
-        if (fs.existsSync(absolutePageModulePath)) {
-          // eslint-disable-next-line @typescript-eslint/no-var-requires
-          const pageModule = require(absolutePageModulePath) as Record<string, unknown>;
-          return pageModule;
-        }
-      }
-
-      // 兜底：直接使用 serverBundle（单页面场景）
-      return serverBundle;
-    };
-
-    let generatedCount = 0;
-
-    for (const route of routes) {
-      try {
-        logger.debug(`生成静态页面: ${route.path}`);
-
-        const pageModule = await resolvePageModule(route);
-
-        // 获取 getStaticPaths（动态路由需要）
-        let paths: Array<{ params: Record<string, string> }> = [{ params: {} }];
-        const isDynamicRoute = route.path.includes(':');
-
-        if (isDynamicRoute && route.getStaticPaths) {
-          const getStaticPathsFn = await moduleLoader.getExportedFunction<
-            () => Promise<{ paths?: Array<{ params: Record<string, string> }> }>
-          >(route.component, route.getStaticPaths);
-          if (typeof getStaticPathsFn === 'function') {
-            const staticPathsResult = await getStaticPathsFn();
-            paths = staticPathsResult.paths || [];
-          } else {
-            logger.warn(`getStaticPaths 函数 "${route.getStaticPaths}" 未找到，跳过动态路由`, {
-              route: route.path,
-              availableExports: Object.keys(pageModule),
-            });
-            continue;
-          }
-        }
-
-        // 对每个路径执行数据预取和渲染
-        for (const pathConfig of paths) {
-          // 执行 getStaticProps
-          let props: Record<string, unknown> = {};
-          if (route.getStaticProps) {
-            const getStaticPropsFn = await moduleLoader.getExportedFunction<
-              (context: { params: Record<string, string> }) => Promise<{ props?: Record<string, unknown> }>
-            >(route.component, route.getStaticProps);
-            if (typeof getStaticPropsFn === 'function') {
-              const result = await getStaticPropsFn({
-                params: pathConfig.params,
-              });
-              props = result.props || {};
-            }
-          }
-
-          // 生成实际路径
-          let actualPath = route.path;
-          for (const [key, value] of Object.entries(pathConfig.params)) {
-            actualPath = actualPath.replace(`:${key}`, value);
-          }
-
-          /**
-           * 渲染 HTML — 支持三种 server bundle 导出格式
-           *
-           * 不同的项目结构会产生不同的 server bundle 导出格式，
-           * 框架按优先级依次尝试以下三种渲染策略：
-           */
-          let html: string | null = null;
-
-          if (typeof serverBundle.renderToHTML === 'function') {
-            // 策略 1：server bundle 导出了统一的 renderToHTML 入口函数
-            // 这是推荐的方式，entry-server.ts 中导出 renderToHTML(path, props) => html
-            html = await serverBundle.renderToHTML(actualPath, props);
-          } else if (typeof pageModule.render === 'function') {
-            // 策略 2：页面模块自身导出了 render 函数或 default 组件渲染函数
-            // 适用于每个页面模块自包含渲染逻辑的场景
-            html = await (pageModule.render as Function)({ path: actualPath, props });
-          } else if (typeof pageModule.default === 'function') {
-            // 策略 2.5：将页面默认导出的 React 组件直接渲染为 HTML 片段。
-            // 这让纯 SSG 项目即便暂未提供 entry-server，也能得到真实的首屏 HTML，
-            // 而不是退回到仅有挂载容器的 CSR Shell。
-            // eslint-disable-next-line @typescript-eslint/no-var-requires
-            const React = require('react');
-            // eslint-disable-next-line @typescript-eslint/no-var-requires
-            const { renderToString } = require('react-dom/server') as {
-              renderToString: (element: unknown) => string;
-            };
-            html = renderToString(React.createElement(pageModule.default, props));
-          } else {
-            // 策略 3：兜底 — 生成最小化的 HTML Shell
-            // 仅包含数据注入（window.__NAMI_DATA__）和客户端 JS 引用，
-            // 实际渲染由客户端 JS 接管（等同于带预取数据的 CSR）
-            const title = (route.meta?.title as string) || this.config.title || this.config.appName;
-            const publicPath = this.config.assets.publicPath;
-            html = [
-              '<!DOCTYPE html>',
-              '<html lang="zh-CN">',
-              '<head>',
-              `  <meta charset="utf-8">`,
-              `  <meta name="viewport" content="width=device-width, initial-scale=1.0">`,
-              `  <title>${title}</title>`,
-              '  <meta name="renderer" content="ssg">',
-              `  <link rel="stylesheet" href="${publicPath}static/css/main.css">`,
-              '</head>',
-              '<body>',
-              '  <div id="nami-root"></div>',
-              `  <script>window.__NAMI_DATA__ = ${JSON.stringify(props).replace(/</g, '\\u003c')}</script>`,
-              `  <script defer src="${publicPath}static/js/main.js"></script>`,
-              '</body>',
-              '</html>',
-            ].join('\n');
-          }
-
-          if (html) {
-            // 写入文件
-            const outputPath = resolveStaticOutputPath(staticOutputDir, actualPath);
-            fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-            fs.writeFileSync(outputPath, html, 'utf-8');
-            generatedCount++;
-
-            logger.debug(`已生成: ${outputPath}`);
-          }
-        }
-      } catch (error) {
-        const err = error as Error;
-        const errorMsg = `SSG 路由 [${route.path}] 生成失败: ${err.message}`;
-        logger.error(errorMsg);
-        this.ssgErrors.push(errorMsg);
-      }
+    for (const failure of generationResult.errors) {
+      this.ssgErrors.push(`SSG 页面 [${failure.path}] 生成失败: ${failure.error}`);
     }
 
-    logger.info(`静态页面生成完成，共生成 ${generatedCount} 个页面`, {
-      failedRoutes: this.ssgErrors.length,
+    logger.info(`静态页面生成完成，共生成 ${generationResult.generatedPaths.length} 个页面`, {
+      failedPages: generationResult.errors.length,
+      duration: generationResult.duration,
     });
   }
 
@@ -870,9 +754,10 @@ export class NamiBuilder {
       new Set(
         this.config.routes
           .map((route: NamiRoute) => route.component)
-          .filter((componentPath: unknown): componentPath is string => (
-            typeof componentPath === 'string' && componentPath.length > 0
-          )),
+          .filter(
+            (componentPath: unknown): componentPath is string =>
+              typeof componentPath === 'string' && componentPath.length > 0,
+          ),
       ),
     );
 

@@ -19,15 +19,13 @@
  */
 
 import React, { Suspense, useMemo, useEffect, useRef } from 'react';
-import {
-  BrowserRouter,
-  Routes,
-  Route,
-  useLocation,
-} from 'react-router-dom';
-import type { NamiRoute, NamiConfig } from '@nami/shared';
-import { createLogger } from '@nami/shared';
+import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
+import type { NamiRoute, NamiConfig, RenderMode } from '@nami/shared';
+import { createLogger, RenderMode as RenderModeEnum } from '@nami/shared';
+import { NamiDataProvider } from '@nami/core-client-shim';
 import { generatedComponentLoaders } from '@nami/generated-route-modules';
+import { invalidateServerData } from '../data/data-hydrator';
+import { RouteLoadingFallback } from './route-loading-fallback';
 
 // ==================== 类型定义 ====================
 
@@ -42,7 +40,7 @@ import { generatedComponentLoaders } from '@nami/generated-route-modules';
  */
 export type ComponentResolver = (
   componentPath: string,
-) => () => Promise<{ default: React.ComponentType<unknown> }>;
+) => () => Promise<{ default: React.ComponentType<any> }>;
 
 /**
  * NamiRouter 组件的 Props
@@ -67,8 +65,23 @@ export interface NamiRouterProps {
    */
   onRouteChange?: (info: { from: string; to: string }) => void;
 
-  /** 路由加载时的全局 fallback 组件 */
+  /**
+   * 路由加载时的全局 fallback 组件。
+   * 未传（undefined）时使用框架默认骨架，显式传 null 可关闭加载 UI。
+   */
   loadingFallback?: React.ReactNode;
+
+  /** 当前首屏路由的服务端预取 props。 */
+  initialData?: Record<string, unknown>;
+
+  /** 服务端数据预取是否发生了可恢复降级。 */
+  initialDataDegraded?: boolean;
+
+  /** initialData 对应的服务端 URL；SSG 仅记录 pathname。 */
+  initialRoutePath?: string;
+
+  /** 首屏数据的渲染模式；SSG 按 pathname 复用，SSR/ISR 精确匹配 query。 */
+  initialRenderMode?: RenderMode;
 
   /** 子组件 — 放置在 Routes 外部的全局内容 */
   children?: React.ReactNode;
@@ -122,8 +135,22 @@ const defaultComponentResolver: ComponentResolver = (componentPath: string) => {
  */
 const lazyComponentCache = new WeakMap<
   ComponentResolver,
-  Map<string, React.LazyExoticComponent<React.ComponentType<unknown>>>
+  Map<string, React.LazyExoticComponent<React.ComponentType<any>>>
 >();
+
+/**
+ * 清除指定解析器创建的路由懒加载组件缓存。
+ *
+ * 路由 chunk 加载失败时，React.lazy 会保留 rejected Promise。错误边界重试前
+ * 清除此缓存，下一次挂载才会创建新的 lazy 包装器并重新调用动态 import。
+ *
+ * @param componentResolver - 要清理的组件解析器；省略时清理框架默认解析器。
+ */
+export function clearRouteComponentCache(
+  componentResolver: ComponentResolver = defaultComponentResolver,
+): void {
+  lazyComponentCache.get(componentResolver)?.clear();
+}
 
 /**
  * 获取或创建懒加载组件
@@ -135,7 +162,7 @@ const lazyComponentCache = new WeakMap<
 function getLazyComponent(
   componentPath: string,
   resolver: ComponentResolver,
-): React.LazyExoticComponent<React.ComponentType<unknown>> {
+): React.LazyExoticComponent<React.ComponentType<any>> {
   let resolverCache = lazyComponentCache.get(resolver);
   if (!resolverCache) {
     resolverCache = new Map();
@@ -155,6 +182,22 @@ function getLazyComponent(
 
 function formatLocation(location: ReturnType<typeof useLocation>): string {
   return `${location.pathname}${location.search}${location.hash}`;
+}
+
+function formatDataLocation(location: ReturnType<typeof useLocation>): string {
+  return `${location.pathname}${location.search}`;
+}
+
+function matchesInitialDataLocation(
+  location: ReturnType<typeof useLocation>,
+  initialRoutePath: string | undefined,
+  initialRenderMode: RenderMode | undefined,
+): boolean {
+  if (typeof initialRoutePath !== 'string') return false;
+  if (initialRenderMode === RenderModeEnum.SSG) {
+    return location.pathname === initialRoutePath;
+  }
+  return formatDataLocation(location) === initialRoutePath;
 }
 
 // ==================== 内部组件 ====================
@@ -189,6 +232,92 @@ const RouteChangeListener: React.FC<{
 
 RouteChangeListener.displayName = 'RouteChangeListener';
 
+/**
+ * 位于 BrowserRouter 内部的路由树。
+ *
+ * 首屏 props 只允许交给产生它们的初始 URL；一旦发生客户端导航便永久停用，
+ * 避免返回初始地址时把旧快照再次注入页面。
+ */
+const NamiRouteTree: React.FC<NamiRouterProps> = ({
+  routes,
+  componentResolver = defaultComponentResolver,
+  onRouteChange,
+  loadingFallback,
+  initialData,
+  initialDataDegraded,
+  initialRoutePath,
+  initialRenderMode,
+  children,
+}) => {
+  const location = useLocation();
+  const hasLeftInitialRouteRef = useRef(false);
+  const currentDataLocation = formatDataLocation(location);
+  const canUseInitialData =
+    !hasLeftInitialRouteRef.current &&
+    matchesInitialDataLocation(location, initialRoutePath, initialRenderMode);
+  const isInitialServerRenderedRoute =
+    canUseInitialData &&
+    initialRenderMode !== undefined &&
+    initialRenderMode !== RenderModeEnum.CSR;
+  const resolvedLoadingFallback = useMemo(
+    () =>
+      loadingFallback === undefined ? (
+        isInitialServerRenderedRoute ? null : (
+          <RouteLoadingFallback />
+        )
+      ) : (
+        loadingFallback
+      ),
+    [isInitialServerRenderedRoute, loadingFallback],
+  );
+
+  useEffect(() => {
+    if (
+      initialRoutePath &&
+      !matchesInitialDataLocation(location, initialRoutePath, initialRenderMode)
+    ) {
+      hasLeftInitialRouteRef.current = true;
+      invalidateServerData();
+    }
+  }, [currentDataLocation, initialRoutePath, initialRenderMode, location]);
+
+  const routeElements = useMemo(() => {
+    function renderRoute(route: NamiRoute): React.ReactNode {
+      const LazyComponent = getLazyComponent(route.component, componentResolver);
+      const element = (
+        <Suspense fallback={resolvedLoadingFallback}>
+          <LazyComponent {...(canUseInitialData ? initialData : {})} />
+        </Suspense>
+      );
+
+      if (route.children && route.children.length > 0) {
+        return (
+          <Route key={route.path} path={route.path} element={element}>
+            {route.children.map(renderRoute)}
+          </Route>
+        );
+      }
+
+      return <Route key={route.path} path={route.path} element={element} />;
+    }
+
+    return routes.map(renderRoute);
+  }, [routes, componentResolver, resolvedLoadingFallback, initialData, canUseInitialData]);
+
+  return (
+    <NamiDataProvider
+      initialData={canUseInitialData ? (initialData ?? {}) : {}}
+      degraded={canUseInitialData && initialDataDegraded === true}
+    >
+      <RouteChangeListener onRouteChange={onRouteChange} />
+      {children}
+      <Routes>{routeElements}</Routes>
+    </NamiDataProvider>
+  );
+};
+
+NamiRouteTree.displayName = 'NamiRouteTree';
+
 // ==================== 主组件 ====================
 
 /**
@@ -213,61 +342,28 @@ export const NamiRouter: React.FC<NamiRouterProps> = ({
   config,
   componentResolver = defaultComponentResolver,
   onRouteChange,
-  loadingFallback = null,
+  loadingFallback,
+  initialData,
+  initialDataDegraded,
+  initialRoutePath,
+  initialRenderMode,
   children,
 }) => {
-  /**
-   * 递归渲染路由树
-   *
-   * 将 NamiRoute[] 转换为 <Route> 组件树。
-   * 每个路由组件使用 React.lazy 进行代码分割。
-   *
-   * useMemo 缓存路由树，避免 routes 未变化时重复创建组件。
-   */
-  const routeElements = useMemo(() => {
-    /**
-     * 递归函数：将单个 NamiRoute 及其子路由转换为 Route 元素
-     */
-    function renderRoute(route: NamiRoute): React.ReactNode {
-      const LazyComponent = getLazyComponent(route.component, componentResolver);
-
-      /**
-       * 每个路由组件被 Suspense 包裹：
-       * - 组件 JS chunk 加载完成前显示 loadingFallback
-       * - 加载完成后自动渲染目标组件
-       */
-      const element = (
-        <Suspense fallback={loadingFallback}>
-          <LazyComponent />
-        </Suspense>
-      );
-
-      // 有子路由时递归生成嵌套 Route
-      if (route.children && route.children.length > 0) {
-        return (
-          <Route key={route.path} path={route.path} element={element}>
-            {route.children.map(renderRoute)}
-          </Route>
-        );
-      }
-
-      // 叶子路由
-      return <Route key={route.path} path={route.path} element={element} />;
-    }
-
-    return routes.map(renderRoute);
-  }, [routes, componentResolver, loadingFallback]);
-
   return (
     <BrowserRouter>
-      {/* 路由变化监听器 — 必须在 BrowserRouter 内部 */}
-      <RouteChangeListener onRouteChange={onRouteChange} />
-
-      {/* 全局内容（如 Header、Footer） */}
-      {children}
-
-      {/* 路由出口 */}
-      <Routes>{routeElements}</Routes>
+      <NamiRouteTree
+        routes={routes}
+        config={config}
+        componentResolver={componentResolver}
+        onRouteChange={onRouteChange}
+        loadingFallback={loadingFallback}
+        initialData={initialData}
+        initialDataDegraded={initialDataDegraded}
+        initialRoutePath={initialRoutePath}
+        initialRenderMode={initialRenderMode}
+      >
+        {children}
+      </NamiRouteTree>
     </BrowserRouter>
   );
 };

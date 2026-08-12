@@ -10,16 +10,8 @@ import fs from 'fs';
 import { build } from 'esbuild';
 import type { NamiConfig, UserNamiConfig } from '@nami/shared';
 import {
-  deepMerge,
+  resolveNamiConfig,
   RenderMode,
-  DEFAULT_SERVER_CONFIG,
-  DEFAULT_ISR_CONFIG,
-  DEFAULT_MONITOR_CONFIG,
-  DEFAULT_FALLBACK_CONFIG,
-  DEFAULT_ASSETS_CONFIG,
-  DEFAULT_SRC_DIR,
-  DEFAULT_OUT_DIR,
-  DEFAULT_RENDER_MODE,
 } from '@nami/shared';
 
 /** 支持的配置文件名 */
@@ -83,8 +75,16 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<NamiConfi
       platform: 'node',
       format: 'cjs',
       target: 'node18',
-      // 外部化 node_modules（配置文件可能引用框架包）
-      external: ['@nami/*'],
+      // 框架包与 React 由宿主项目解析。配置可以导入本地同构 wrapApp 插件；
+      // 若把该插件使用的 JSX runtime 打进临时 config bundle，服务端 Renderer
+      // 可能同时看到两份 React，带 Hook 的 App Shell 会触发 invalid hook call。
+      external: [
+        '@nami/*',
+        'react',
+        'react/*',
+        'react-dom',
+        'react-dom/*',
+      ],
       logLevel: 'silent',
     });
 
@@ -115,33 +115,20 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<NamiConfi
  * 将用户配置与默认配置合并
  */
 function mergeWithDefaults(userConfig: UserNamiConfig): NamiConfig {
-  const defaults: Omit<NamiConfig, 'appName'> = {
-    srcDir: DEFAULT_SRC_DIR,
-    outDir: DEFAULT_OUT_DIR,
-    defaultRenderMode: DEFAULT_RENDER_MODE,
-    routes: [],
-    server: DEFAULT_SERVER_CONFIG,
-    webpack: {},
-    isr: DEFAULT_ISR_CONFIG,
-    assets: DEFAULT_ASSETS_CONFIG,
-    monitor: DEFAULT_MONITOR_CONFIG,
-    fallback: DEFAULT_FALLBACK_CONFIG,
-    plugins: [],
+  const legacyISR = userConfig.isr as (Partial<NamiConfig['isr']> & {
+    cacheStrategy?: NamiConfig['isr']['cacheAdapter'];
+  }) | undefined;
+  const { cacheStrategy, ...currentISR } = legacyISR ?? {};
+  const normalizedConfig: UserNamiConfig = {
+    ...userConfig,
+    isr: {
+      ...currentISR,
+      ...(currentISR.cacheAdapter === undefined && cacheStrategy
+        ? { cacheAdapter: cacheStrategy }
+        : {}),
+    },
   };
-
-  const merged = deepMerge(
-    defaults as unknown as Record<string, unknown>,
-    userConfig as unknown as Partial<Record<string, unknown>>,
-  ) as unknown as NamiConfig & {
-    isr: NamiConfig['isr'] & {
-      cacheStrategy?: NamiConfig['isr']['cacheAdapter'];
-    };
-  };
-
-  // 兼容历史 ISR 配置字段：`cacheStrategy`
-  if (merged.isr.cacheStrategy && !merged.isr.cacheAdapter) {
-    merged.isr.cacheAdapter = merged.isr.cacheStrategy;
-  }
+  const merged = resolveNamiConfig(normalizedConfig);
 
   // 兼容历史约定：只要默认模式或任一路由使用 ISR，就自动开启 ISR。
   // 否则业务方还需要再额外写一遍 `isr.enabled = true`，容易让示例和旧项目“看起来是 ISR，实际没启用缓存层”。

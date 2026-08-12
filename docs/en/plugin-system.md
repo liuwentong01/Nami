@@ -178,12 +178,14 @@ Source locations:
 | server | `onRenderError` | Parallel | Yes, triggered by the concrete Renderer |
 | client | `onClientInit` | Parallel | Yes, `initNamiClient()` |
 | client | `onHydrated` | Parallel | Yes, after Hydration completes |
-| client | `wrapApp` | Waterfall | Yes, wraps the root component on the client |
+| common | `wrapApp` | Waterfall | Yes, Renderers and the client wrap the root in the same order |
 | client | `onRouteChange` | Parallel | Yes, on client route changes |
 | common | `onError` | Parallel | Yes, triggered by plugin hook errors and the client error boundary |
 | common | `onDispose` | Parallel | Yes, `PluginManager.dispose()` |
 
 `HookType.Bail` and `runBailHook()` are implemented, but there are currently no Bail-type hooks in `HOOK_DEFINITIONS`, and the main path does not use `runBailHook()`.
+
+`wrapApp` is part of the isomorphic tree contract. For normal renderable pages, SSR, Streaming SSR, build-time SSG, and ISR run the same waterfall outside Nami's data provider, while the client runs it before Hydration. A wrapper therefore must not read browser-only globals during render. A stable static 404 short-circuits before the business React tree and does not run `wrapApp`.
 
 ### Registration Order
 
@@ -462,16 +464,19 @@ So it is request-scoped and is not shared across requests. But it is not a permi
 
 | Field | Type | Behavior |
 |------|------|------|
-| `__cache_hit` | `boolean` | If `true` and cached content exists, replaces `result.html` |
+| `__cache_hit` | `boolean` | The Renderer returns cached content before data fetching; middleware keeps compatibility handling |
 | `__cache_content` | `string` | HTML from a plugin cache hit |
 | `__custom_headers` | `Record<string, string>` | Merged into `result.headers` |
 | `__retry_attempted` | `boolean` | Writes `X-Nami-Retry: 1` |
 
-The render exception branch also reads:
+Renderers and the degradation manager also read:
 
 | Field | Behavior |
 |------|------|
-| `__skeleton_fallback` | If it is a string, directly returns skeleton HTML with status code 200 and skips `DegradationManager` |
+| `__csr_shell_skeleton` | A recoverable temporary skeleton for normal/degraded CSR shells; client JavaScript still loads |
+| `__skeleton_fallback` | A no-JavaScript Level 3 static emergency candidate; it does not bypass retry or CSR |
+
+Route-chunk Suspense fallbacks and page-level data skeletons are client loading states and do not use the Level 3 protocol.
 
 Finally, all `extra` is attached to:
 
@@ -491,7 +496,7 @@ context.extra['__cache_etag'] = cached.etag;
 context.extra['__cache_created_at'] = cached.createdAt;
 ```
 
-After `renderMiddleware` sees `__cache_hit` and `__cache_content`, it replaces the final HTML with the plugin-cached content and writes:
+After `onBeforeRender`, the Renderer consumes the hit immediately, skips data fetching and React rendering, and writes:
 
 ```http
 X-Nami-Plugin-Cache: HIT
@@ -654,13 +659,14 @@ LRU uses `lru-cache` underneath. `ttl` is in seconds and is internally converted
 
 ```text
 onBeforeRender
+  -> bypass ISR and private requests by default
   -> keyGenerator(context)
   -> store.get(cacheKey)
-  -> hit: write context.extra.__cache_*
+  -> hit: write context.extra.__cache_* and return immediately from the Renderer
   -> miss: write __cache_hit=false and __cache_key
 
 onAfterRender
-  -> do not cache non-2xx
+  -> do not cache non-2xx / degraded / streaming / private / no-store results
   -> do not write again on cache hit
   -> ttl = result.cacheControl?.revalidate ?? defaultTTL
   -> store.set(cacheKey, entry, ttl)

@@ -32,6 +32,9 @@ export const DEFAULT_CONTAINER_ID = 'nami-root';
 /** 服务端注入数据的全局变量名 */
 export const NAMI_DATA_VARIABLE = '__NAMI_DATA__';
 
+/** 服务端到客户端 Hydration 数据协议版本。 */
+export const NAMI_DATA_PROTOCOL_VERSION = 1 as const;
+
 /** 客户端路由数据预取接口前缀 */
 export const NAMI_DATA_API_PREFIX = '/_nami/data';
 

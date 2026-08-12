@@ -33,17 +33,12 @@ import type {
   GetServerSidePropsContext,
   GetServerSidePropsResult,
 } from '@nami/shared';
-import {
-  RenderMode as RenderModeEnum,
-  RenderError,
-  ErrorCode,
-  generateDataScript,
-} from '@nami/shared';
+import { RenderMode as RenderModeEnum, RenderError, ErrorCode } from '@nami/shared';
 import type { ReactElement } from 'react';
 
 import { BaseRenderer } from './base-renderer';
 import { CSRRenderer } from './csr-renderer';
-import type { RendererOptions, AppElementFactory, HTMLRenderer, ModuleLoaderLike } from './types';
+import type { RendererOptions, AppElementFactory, ModuleLoaderLike } from './types';
 
 /**
  * SSR 渲染器配置
@@ -64,16 +59,7 @@ export interface SSRRendererOptions extends RendererOptions {
    * );
    * ```
    */
-  appElementFactory?: AppElementFactory;
-
-  /**
-   * 服务端 HTML 渲染函数
-   *
-   * 兼容已有 `entry-server.tsx` 直接导出 `renderToHTML(url, props)` 的接入方式。
-   * 当业务侧尚未切换到 React 元素工厂协议时，SSRRenderer 会优先复用它，
-   * 以保证默认 SSR 启动链路可以正常工作。
-   */
-  htmlRenderer?: HTMLRenderer;
+  appElementFactory: AppElementFactory;
 }
 
 /**
@@ -84,28 +70,23 @@ export interface SSRRendererOptions extends RendererOptions {
  */
 export class SSRRenderer extends BaseRenderer {
   /** React 组件树工厂函数 */
-  private readonly appElementFactory?: AppElementFactory;
-
-  /** 兼容 entry-server.renderToHTML() 的 HTML 渲染函数 */
-  private readonly htmlRenderer?: HTMLRenderer;
+  private readonly appElementFactory: AppElementFactory;
 
   /** SSR 超时时间（毫秒），来自 config.server.ssrTimeout */
   private readonly ssrTimeout: number;
 
   /** 模块加载器（用于解析数据预取函数） */
-  private readonly moduleLoader?: import('./types').ModuleLoaderLike;
+  private readonly moduleLoader?: ModuleLoaderLike;
 
   constructor(options: SSRRendererOptions) {
     super(options);
     this.appElementFactory = options.appElementFactory;
-    this.htmlRenderer = options.htmlRenderer;
     this.ssrTimeout = options.config.server.ssrTimeout;
     this.moduleLoader = options.moduleLoader;
 
     this.logger.debug('SSR 渲染器已初始化', {
       timeout: this.ssrTimeout,
-      hasAppElementFactory: !!this.appElementFactory,
-      hasHtmlRenderer: !!this.htmlRenderer,
+      hasAppElementFactory: true,
     });
   }
 
@@ -148,6 +129,11 @@ export class SSRRenderer extends BaseRenderer {
 
     // 触发渲染前钩子
     await this.callPluginHook('beforeRender', context);
+
+    const cachedResult = await this.resolvePluginCacheHit(context, timing);
+    if (cachedResult) {
+      return cachedResult;
+    }
 
     try {
       // 整体超时保护：将完整渲染流程包装在超时 Promise 中
@@ -212,10 +198,12 @@ export class SSRRenderer extends BaseRenderer {
       // 构造 getServerSideProps 的入参上下文
       const gsspContext = this.buildGSSPContext(context);
 
-      // 动态加载组件模块并获取 getServerSideProps 函数
-      // 注意：实际实现中应从已编译的 server bundle 中加载
-      // 这里展示逻辑框架，具体的模块加载由上层 ModuleLoader 负责
-      const gsspFn = await this.resolveGetServerSideProps(route.component, route.getServerSideProps);
+      // ModuleLoader 根据构建清单从已编译的 server bundle 页面模块中
+      // 提取 getServerSideProps；这里已是正式运行链路，不是占位实现。
+      const gsspFn = await this.resolveGetServerSideProps(
+        route.component,
+        route.getServerSideProps,
+      );
 
       if (!gsspFn) {
         this.logger.warn('getServerSideProps 函数未找到', {
@@ -319,10 +307,7 @@ export class SSRRenderer extends BaseRenderer {
    * @param timing - 性能计时对象
    * @returns 渲染结果
    */
-  private async executeSSR(
-    context: RenderContext,
-    timing: RenderTiming,
-  ): Promise<RenderResult> {
+  private async executeSSR(context: RenderContext, timing: RenderTiming): Promise<RenderResult> {
     // ========== 阶段一：数据预取 ==========
     timing.dataFetchStart = Date.now();
     const prefetchResult = await this.prefetchData(context);
@@ -330,31 +315,26 @@ export class SSRRenderer extends BaseRenderer {
 
     // 将预取数据注入到渲染上下文中，供 React 组件读取
     context.initialData = prefetchResult.data as Record<string, unknown>;
+    context.extra.__nami_data_degraded = prefetchResult.degraded;
 
     if (prefetchResult.redirect) {
       timing.htmlEnd = Date.now();
-      const statusCode = prefetchResult.redirect.statusCode
-        ?? (prefetchResult.redirect.permanent ? 308 : 307);
-      return this.createDefaultResult(
-        '',
-        statusCode,
-        RenderModeEnum.SSR,
-        timing,
-        {
-          headers: {
-            ...prefetchResult.headers,
-            Location: prefetchResult.redirect.destination,
-            'Cache-Control': 'private, no-cache',
-          },
-          degraded: prefetchResult.degraded,
+      const statusCode =
+        prefetchResult.redirect.statusCode ?? (prefetchResult.redirect.permanent ? 308 : 307);
+      return this.createDefaultResult('', statusCode, RenderModeEnum.SSR, timing, {
+        headers: {
+          ...prefetchResult.headers,
+          Location: prefetchResult.redirect.destination,
+          'Cache-Control': 'private, no-cache',
         },
-      );
+        degraded: prefetchResult.degraded,
+      });
     }
 
     if (prefetchResult.notFound) {
       timing.htmlEnd = Date.now();
       return this.createDefaultResult(
-        this.assembleHTML('', context),
+        this.assembleHTML(this.createNotFoundAppHTML(), context, { hydrate: false }),
         404,
         RenderModeEnum.SSR,
         timing,
@@ -375,7 +355,7 @@ export class SSRRenderer extends BaseRenderer {
     timing.renderEnd = Date.now();
 
     // ========== 阶段三：HTML 组装 ==========
-    const fullHTML = this.ensureDocumentHTML(renderedHTML, context);
+    const fullHTML = this.assembleHTML(renderedHTML, context);
 
     timing.htmlEnd = Date.now();
 
@@ -386,24 +366,18 @@ export class SSRRenderer extends BaseRenderer {
       totalDuration: Date.now() - timing.startTime,
     });
 
-    return this.createDefaultResult(
-      fullHTML,
-      200,
-      RenderModeEnum.SSR,
-      timing,
-      {
-        headers: {
-          // SSR 页面通常不应被 CDN 长时间缓存（数据实时性要求高）
-          // 但可以设置短暂缓存以应对突发流量
-          'Cache-Control': this.buildCacheControl(prefetchResult.cache),
-          ...prefetchResult.headers,
-        },
-        degraded: prefetchResult.degraded,
-        degradeReason: prefetchResult.degraded
-          ? `数据预取降级: ${prefetchResult.errors.map((error: Error) => error.message).join('; ')}`
-          : undefined,
+    return this.createDefaultResult(fullHTML, 200, RenderModeEnum.SSR, timing, {
+      headers: {
+        // SSR 页面通常不应被 CDN 长时间缓存（数据实时性要求高）
+        // 但可以设置短暂缓存以应对突发流量
+        'Cache-Control': this.buildCacheControl(prefetchResult.cache),
+        ...prefetchResult.headers,
       },
-    );
+      degraded: prefetchResult.degraded,
+      degradeReason: prefetchResult.degraded
+        ? `数据预取降级: ${prefetchResult.errors.map((error: Error) => error.message).join('; ')}`
+        : undefined,
+    });
   }
 
   /**
@@ -440,47 +414,16 @@ export class SSRRenderer extends BaseRenderer {
   /**
    * 执行真正的服务端页面渲染
    *
-   * 兼容两种历史接入协议：
-   * 1. `appElementFactory(context)` -> ReactElement
-   * 2. `htmlRenderer(context, initialData)` -> string
-   *
-   * 这样可以在不破坏现有 renderer 设计的前提下，
-   * 打通 CLI / server bundle / entry-server 的默认 SSR 链路。
+   * 统一调用 `appElementFactory(context)` 创建 React 元素树，
+   * 普通 SSR 在这里执行 renderToString；Streaming 路由会由 RendererFactory
+   * 预先选择 StreamingSSRRenderer，但两者消费同一份元素工厂协议。
    */
   private async renderAppHTML(context: RenderContext): Promise<string> {
-    if (this.htmlRenderer) {
-      return await this.htmlRenderer(context, context.initialData ?? {});
-    }
-
-    if (!this.appElementFactory) {
-      throw new RenderError(
-        'SSR 渲染缺少可用的服务端渲染入口',
-        ErrorCode.RENDER_SSR_FAILED,
-        {
-          hint: '请提供 appElementFactory，或在 entry-server 中导出 renderToHTML()',
-        },
-      );
-    }
-
     // 条件导入 react-dom/server，仅在服务端执行
     // 使用动态 import 确保客户端 Bundle 不包含此依赖
     const { renderToString } = await this.importRenderToString();
     const appElement = this.appElementFactory(context);
-    return renderToString(appElement as ReactElement);
-  }
-
-  /**
-   * 将渲染结果规范化为完整 HTML 文档
-   *
-   * `htmlRenderer` 可能直接返回页面片段，也可能已经返回完整文档。
-   * 这里做一次轻量检测，避免对完整 HTML 再次包壳导致嵌套文档结构错误。
-   */
-  private ensureDocumentHTML(renderedHTML: string, context: RenderContext): string {
-    if (/<!doctype html>/i.test(renderedHTML) || /<html[\s>]/i.test(renderedHTML)) {
-      return renderedHTML;
-    }
-
-    return this.assembleHTML(renderedHTML, context);
+    return renderToString(await this.prepareAppElement(appElement, context));
   }
 
   private buildCacheControl(cache?: PrefetchResult['cache']): string {
@@ -511,22 +454,23 @@ export class SSRRenderer extends BaseRenderer {
    * @param context - 渲染上下文
    * @returns 完整的 HTML 文档字符串
    */
-  private assembleHTML(appHTML: string, context: RenderContext): string {
+  private assembleHTML(
+    appHTML: string,
+    context: RenderContext,
+    options: { hydrate?: boolean } = {},
+  ): string {
+    const hydrate = options.hydrate !== false;
     const containerId = 'nami-root';
 
-    const title =
-      (context.route.meta?.title as string) ??
-      this.config.title ??
-      this.config.appName;
+    const title = hydrate
+      ? ((context.route.meta?.title as string) ?? this.config.title ?? this.config.appName)
+      : `404 - ${this.config.title ?? this.config.appName}`;
 
-    const description =
-      (context.route.meta?.description as string) ??
-      this.config.description ??
-      '';
-
-    const dataScript = context.initialData
-      ? generateDataScript(context.initialData)
+    const description = hydrate
+      ? ((context.route.meta?.description as string) ?? this.config.description ?? '')
       : '';
+
+    const dataScript = hydrate ? this.createHydrationDataScript(context) : '';
 
     const { cssLinks, jsScripts } = this.resolveAssets();
 
@@ -537,16 +481,14 @@ export class SSRRenderer extends BaseRenderer {
       '  <meta charset="utf-8">',
       '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
       `  <title>${this.escapeHTML(title)}</title>`,
-      description
-        ? `  <meta name="description" content="${this.escapeHTML(description)}">`
-        : '',
-      '  <meta name="renderer" content="ssr">',
+      description ? `  <meta name="description" content="${this.escapeHTML(description)}">` : '',
+      `  <meta name="renderer" content="${hydrate ? 'ssr' : 'static-404'}">`,
       cssLinks,
       '</head>',
       '<body>',
       `  <div id="${containerId}">${appHTML}</div>`,
       dataScript ? `  ${dataScript}` : '',
-      jsScripts,
+      hydrate ? jsScripts : '',
       '</body>',
       '</html>',
     ]
@@ -578,9 +520,8 @@ export class SSRRenderer extends BaseRenderer {
   /**
    * 解析 getServerSideProps 函数
    *
-   * 从编译后的组件模块中获取指定的数据预取函数。
-   * 实际项目中此函数应从 server bundle 的模块系统中加载，
-   * 这里提供框架级别的接口定义，具体实现依赖 ModuleLoader。
+   * 通过上层注入的 ModuleLoader，从编译后的 server bundle 页面模块中
+   * 获取指定的数据预取函数。
    *
    * @param componentPath - 组件文件路径
    * @param functionName - 导出的函数名
@@ -633,16 +574,10 @@ export class SSRRenderer extends BaseRenderer {
     }
 
     // 超时错误使用专用错误码
-    const isTimeout =
-      error instanceof Error && error.message.includes('超时');
-    const errorCode = isTimeout
-      ? ErrorCode.RENDER_SSR_TIMEOUT
-      : ErrorCode.RENDER_SSR_FAILED;
+    const isTimeout = error instanceof Error && error.message.includes('超时');
+    const errorCode = isTimeout ? ErrorCode.RENDER_SSR_TIMEOUT : ErrorCode.RENDER_SSR_FAILED;
 
-    const message =
-      error instanceof Error
-        ? error.message
-        : `SSR 渲染未知错误: ${String(error)}`;
+    const message = error instanceof Error ? error.message : `SSR 渲染未知错误: ${String(error)}`;
 
     return new RenderError(message, errorCode, {
       url: context.url,

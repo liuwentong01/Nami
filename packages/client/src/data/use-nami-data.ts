@@ -6,7 +6,13 @@
  * 数据流向：
  * 1. 服务端：getServerSideProps / getStaticProps 返回数据
  * 2. 服务端：数据被序列化为 JSON 并注入到 HTML 的 <script> 标签中
- *    → window.__NAMI_DATA__ = { "pageData": { ... } }
+ *    → window.__NAMI_DATA__ = {
+ *        version: 1,
+ *        props: { "pageData": { ... } },
+ *        degraded: false,
+ *        renderMode: "ssr",
+ *        routePath: "/current-url"
+ *      }
  * 3. 客户端：useNamiData 通过 DataHydrator 恢复并缓存注水数据
  * 4. 客户端：数据作为 React 组件的初始 props 使用
  *
@@ -18,7 +24,6 @@
  * @module
  */
 
-import { useMemo } from 'react';
 import { createLogger } from '@nami/shared';
 import { readServerData } from './data-hydrator';
 
@@ -77,37 +82,24 @@ const EMPTY_OBJECT = Object.freeze({}) as Record<string, unknown>;
  * ```
  */
 export function useNamiData<T = Record<string, unknown>>(key?: string): T {
-  /**
-   * 使用 useMemo 缓存数据读取结果
-   *
-   * readServerData() 会在首次读取时缓存一份稳定快照，
-   * 即使 hydration 完成后清理了 window.__NAMI_DATA__，
-   * 这里仍能持续读到同一份服务端初始数据。
-   *
-   * 注意：这里的依赖数组为 [key]，因为同一个组件可能在不同渲染中传入不同的 key。
-   */
-  const data = useMemo(() => {
-    const serverData = readServerData();
-    const namiData = serverData.props ?? serverData;
+  // DataHydrator 自己维护稳定缓存与 routePath 作用域。这里每次 render 都读取，
+  // 确保同一个动态路由组件从 /x/1 切到 /x/2 时不会被 useMemo 固化旧快照。
+  const serverData = readServerData();
+  const namiData = serverData.props;
 
-    if (!namiData) {
-      logger.debug('未检测到服务端注水数据，可能是纯 CSR 模式');
-      return EMPTY_OBJECT as T;
+  if (!namiData) {
+    logger.debug('未检测到当前路由可用的服务端注水数据，可能是纯 CSR 或已发生导航');
+    return EMPTY_OBJECT as T;
+  }
+
+  if (key) {
+    const value = namiData[key];
+    if (value === undefined) {
+      logger.debug('数据中不包含指定的 key', { key });
+      return undefined as unknown as T;
     }
+    return value as T;
+  }
 
-    // 如果指定了 key，返回特定字段
-    if (key) {
-      const value = namiData[key];
-      if (value === undefined) {
-        logger.debug('数据中不包含指定的 key', { key });
-        return undefined as unknown as T;
-      }
-      return value as T;
-    }
-
-    // 未指定 key，返回整个数据对象
-    return namiData as T;
-  }, [key]);
-
-  return data;
+  return namiData as T;
 }

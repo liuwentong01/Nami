@@ -9,6 +9,7 @@
  */
 
 import type { Command } from 'commander';
+import { NEEDS_SERVER_BUNDLE } from '@nami/shared';
 import { loadConfig } from '../config/load-config';
 import { cliLogger } from '../utils/logger';
 import { findAvailablePort } from '../utils/port-finder';
@@ -68,11 +69,15 @@ export function registerDevCommand(program: Command): void {
           config,
           clientWebpackConfig: clientConfig,
           serverWebpackConfig: serverConfig,
-          runtimeProvider: async () => resolveServerRuntime({
-            projectRoot: process.cwd(),
-            config,
-            fresh: true,
-          }),
+          runtimeProvider: async () =>
+            resolveServerRuntime({
+              projectRoot: process.cwd(),
+              config,
+              fresh: true,
+              requireServerEntry: config.routes.some((route) =>
+                NEEDS_SERVER_BUNDLE.includes(route.renderMode),
+              ),
+            }),
         });
 
         devServer.listen(port, options.host);
@@ -83,7 +88,9 @@ export function registerDevCommand(program: Command): void {
         cliLogger.success('开发服务器已启动');
         cliLogger.newline();
         cliLogger.indent(`${chalk.bold('Local:')}   ${chalk.cyan(`http://localhost:${port}`)}`);
-        cliLogger.indent(`${chalk.bold('Network:')} ${chalk.cyan(`http://${options.host}:${port}`)}`);
+        cliLogger.indent(
+          `${chalk.bold('Network:')} ${chalk.cyan(`http://${options.host}:${port}`)}`,
+        );
         cliLogger.newline();
         cliLogger.indent(chalk.gray('按 Ctrl+C 停止服务'));
         cliLogger.newline();

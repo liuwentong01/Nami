@@ -38,8 +38,8 @@ function getCssLoaderOptions(isModules: boolean, localIdentName: string) {
             exportLocalsConvention: 'camelCase' as const,
           }
         : false,
-      // 在 css-loader 之前需要执行的 loader 数量
-      importLoaders: 1,
+      // 当前默认链路只有 css-loader；PostCSS 可由业务 webpack modifier 显式接入。
+      importLoaders: 0,
     },
   };
 }
@@ -76,12 +76,12 @@ export function createStyleRules(options: StyleRuleOptions = {}): RuleSetRule[] 
     {
       test: /\.css$/,
       exclude: /\.module\.css$/,
-      use: [styleLoader, getCssLoaderOptions(false, localIdentName), 'postcss-loader'],
+      use: [styleLoader, getCssLoaderOptions(false, localIdentName)],
     },
     // CSS Modules 文件
     {
       test: /\.module\.css$/,
-      use: [styleLoader, getCssLoaderOptions(true, localIdentName), 'postcss-loader'],
+      use: [styleLoader, getCssLoaderOptions(true, localIdentName)],
     },
   ];
 }

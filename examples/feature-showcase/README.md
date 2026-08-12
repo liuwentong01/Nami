@@ -46,24 +46,24 @@ pnpm run start
 
 ## 2. 路由能力地图
 
-| 地址                             | 模式          | 数据入口             | 重点观察                                                       |
-| -------------------------------- | ------------- | -------------------- | -------------------------------------------------------------- |
-| `/`                              | SSG           | GSP                  | 构建时间、静态 HTML、Hydration 数据快照                        |
-| `/rendering/csr`                 | CSR           | 浏览器状态与请求     | HTML 壳、事件、客户端请求、无需服务端数据函数                  |
-| `/rendering/ssr/:name?topic=...` | SSR           | GSSP                 | params、query、Cookie、UA、requestId、自定义响应头             |
-| `/rendering/streaming`           | Streaming SSR | GSSP + Suspense      | 先到达的 Shell、700ms / 1400ms 异步边界、chunked 响应          |
-| `/content`                       | SSG           | GSP                  | 构建期内容索引和运行时静态文件读取                             |
-| `/content/:slug`                 | 动态 SSG      | getStaticPaths + GSP | 三条构建路径、静态文件读取、缺失文件的错误隔离                 |
-| `/products`                      | ISR           | GSP                  | 8 秒 revalidate、Generation ID、cache tag `catalog`            |
-| `/products/:id`                  | 动态 ISR      | getStaticPaths + GSP | 构建枚举与运行缓存的边界、首次 MISS、cache tags                |
-| `/routing/:id`                   | SSR           | GSSP                 | 动态路由参数和路由匹配结果头                                   |
-| `/routing/new`                   | SSR           | GSSP                 | 即使声明在动态路由之后，静态路由仍优先                         |
-| `/client/runtime`                | CSR           | Client APIs          | NamiLink、useRouter、prefetchRoute、useClientFetch、useRequest |
-| `/plugins`                       | SSR           | GSSP + Plugin Hooks  | 插件顺序、生命周期、响应头和浏览器事件时间线                   |
-| `/stability`                     | CSR           | 客户端状态 + Koa API | 局部/插件全局 Error Boundary、Skeleton、503 和恢复             |
-| `/redirect`                      | SSR           | GSSP redirect        | 直接文档请求返回 `307` 与 `Location`                           |
-| `/data-not-found`                | SSR           | GSSP notFound        | 直接文档请求返回 `404`                                         |
-| `/*`                             | CSR           | 无                   | 客户端通配兜底页                                               |
+| 地址                             | 模式          | 数据入口             | 重点观察                                                    |
+| -------------------------------- | ------------- | -------------------- | ----------------------------------------------------------- |
+| `/`                              | SSG           | GSP                  | 构建时间、静态 HTML、Hydration 数据快照                     |
+| `/rendering/csr`                 | CSR           | 浏览器状态与请求     | HTML 壳、事件、客户端请求、无需服务端数据函数               |
+| `/rendering/ssr/:name?topic=...` | SSR           | GSSP                 | params、query、Cookie、UA、requestId、自定义响应头          |
+| `/rendering/streaming`           | Streaming SSR | GSSP + Suspense      | 先到达的 Shell、700ms / 1400ms 异步边界、chunked 响应       |
+| `/content`                       | SSG           | GSP                  | 构建期内容索引和运行时静态文件读取                          |
+| `/content/:slug`                 | 动态 SSG      | getStaticPaths + GSP | 三条构建路径、HTML/sidecar 读取、`fallback: false` 静态 404 |
+| `/products`                      | ISR           | GSP                  | 8 秒 revalidate、Generation ID、cache tag `catalog`         |
+| `/products/:id`                  | 动态 ISR      | getStaticPaths + GSP | `fallback: 'blocking'` 冷 MISS、404 SKIP、cache tags        |
+| `/routing/:id`                   | SSR           | GSSP                 | 动态路由参数和路由匹配结果头                                |
+| `/routing/new`                   | SSR           | GSSP                 | 即使声明在动态路由之后，静态路由仍优先                      |
+| `/client/runtime`                | CSR           | Client APIs          | 路由预取、局部骨架、SWR 后台刷新、失败重试                  |
+| `/plugins`                       | SSR           | GSSP + Plugin Hooks  | 插件顺序、生命周期、响应头和浏览器事件时间线                |
+| `/stability`                     | CSR           | 客户端状态 + Koa API | 局部/插件全局 Error Boundary、Skeleton、503 和恢复          |
+| `/redirect`                      | SSR           | GSSP redirect        | 直接文档请求返回 `307` 与 `Location`                        |
+| `/data-not-found`                | SSR           | GSSP notFound        | 直接文档请求返回 `404`                                      |
+| `/*`                             | CSR           | 无                   | 客户端通配兜底页                                            |
 
 动态 SSG 已生成的 slug：
 
@@ -77,16 +77,16 @@ pnpm run start
 
 ```text
 feature-showcase/
-├── nami.config.ts                  # CLI 配置、构建期兼容插件、server webpack 补充
+├── nami.config.ts                  # 路由、服务端、ISR 与插件配置
 ├── src/
 │   ├── routes.ts                   # 唯一路由事实源，驱动构建/服务端/客户端
 │   ├── runtime-config.ts           # client/server 共用的完整 NamiConfig
-│   ├── entry-server.tsx            # 页面注册、SSR/Streaming 元素工厂、SSG 文档生成
-│   ├── entry-client.tsx            # 注水协议归一化与 initNamiClient
+│   ├── entry-server.tsx            # 页面注册与唯一的 createAppElement 元素工厂
+│   ├── entry-client.tsx            # 读取统一注水 envelope 并 initNamiClient
 │   ├── app.tsx                     # 被 wrapApp 注入的共享应用壳
 │   ├── pages/                      # 每项能力对应的真实页面和数据函数
 │   ├── plugins/showcase-plugins.tsx# 官方插件组合与自定义生命周期插件
-│   ├── hooks/use-showcase-data.ts  # SSR/注水数据的兼容读取
+│   ├── hooks/use-showcase-data.ts  # 服务端 props 与客户端数据上下文的同构读取
 │   ├── service-worker.js           # 注册流程示例，不拦截请求
 │   └── global.css                  # 客户端抽取并进入 asset manifest 的样式
 └── .nami/                          # CLI 生成的客户端精简 shim 与路由模块映射
@@ -101,13 +101,13 @@ feature-showcase/
 ```text
 请求 /rendering/csr
   → Koa 匹配 CSR 路由
-  → 返回 document shell + client assets
+  → 返回带临时骨架的 document shell + client assets
   → 浏览器执行 entry-client
   → initNamiClient 创建 React Root
   → 加载页面 chunk 并渲染交互 UI
 ```
 
-`csr-playground.tsx` 用本地 state、浏览器时间和 API 请求证明业务内容在客户端执行。CSR 不应导出 GSSP/GSP。
+临时骨架会在客户端 JS 初始化和首次 React 提交后被替换。`csr-playground.tsx` 用本地 state、浏览器时间和 API 请求证明业务内容在客户端执行。CSR 不应导出 GSSP/GSP。
 
 ### 4.2 SSR
 
@@ -132,17 +132,21 @@ feature-showcase/
 ```text
 nami build
   → Builder 筛选 SSG 路由
+  → 装配 ModuleLoader、asset manifest 与 SSGRenderer
+  → SSGRenderer.generateStatic 遍历路由
   → 动态路由先执行 getStaticPaths 展开 params
-  → 对每个 URL 执行 GSP
-  → entry-server.renderToHTML 输出完整 document
-  → 写入 dist/static，并引用带 hash 的 JS/CSS
+  → 对每个 URL 执行 GSP 并构造 RenderContext
+  → createAppElement 返回 React 树
+  → SSGRenderer 统一渲染 Document、资源和注水 envelope
+  → 写入 dist/static/*.html，并引用带 hash 的 JS/CSS
 
 生产请求
   → SSGRenderer 直接读取对应 HTML
   → 不再执行业务 GSP
 ```
 
-静态 HTML 和 `window.__NAMI_DATA__` 必须来自同一快照，浏览器第一次 render 才不会出现 Hydration mismatch。
+正常可注水的静态 HTML 和 `window.__NAMI_DATA__` 必须来自同一快照；框架统一注入
+`{ version: 1, props, degraded, renderMode, routePath }`，浏览器用其中的 `props` Hydration，避免首屏树不一致。稳定静态 404 在业务树之前短路，不带这份 payload 或客户端 Bundle。
 
 ### 4.5 ISR
 
@@ -154,7 +158,7 @@ nami build
 重建完成后的访问       → HIT   → 返回新 Generation ID
 ```
 
-列表和详情页都配置 8 秒 `revalidate`，并通过 `cacheTags` 暴露 `catalog`、`product` 分类。详情页同时对比“Builder 生成的静态文件”与“ISRManager 的运行时缓存”：目前二者没有启动预热关系，`fallback` 也尚未参与请求分支。
+列表和详情页都配置 8 秒 `revalidate`，并通过 `cacheTags` 暴露 `catalog`、`product` 分类。详情页的 `fallback: 'blocking'` 由冷 MISS 同步执行 GSP + React 渲染兑现。同时要区分“Builder 生成的静态文件”与“ISRManager 的运行时缓存”：目前二者没有启动预热关系。
 
 ## 5. 可重复实验
 
@@ -208,7 +212,7 @@ curl -sS -D - -o /dev/null http://127.0.0.1:3100/products/not-a-product
 
 重点看 `X-Nami-Cache`、`X-Nami-Cache-Age` 与服务端后台重建日志；`X-Nami-Cache-Tags` 当前只在 `MISS` 响应可见。即使 `edge-cache` 有构建文件，它与未枚举的 `manifest-inspector` 在新进程里的第一次请求都是 `MISS`；各自紧接着是 `HIT`。过期后的请求是 `STALE`，重建是异步任务，所以等待约 1 秒后再确认新的 `HIT`。
 
-最后两条未知商品请求刻意展示另一个边界：GSP 返回了 `notFound: true`，但当前 ISRRenderer 丢弃该语义，并把空 props 页面先作为 `200 MISS`、再作为 `200 HIT` 缓存。正确实现应透传 404 且禁止写入成功缓存。
+最后两条未知商品请求会每次都得到 `404 + X-Nami-Cache: SKIP`，且 `Cache-Control` 为 `private, no-store, max-age=0`。GSP 的 `notFound: true` 在 React 前短路，不会被当成成功页写入 ISR 缓存。
 
 ### 5.4 路由优先级、重定向与 notFound
 
@@ -226,12 +230,12 @@ curl -sS -D - -o /dev/null http://127.0.0.1:3100/data-not-found
 ```bash
 find examples/feature-showcase/dist/static -type f | sort
 rg '__NAMI_DATA__|nami-root|static/js|static/css' \
-  examples/feature-showcase/dist/static/content/index.html
+  examples/feature-showcase/dist/static/content.html
 curl -sS -D - -o /dev/null http://127.0.0.1:3100/content
 curl -sS -D - -o /dev/null http://127.0.0.1:3100/content/not-generated
 ```
 
-预期：已生成地址带 `X-Nami-Render-Mode: ssg`，服务端日志显示“静态文件读取成功”。未知 slug 不会临时执行 GSP；当前实现会进入错误隔离并由 Skeleton 插件返回 `200 + X-Nami-Render-Mode: skeleton-fallback`，而不是按 `fallback: false` 返回 404。
+预期：每个已生成地址都有 `.html` 与 `.html.nami.json` sidecar，响应带 `X-Nami-Render-Mode: ssg`，服务端日志显示“静态文件读取成功”。未知 slug 不会临时执行 GSP，而是按 `fallback: false` 返回无 Hydration 数据/客户端 Bundle 的稳定静态 404。
 
 ### 5.6 自定义 Koa 中间件
 
@@ -249,7 +253,7 @@ curl -sS -D - http://127.0.0.1:3100/api/showcase/failure
 | ------------------------- | --------------------------------------------------------------------------- | ----------------------------------- |
 | `showcase:lifecycle`      | 修改构建配置、输出构建日志、注册 Koa API、写响应头、wrapApp、记录客户端事件 | 构建/服务端日志、响应头、`/plugins` |
 | `NamiRequestPlugin`       | 安装浏览器请求适配器、缓存、重试、超时                                      | `/client/runtime`                   |
-| `NamiSkeletonPlugin`      | 路由加载 fallback、Skeleton 原子组件、渲染错误 HTML                         | `/stability`、未知 SSG、服务端日志  |
+| `NamiSkeletonPlugin`      | CSR Shell 临时骨架、Suspense fallback、Skeleton 原子组件、静态应急 HTML     | CSR 首屏、`/stability`、服务端日志  |
 | `NamiErrorBoundaryPlugin` | 通过 wrapApp 安装全局边界，捕获逃逸的客户端 render 错误并恢复               | `/stability`                        |
 | `NamiMonitorPlugin`       | 收集 render/error/performance 批次并上报本地接口                            | `/plugins`、服务端日志、Network     |
 
@@ -261,8 +265,8 @@ curl -sS -D - http://127.0.0.1:3100/api/showcase/failure
 
 `entry-client.tsx` 把完整的 `routes`、`plugins`、`config`、loading/error fallback 和 Service Worker URL 交给 `initNamiClient`：
 
-1. 读取并归一化注水数据。
-2. 根据是否存在服务端 DOM 选择 `hydrateRoot` 或 `createRoot`。
+1. 读取框架统一注入的 `{ version: 1, props, degraded, renderMode, routePath }` envelope。
+2. 仅当 `version` 兼容、`renderMode !== 'csr'` 且存在服务端 DOM 时选择 `hydrateRoot`；否则使用 `createRoot`。
 3. 建立 Router、数据上下文、错误边界和性能采集。
 4. 执行 `onClientInit`，完成后执行 `onHydrated`。
 5. 路由切换时加载目标 chunk，并触发 `onRouteChange`。
@@ -271,7 +275,21 @@ curl -sS -D - http://127.0.0.1:3100/api/showcase/failure
 
 - `NamiLink` 的 hover/visible 预取主要加载路由 chunk。
 - `prefetchRoute(..., { prefetchData: true })` 可以请求数据，但当前要用 `getPrefetchedData` 显式消费缓存。
+- `useClientFetch` 首次没有数据时显示局部 `SkeletonText`；已有旧数据的 SWR
+  刷新会保留内容并显示刷新状态，请求失败则保留可用数据并提供重试。
 - `useClientFetch` 与请求插件的 `useRequest` 是两套客户端请求抽象，不替代 SSR 的 GSSP。
+
+客户端加载状态分为三层，彼此不替代：
+
+1. CSR HTML Shell 中的临时骨架覆盖客户端 Bundle 下载、初始化和 React 首次提交。
+2. `NamiRouter` 的 Suspense fallback 覆盖路由 chunk 加载；本示例显式传入
+   `SkeletonPage` 作为 `loadingFallback`。
+3. 页面和局部组件自行处理业务数据加载；`/client/runtime` 展示首次骨架、SWR
+   后台刷新以及错误重试。
+
+组件真正发生 render 错误时由 `ClientErrorBoundary` 或
+`NamiErrorBoundaryPlugin` 显示错误页并允许重试。服务端可恢复渲染和客户端接管
+都不可用后才进入 Level 3 静态应急兜底；它不是等待 React 替换的 loading 状态。
 
 顶部主导航使用普通 `<a>` 是有意设计：切换渲染模式时发起真实文档请求，才能准确观察 SSR/SSG/ISR 响应。SPA 导航 API 集中放在 `/client/runtime`，避免把“客户端切换后缺少服务端数据”误认为目标页面的正常首屏路径。
 
@@ -283,39 +301,32 @@ curl -sS -D - http://127.0.0.1:3100/api/showcase/failure
 dist/
 ├── client/
 │   ├── asset-manifest.json
+│   ├── emergency.html              # 供反代/CDN 配置的无 JS 上游故障页
 │   └── static/                     # 入口、runtime、路由 chunk、CSS、sw.js
 ├── server/
 │   ├── entry-server.js
 │   └── pages/                      # 服务端页面模块
-├── static/                         # SSG HTML 与兼容读取路径
+├── static/                         # SSG/ISR 预生成 HTML（/content → content.html）
 └── nami-manifest.json              # 路由与服务端模块清单
 ```
 
 检查 `asset-manifest.json` 时，应能看到带 hash 的入口和样式；检查页面 chunk 时，应能看到路由级拆分，而不是所有页面只进入一个浏览器 Bundle。
 
-## 9. 当前源码边界与示例中的兼容处理
+## 9. 当前源码边界
 
-本节非常重要：这些代码不是额外“炫技”，而是综合示例在当前框架实现上必须诚实处理的协议边界。
+本节非常重要：统一元素工厂、Hydration envelope 和 SSG 文件映射已经由框架负责；以下仍是综合示例需要诚实展示的实现边界。
 
-1. **SSR 注水 envelope**：部分 SSR/Streaming 路径当前注入裸 `initialData`，而 `initNamiClient` 期望 `{ props, renderMode, routePath }`。`normalizeInjectedData()` 在客户端启动前做兼容包装。
-2. **SSG 输出路径**：Builder 为索引页写 `content/index.html`，当前 SSGRenderer 按 `/content` 查找 `content.html`。构建插件 `showcase:ssg-output-compatibility` 生成扁平别名，保证生产运行时可读取。
-3. **SSG `fallback: false`**：它会限制 Builder 枚举出的文件，但当前 SSG 请求管线不会把“文件不存在”转换为路由级 404。访问未知 slug 不会运行 GSP，而是进入错误隔离；启用 Skeleton 插件后当前响应是 `200 + X-Nami-Render-Mode: skeleton-fallback`。
-4. **ISR 构建文件与运行缓存**：Builder 会为 ISR 的 `getStaticPaths` 结果生成 HTML，但 ISRManager 启动时不读取这些文件预热缓存。新进程中已枚举和未枚举路径都会首次 `MISS`；`fallback` 字段当前也未参与 ISR 请求分支。页面保留该配置，是为了让这个断点可被观察，而不是宣称它已生效。
-5. **ISR `notFound` / redirect**：当前 ISRRenderer 只读取 GSP 的 `props`，没有把 `notFound` 或 redirect 传给缓存中间件。未知商品因此被错误地作为 `200 MISS` 渲染并继续缓存为 `200 HIT`；实验保留该路径用于暴露问题，正确修复应返回非 2xx 并禁止缓存。
-6. **原生开发管线**：CLI `nami dev` 会覆盖配置端口、绕过 Builder 中应用的 `config.webpack`/`modifyWebpackConfig`，也不执行 SSG 生成，所以无法完整运行本示例。默认 `pnpm dev:showcase` 采用“build + start”的可靠路径但没有 HMR；`dev:hmr` 仅作框架缺口诊断。
-7. **Server webpack 虚拟模块**：服务端页面间接引用 `@nami/client` 时需要 `@nami/core-client-shim` 和 `@nami/generated-route-modules` alias；示例在生产 server webpack 配置中补齐。
-8. **Streaming 的 React 单例**：Renderer 使用宿主 `react-dom/server`，业务 server bundle 若再打包一份 React 会产生 Hook dispatcher 不一致。示例 externalize React/ReactDOM 家族。
-9. **可选 PostCSS loader**：当前 Webpack CSS rule 包含 `postcss-loader`，但仓库依赖未声明它。示例不需要 PostCSS，因此仅移除该 loader，保留 CSS 提取。
-10. **staticServe 覆盖缓存头**：静态中间件 defer 到下游后，会对任意 2xx URL 写 `public, no-cache`，即使实际响应来自 SSR/SSG。因此当前看到的 SSR/SSG `Cache-Control` 不是各 Renderer 的最终设计值；ISR 会由后续 Nami 缓存头回写恢复自己的策略。
-11. **Skeleton 的两条路径**：正常渲染前 Hook 会计算布局并写入上下文，但 Renderer 尚未自动把这个标记变成页面骨架；发生渲染错误时，`onRenderError` 返回的 `skeleton-fallback` 则会被错误隔离管线消费。客户端 loading fallback、Suspense 和 Skeleton 组件也都真实生效。
-12. **Error Boundary 的客户端/服务端边界**：插件通过 `wrapApp` 安装的全局客户端边界已在 `/stability` 提供真实故障按钮；服务端渐进降级标记尚未被内核完整消费，因此示例关闭服务端降级。
-13. **插件 `onRequest`**：类型层存在该 Hook，但当前服务端请求管线没有稳定触发点，本示例不伪造它；请求扩展使用 `addServerMiddleware`。
-14. **客户端预取数据**：缓存目前不会自动注入目标页面，示例明确调用 `getPrefetchedData`，并在 UI 中提示这一点。
-15. **监控去重**：框架客户端已有性能采集入口，Monitor 插件关闭自身 Web Vitals 监听，避免同一指标重复上报。
-16. **Server bundle 体积**：页面为同构读取数据而引用了较宽的 `@nami/client` 入口，当前生产构建会出现 server entry/page 约 800 KiB 的性能警告，这是后续做 server-safe 子入口和 tree-shaking 的优化点。
-17. **同服务监控端点停机**：Monitor 上报地址也是当前 Koa 服务。优雅停机时 HTTP server 先关闭，最后一个 beacon 可能重试失败；这不影响停机完成，生产环境通常使用独立采集端点。
+1. **ISR 构建文件与运行缓存**：Builder 会为 ISR 的 `getStaticPaths` 结果生成 HTML/sidecar，但 ISRManager 启动时不读取这些文件预热 CacheStore。因此新进程中已枚举和未枚举路径都会首次 `MISS`；`fallback: 'blocking'` 会让冷 MISS 同步生成，但不代表构建产物已自动成为运行缓存 seed。
+2. **原生开发管线**：CLI `nami dev` 会覆盖配置端口、绕过 Builder 中应用的 `config.webpack`/`modifyWebpackConfig`，也不执行 SSG 生成，所以无法完整运行本示例。默认 `pnpm dev:showcase` 采用“build + start”的可靠路径但没有 HMR；`dev:hmr` 仅作框架缺口诊断。
+3. **Skeleton 的两种语义**：正常 CSR 与 SSR→CSR 的 HTML Shell 会包含临时骨架并继续加载客户端 JS，React 首次提交后替换它；只有重试和 CSR 接管都不可用时，Level 3 才消费插件或路由骨架作为静态应急兜底。路由 Suspense 与页面局部数据骨架是另外两层客户端 loading 状态。
+4. **Error Boundary 的客户端/服务端边界**：`wrapApp` 会在服务端与客户端执行同一 waterfall；Error Boundary 对浏览器渲染错误的恢复能力已在 `/stability` 提供真实故障按钮，但 React Error Boundary 不会捕获服务端渲染错误。
+5. **插件 `onRequest`**：类型层存在该 Hook，但当前服务端请求管线没有稳定触发点，本示例不伪造它；请求扩展使用 `addServerMiddleware`。
+6. **客户端预取数据**：缓存目前不会自动注入目标页面，示例明确调用 `getPrefetchedData`，并在 UI 中提示这一点。
+7. **监控去重**：框架客户端已有性能采集入口，Monitor 插件关闭自身 Web Vitals 监听，避免同一指标重复上报。
+8. **Server bundle 体积**：页面为同构读取数据而引用了较宽的 `@nami/client` 入口，当前生产构建会出现 server entry/page 约 800 KiB 的性能警告，这是后续做 server-safe 子入口和 tree-shaking 的优化点。
+9. **同服务监控端点停机**：Monitor 上报地址也是当前 Koa 服务。优雅停机时 HTTP server 先关闭，最后一个 beacon 可能重试失败；这不影响停机完成，生产环境通常使用独立采集端点。
 
-面试时应区分“框架设计意图”“类型/API 已提供”“当前运行时真正消费”三个层级。这个示例只把已真实执行的能力写成成功路径，并把兼容层集中在入口和配置文件中。
+面试时应区分“框架设计意图”“类型/API 已提供”“当前运行时真正消费”三个层级。这个示例只把已真实执行的能力写成成功路径，并显式列出仍存在的边界。
 
 ## 10. 手工浏览器验收清单
 
@@ -325,7 +336,8 @@ dist/
 - 在 `/rendering/csr` 操作计数、表单和浏览器请求。
 - 在 SSR 页面刷新，确认 View Source 已有业务文本，控制台无 Hydration warning。
 - 在 Streaming 页禁用缓存并观察 Network waterfall，确认内容分两段补齐。
-- 在 `/client/runtime` 检查 push/replace/back、NamiLink 预取和两套请求 API。
+- 在 `/client/runtime` 检查 push/replace/back、NamiLink 预取；用 Network throttling
+  观察首次数据局部骨架、保留旧数据的后台刷新状态与失败重试。
 - 在 `/stability` 分别触发局部/插件全局 render error 和 503 请求，确认边界 reset 与健康请求都能恢复。
 - 在 `/plugins` 检查 `onClientInit → onHydrated → onRouteChange` 时间线。
 - 查看 Application → Service Workers，确认 `/sw.js` 注册；它不拦截 fetch。

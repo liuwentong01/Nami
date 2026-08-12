@@ -98,13 +98,6 @@ export const HOOK_DEFINITIONS: Record<string, HookDefinition> = {
     stage: 'client',
   },
 
-  /** 包裹根组件（瀑布流：层层包裹） */
-  wrapApp: {
-    name: 'wrapApp',
-    type: HookType.Waterfall,
-    stage: 'client',
-  },
-
   /** 路由变化（并行：页面埋点、统计等） */
   onRouteChange: {
     name: 'onRouteChange',
@@ -113,6 +106,13 @@ export const HOOK_DEFINITIONS: Record<string, HookDefinition> = {
   },
 
   // ==================== 通用 ====================
+
+  /** 双端包裹根组件（瀑布流：层层包裹，SSR 与 Hydration 必须同序） */
+  wrapApp: {
+    name: 'wrapApp',
+    type: HookType.Waterfall,
+    stage: 'common',
+  },
 
   /** 统一错误处理（并行：多个错误处理器共存） */
   onError: {

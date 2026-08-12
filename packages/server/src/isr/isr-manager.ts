@@ -23,7 +23,7 @@
  * );
  *
  * // 按需失效
- * await manager.invalidate('/products/1');       // 按路径失效
+ * await manager.invalidate('/products/1?locale=zh'); // 按完整 URL 精确失效
  * await manager.invalidateByTag('product:123');  // 按标签失效
  *
  * // 缓存预热
@@ -42,10 +42,8 @@
 import type { CacheStore, CacheEntry, ISRCacheResult, ISRConfig, CacheStats } from '@nami/shared';
 import { createLogger, generateETag } from '@nami/shared';
 import { RevalidationQueue } from './revalidation-queue';
-import {
-  evaluateCacheFreshness,
-  SWRState,
-} from './stale-while-revalidate';
+import { sanitizeCachedResponseHeaders } from './response-headers';
+import { evaluateCacheFreshness, SWRState } from './stale-while-revalidate';
 import type { SWROptions } from './stale-while-revalidate';
 
 /** 模块级日志实例 */
@@ -76,6 +74,16 @@ export interface ISRManagerOptions {
 export interface ISRRenderPayload {
   html: string;
   tags?: string[];
+  /** 本次渲染实际声明的重验证间隔；优先于路由默认值 */
+  revalidate?: number;
+  /** false 时只把结果返回给当前请求，不写入 ISR 缓存 */
+  cacheable?: boolean;
+  /** 用于并发冷 MISS 的跟随请求恢复下游响应状态 */
+  statusCode?: number;
+  /** 用于并发冷 MISS 的跟随请求恢复下游响应头 */
+  headers?: Record<string, string>;
+  /** 删除已有条目且不写入新条目；用于 redirect / notFound 等控制结果 */
+  invalidate?: boolean;
 }
 
 /**
@@ -99,11 +107,7 @@ export class ISRManager {
   /** 同一缓存键的同步渲染合并，避免冷启动或过期瞬间并发放大 */
   private readonly inFlightRenders = new Map<string, Promise<ISRCacheResult>>();
 
-  constructor(
-    config: ISRConfig,
-    cacheStore: CacheStore,
-    options: ISRManagerOptions = {},
-  ) {
+  constructor(config: ISRConfig, cacheStore: CacheStore, options: ISRManagerOptions = {}) {
     this.config = config;
     this.cacheStore = cacheStore;
     this.swrOptions = options.swrOptions ?? {};
@@ -154,10 +158,24 @@ export class ISRManager {
     revalidateSeconds: number,
     backgroundRevalidateFn?: () => Promise<ISRRenderPayload | string>,
   ): Promise<ISRCacheResult> {
-    const effectiveRevalidate = revalidateSeconds || this.config.defaultRevalidate;
+    const effectiveRevalidate = normalizeRevalidate(
+      revalidateSeconds,
+      this.config.defaultRevalidate,
+    );
 
     // ===== 1. 尝试读取缓存 =====
-    const cachedEntry = await this.cacheStore.get(key);
+    // revalidate=0 只允许进程内正在执行的渲染被合并，不能读取或写入持久缓存。
+    // 同时清理旧版本或配置变更前可能遗留的条目，避免某些存储把 TTL=0 当作永不过期。
+    let cachedEntry: CacheEntry | null = null;
+    if (effectiveRevalidate === 0) {
+      await this.deleteCacheEntryBestEffort(key, 'revalidate=0');
+    } else {
+      cachedEntry = await this.cacheStore.get(key);
+      if (cachedEntry && !isValidRevalidate(cachedEntry.revalidateAfter, false)) {
+        await this.deleteCacheEntryBestEffort(key, '清理非法或 revalidate=0 历史条目');
+        cachedEntry = null;
+      }
+    }
 
     if (cachedEntry) {
       // ===== 2. 评估缓存新鲜度 =====
@@ -185,6 +203,9 @@ export class ISRManager {
             isCacheMiss: false,
             createdAt: cachedEntry.createdAt,
             etag: cachedEntry.etag,
+            revalidateAfter: cachedEntry.revalidateAfter,
+            statusCode: cachedEntry.statusCode,
+            headers: cachedEntry.headers,
           };
         }
 
@@ -202,7 +223,7 @@ export class ISRManager {
           this.revalidationQueue.enqueue(
             key,
             backgroundRevalidateFn ?? renderFn,
-            effectiveRevalidate,
+            cachedEntry.revalidateAfter,
             cachedEntry.tags,
           );
 
@@ -212,6 +233,9 @@ export class ISRManager {
             isCacheMiss: false,
             createdAt: cachedEntry.createdAt,
             etag: cachedEntry.etag,
+            revalidateAfter: cachedEntry.revalidateAfter,
+            statusCode: cachedEntry.statusCode,
+            headers: cachedEntry.headers,
           };
         }
 
@@ -255,7 +279,61 @@ export class ISRManager {
   ): Promise<ISRCacheResult> {
     try {
       const payload = await renderFn();
-      const { html, tags } = normalizeRenderPayload(payload);
+      const normalized = normalizeRenderPayload(payload);
+      const { html, tags, statusCode = 200, headers } = normalized;
+      const renderedRevalidate = normalizeRevalidate(normalized.revalidate, effectiveRevalidate);
+      const cachedHeaders = sanitizeCachedResponseHeaders(headers);
+      const cacheable = normalized.cacheable !== false && statusCode >= 200 && statusCode < 300;
+
+      if (normalized.invalidate) {
+        await this.deleteCacheEntryBestEffort(key, `控制响应 ${statusCode}`);
+        logger.info('ISR 控制响应已使旧缓存失效', {
+          key,
+          statusCode,
+        });
+
+        return {
+          html,
+          isStale: false,
+          isCacheMiss: true,
+          cacheSkipped: true,
+          statusCode,
+          headers: cachedHeaders,
+          revalidateAfter: renderedRevalidate,
+        };
+      }
+
+      if (renderedRevalidate === 0) {
+        await this.deleteCacheEntryBestEffort(key, '动态 revalidate=0');
+        logger.info('ISR revalidate=0，仅复用进程内同步渲染结果', { key });
+
+        return {
+          html,
+          isStale: false,
+          isCacheMiss: true,
+          cacheSkipped: true,
+          statusCode,
+          headers: cachedHeaders,
+          revalidateAfter: 0,
+        };
+      }
+
+      if (!cacheable) {
+        logger.warn('ISR 渲染结果不可缓存，跳过写入', {
+          key,
+          statusCode,
+        });
+
+        return {
+          html,
+          isStale: false,
+          isCacheMiss: true,
+          cacheSkipped: true,
+          statusCode,
+          headers: cachedHeaders,
+          revalidateAfter: renderedRevalidate,
+        };
+      }
 
       // 生成 ETag（用于条件请求）
       const etag = generateETag(html);
@@ -264,18 +342,22 @@ export class ISRManager {
       const entry: CacheEntry = {
         content: html,
         createdAt: Date.now(),
-        revalidateAfter: effectiveRevalidate,
+        revalidateAfter: renderedRevalidate,
         tags: tags ?? [],
         etag,
+        statusCode,
+        headers: cachedHeaders,
       };
 
-      // 写入缓存（异步，不阻塞响应）
-      void this.cacheStore.set(key, entry, effectiveRevalidate * 2).catch((err) => {
+      // 在释放同 key 的 in-flight 合并前完成写入，避免出现短暂的二次冷 MISS 窗口。
+      try {
+        await this.cacheStore.set(key, entry, renderedRevalidate * 2);
+      } catch (err) {
         logger.error('ISR 缓存写入失败', {
           key,
           error: err instanceof Error ? err.message : String(err),
         });
-      });
+      }
 
       return {
         html,
@@ -283,6 +365,9 @@ export class ISRManager {
         isCacheMiss: true,
         createdAt: entry.createdAt,
         etag,
+        statusCode,
+        headers: cachedHeaders,
+        revalidateAfter: renderedRevalidate,
       };
     } catch (error) {
       logger.error('ISR 同步渲染失败', {
@@ -293,17 +378,31 @@ export class ISRManager {
     }
   }
 
+  /** 缓存失效失败不能把一次本可正常返回的页面渲染升级为 500。 */
+  private async deleteCacheEntryBestEffort(key: string, reason: string): Promise<void> {
+    try {
+      await this.cacheStore.delete(key);
+    } catch (error) {
+      logger.error('ISR 缓存删除失败，继续返回本次渲染结果', {
+        key,
+        reason,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   /**
-   * 按路径失效缓存
+   * 按完整 URL 精确失效缓存
    *
-   * 主动使指定路径的缓存失效，下次请求时将触发重新渲染。
-   * 适用于 CMS 内容更新后的即时刷新场景。
+   * 主动使指定缓存键失效，下次请求时将触发重新渲染。默认缓存键包含
+   * pathname 与 query，因此该方法不会自动删除同 pathname 的其他 query 变体。
+   * 需要批量清理这些变体时，应为它们设置共同 tag 并调用 invalidateByTag()。
    *
-   * @param path - 需要失效的路径
+   * @param url - 需要失效的完整 URL 缓存键（pathname + query）
    */
-  async invalidate(path: string): Promise<void> {
-    logger.info('ISR 按路径失效缓存', { path });
-    await this.cacheStore.delete(path);
+  async invalidate(url: string): Promise<void> {
+    logger.info('ISR 按完整 URL 精确失效缓存', { url });
+    await this.cacheStore.delete(url);
   }
 
   /**
@@ -343,10 +442,7 @@ export class ISRManager {
    * );
    * ```
    */
-  async warmup(
-    routes: string[],
-    renderFn: (path: string) => Promise<string>,
-  ): Promise<void> {
+  async warmup(routes: string[], renderFn: (path: string) => Promise<string>): Promise<void> {
     logger.info('开始 ISR 缓存预热', {
       routeCount: routes.length,
       routes,
@@ -396,7 +492,9 @@ export class ISRManager {
    *
    * @returns 缓存统计信息
    */
-  async getStats(): Promise<CacheStats & { queueStatus: ReturnType<RevalidationQueue['getStatus']> }> {
+  async getStats(): Promise<
+    CacheStats & { queueStatus: ReturnType<RevalidationQueue['getStatus']> }
+  > {
     const cacheStats = await this.cacheStore.getStats();
     const queueStatus = this.revalidationQueue.getStatus();
 
@@ -438,5 +536,33 @@ function normalizeRenderPayload(payload: ISRRenderPayload | string): ISRRenderPa
   return {
     html: payload.html,
     tags: payload.tags,
+    revalidate: payload.revalidate,
+    cacheable: payload.cacheable,
+    statusCode: payload.statusCode,
+    headers: payload.headers,
+    invalidate: payload.invalidate,
   };
+}
+
+function normalizeRevalidate(value: number | undefined, fallback: number): number {
+  const normalizedFallback = isValidRevalidate(fallback) ? fallback : 0;
+
+  if (value === undefined) {
+    return normalizedFallback;
+  }
+
+  if (!isValidRevalidate(value)) {
+    logger.warn('忽略非法 ISR revalidate，使用上游默认值', {
+      value,
+      fallback: normalizedFallback,
+      requirement: '单位为秒，必须是非负有限整数',
+    });
+    return normalizedFallback;
+  }
+
+  return value;
+}
+
+function isValidRevalidate(value: number, allowZero = true): boolean {
+  return Number.isFinite(value) && Number.isInteger(value) && (allowZero ? value >= 0 : value > 0);
 }

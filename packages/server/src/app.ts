@@ -64,7 +64,6 @@ import { createCacheStore } from './isr/cache-store';
 import { ISRManager } from './isr/isr-manager';
 import type {
   AppElementFactory,
-  HTMLRenderer,
   ModuleLoaderLike,
   AssetManifest,
 } from '@nami/core';
@@ -103,11 +102,6 @@ export interface CreateServerOptions {
   appElementFactory?: AppElementFactory;
 
   /**
-   * 兼容 entry-server.renderToHTML() 的 HTML 渲染函数
-   */
-  htmlRenderer?: HTMLRenderer;
-
-  /**
    * 页面模块加载器
    *
    * 用于让默认服务端链路也能解析页面级数据预取函数，
@@ -131,7 +125,6 @@ export interface CreateServerOptions {
    */
   runtimeProvider?: () => Promise<{
     appElementFactory?: AppElementFactory;
-    htmlRenderer?: HTMLRenderer;
     moduleLoader?: ModuleLoaderLike;
     assetManifest?: AssetManifest;
   }>;
@@ -346,7 +339,6 @@ export async function createNamiServer(
     pluginManager,
     degradationManager,
     appElementFactory: options.appElementFactory,
-    htmlRenderer: options.htmlRenderer,
     moduleLoader: options.moduleLoader,
     assetManifest: options.assetManifest,
     isrManager,

@@ -19,3 +19,14 @@ export { HeadManager } from './head-manager';
 // 脚本注入器
 export { ScriptInjector } from './script-injector';
 export type { AssetManifest, ScriptAttributes } from './script-injector';
+
+// CSR Shell loading 与静态应急页
+export {
+  CSR_SHELL_LOADING_MARKER,
+  DEFAULT_CSR_SHELL_SKELETON_HTML,
+  isSafeCSRShellSkeletonFragment,
+  resolveCSRShellSkeletonHTML,
+  createCSRRootContainer,
+  createStaticEmergencyHTML,
+  resolveStaticEmergencyHTML,
+} from './csr-shell-loading';

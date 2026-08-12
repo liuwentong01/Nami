@@ -6,7 +6,6 @@
  * 子页面通过 children 插入到 main 区域。
  */
 import React from 'react';
-import './global.css';
 
 interface AppProps {
   children: React.ReactNode;

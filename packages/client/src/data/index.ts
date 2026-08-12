@@ -18,6 +18,7 @@ export type { ClientFetchOptions, ClientFetchResult } from './use-client-fetch';
 // 数据注水器
 export {
   readServerData,
+  invalidateServerData,
   cleanupServerData,
   resetDataHydrator,
 } from './data-hydrator';

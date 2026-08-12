@@ -31,16 +31,22 @@ import type {
   RenderMeta,
   RenderTiming,
   PrefetchResult,
+  HydrationPayload,
 } from '@nami/shared';
+import { createElement, type ReactElement } from 'react';
 import {
   createLogger,
   createTimer,
+  generateDataScript,
+  NAMI_DATA_PROTOCOL_VERSION,
+  RenderMode as RenderModeEnum,
   Logger,
 } from '@nami/shared';
 
 import type { RendererOptions, PluginManagerLike } from './types';
 import type { AssetManifest } from '../html/script-injector';
 import { ScriptInjector } from '../html/script-injector';
+import { NamiDataProvider } from '../data/data-context';
 
 /**
  * 渲染器抽象基类
@@ -171,6 +177,80 @@ export abstract class BaseRenderer {
   }
 
   /**
+   * 生成客户端 Hydration 使用的统一注水协议。
+   *
+   * 页面 props 与渲染元信息必须有明确边界；否则客户端会把业务字段
+   * 误当作 envelope，混合渲染项目也无法判断应 hydrateRoot 还是 createRoot。
+   */
+  protected createHydrationData(context: RenderContext): HydrationPayload {
+    const renderMode = context.route.renderMode;
+    return {
+      version: NAMI_DATA_PROTOCOL_VERSION,
+      props: context.initialData ?? {},
+      degraded: context.extra.__nami_data_degraded === true,
+      renderMode,
+      // SSR/ISR 的渲染结果和缓存条目都可以依赖 query，必须精确绑定完整 URL；
+      // SSG 是构建期按 pathname 生成的静态产物，因此忽略运行期 query。
+      routePath: renderMode === RenderModeEnum.SSG ? context.path : context.url,
+    };
+  }
+
+  /**
+   * 生成框架默认的静态 404 内容。
+   *
+   * `notFound` 发生在业务页面元素创建之前，不能用空 props 继续调用页面组件；
+   * 否则服务端会输出空根节点，而客户端又会把原路由以 CSR 方式重建。默认 404
+   * 因此是无 Hydration 的稳定 HTML，页面上的链接通过普通文档导航返回首页。
+   */
+  protected createNotFoundAppHTML(): string {
+    return [
+      '<main data-nami-not-found="true" role="main">',
+      '  <h1>404</h1>',
+      '  <p>页面不存在或已被移除。</p>',
+      '  <a href="/">返回首页</a>',
+      '</main>',
+    ].join('\n');
+  }
+
+  /** 将统一 Hydration 数据安全序列化为 window.__NAMI_DATA__ 脚本。 */
+  protected createHydrationDataScript(context: RenderContext): string {
+    return generateDataScript(this.createHydrationData(context));
+  }
+
+  /**
+   * 用与客户端一致的 DataProvider 包裹业务元素树。
+   * 这样页面在服务端使用 useServerData 时读取的仍是本次预取快照。
+   */
+  protected provideRenderData(appElement: ReactElement, context: RenderContext): ReactElement {
+    return createElement(NamiDataProvider, {
+      initialData: context.initialData ?? {},
+      degraded: context.extra.__nami_data_degraded === true,
+      requestId: context.requestId,
+      children: appElement,
+    });
+  }
+
+  /**
+   * 生成最终交给 ReactDOMServer 的应用树。
+   *
+   * 服务端与客户端必须以同样的顺序执行 `wrapApp`，否则插件添加的
+   * Provider、Suspense 或错误边界只出现在 Hydration 的一侧。数据 Provider
+   * 属于 Nami 内部树，先包裹业务元素，再让插件从外向内累积包装。
+   */
+  protected async prepareAppElement(
+    appElement: ReactElement,
+    context: RenderContext,
+  ): Promise<ReactElement> {
+    const elementWithData = this.provideRenderData(appElement, context);
+
+    if (!this.pluginManager?.runWaterfallHook) {
+      return elementWithData;
+    }
+
+    return await this.pluginManager.runWaterfallHook<ReactElement>('wrapApp', elementWithData);
+  }
+
+  /**
    * 构造标准的渲染结果对象
    *
    * 封装了 RenderResult 的创建逻辑，确保所有渲染器返回格式一致的结果。
@@ -274,6 +354,52 @@ export abstract class BaseRenderer {
   }
 
   /**
+   * 消费缓存插件在 onBeforeRender 中写入的命中结果。
+   *
+   * 缓存读取必须发生在数据预取和 React 渲染之前；命中后直接构造统一的
+   * RenderResult，并执行 onAfterRender 供监控等插件观察本次缓存响应。
+   */
+  protected async resolvePluginCacheHit(
+    context: RenderContext,
+    timing: RenderTiming,
+  ): Promise<RenderResult | null> {
+    const { extra } = context;
+    if (extra.__cache_hit !== true || typeof extra.__cache_content !== 'string') {
+      return null;
+    }
+
+    const cachedStatusCode =
+      typeof extra.__cache_status_code === 'number' && Number.isInteger(extra.__cache_status_code)
+        ? extra.__cache_status_code
+        : 200;
+    const cachedHeaders = isStringRecord(extra.__cache_headers) ? { ...extra.__cache_headers } : {};
+
+    if (typeof extra.__cache_etag === 'string' && extra.__cache_etag) {
+      cachedHeaders.ETag = extra.__cache_etag;
+    }
+    cachedHeaders['X-Nami-Plugin-Cache'] = 'HIT';
+
+    const result = this.createDefaultResult(
+      extra.__cache_content,
+      cachedStatusCode,
+      this.getMode(),
+      timing,
+      {
+        headers: cachedHeaders,
+        cacheHit: true,
+      },
+    );
+
+    this.logger.debug('插件页面缓存命中，跳过数据预取与渲染', {
+      url: context.url,
+      cacheKey: extra.__cache_key,
+    });
+
+    await this.callPluginHook('afterRender', context, result);
+    return result;
+  }
+
+  /**
    * 解析 JS/CSS 资源标签
    *
    * 优先从 assetManifest 中获取真实文件路径（含 content hash），
@@ -333,4 +459,13 @@ export abstract class BaseRenderer {
         });
     });
   }
+}
+
+/** 判断插件协议中的未知值是否为纯字符串响应头对象。 */
+function isStringRecord(value: unknown): value is Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+
+  return Object.values(value).every((item) => typeof item === 'string');
 }

@@ -2,7 +2,7 @@
 
 
 
-Nami's rendering system consists of four formal `RenderMode` enumerations and a streaming variant of SSR. There are only four enumerations in the source code: `csr`, `ssr`, `ssg`, and `isr`; Streaming SSR is not an independent enumeration, but the renderer variant selected when the SSR route is `meta.streaming === true` and the runtime has `appElementFactory`.
+Nami's rendering system consists of four formal `RenderMode` enumerations and a streaming variant of SSR. There are only four enumerations in the source code: `csr`, `ssr`, `ssg`, and `isr`; Streaming SSR is not an independent enumeration, but the renderer variant selected when the SSR route is `meta.streaming === true`. All SSR variants use the mandatory `createAppElement(context)` server-entry contract.
 
 
 
@@ -12,7 +12,7 @@ When reading this chapter, you need to distinguish three links:
 
 1. **HTML rendering link**: `renderMiddleware` creates a specific Renderer after matching the route and outputs the page HTML.
 2. **Data prefetch API link**: `dataPrefetchMiddleware` only processes `GET /_nami/data/*` and returns JSON, which is not equivalent to data prefetching before HTML rendering.
-3. **Build-time static generation path**: `NamiBuilder.generateStaticPages()` reads the server bundle after `nami build` and writes static HTML for the SSG/ISR route.
+3. **Build-time static generation path**: after compilation, `NamiBuilder.generateStaticPages()` wires the server bundle and delegates to `SSGRenderer.generateStatic()` to write static HTML for SSG/ISR routes.
 
 
 
@@ -83,17 +83,17 @@ The relevant constants are located at `packages/shared/src/constants/render-mode
 
 
 
-These three constants explain a common question: SSG does not need to perform server-side rendering during the runtime, but the build phase still requires the server bundle to execute `getStaticProps`, `getStaticPaths` or page rendering functions.
+These three constants explain a common question: SSG does not need to perform server-side rendering during runtime, but the build phase still requires the server bundle to execute `getStaticProps`, `getStaticPaths`, and `createAppElement(context)`.
 
 
 
 | Features | CSR | SSR | SSG | ISR | Streaming SSR |
 |------|-----|-----|-----|-----|---------------|
 | Is the `RenderMode` enumeration | Yes | Yes | Yes | Yes | No, SSR variant |
-| HTML generation location | Generate empty shell on request | Server-side rendering for each request | Build-time generation | Build-time + runtime revalidation | Server-side streaming rendering for each request |
+| HTML generation location | Generate a temporary-skeleton shell on request | Server-side rendering for each request | Build-time generation | Build-time + runtime revalidation | Server-side streaming rendering for each request |
 | Whether to execute the page data function | Not executed by the server | HTML link execution `getServerSideProps` | Construction period execution `getStaticProps` | Cache miss/revalidation execution `getStaticProps` | Executed the same as SSR `getServerSideProps` |
 | Is the server required during runtime | No | Yes | React SSR is not required when reading static files | Yes | Yes |
-| Whether the first screen HTML already contains content | No | Yes | Yes | Yes when the cache is hit | Yes, and it can be returned in chunks |
+| Whether the first screen HTML already contains content | Temporary loading skeleton only; no business content | Yes | Yes | Yes when the cache is hit | Yes, and it can be returned in chunks |
 | Typical cache | Short cache HTML shell | `private, no-cache` | Long cache static HTML | SWR cache | `private, no-cache` |
 
 
@@ -189,7 +189,10 @@ preferStreaming:
 
 
 
-Whether `StreamingSSRRenderer` is actually created depends on `RendererFactory`: only when `preferStreaming === true` and `appElementFactory` exist, the streaming renderer will be returned; otherwise, ordinary `SSRRenderer` will still be returned.
+For a valid SSR runtime, `appElementFactory` is mandatory. `RendererFactory` returns
+`StreamingSSRRenderer` when `preferStreaming === true`; otherwise it returns the
+ordinary `SSRRenderer`. A missing factory is a renderer-creation error rather than
+a reason to silently switch from streaming to ordinary SSR.
 
 
 
@@ -329,8 +332,10 @@ HTML shell contains:
 2. Title and description
 3. `<meta name="renderer" content="csr">`
 4. CSS resource link
-5. Empty container `<div id="nami-root"></div>`
+5. `<div id="nami-root">...</div>` containing a temporary `data-nami-csr-shell="loading"` skeleton
 6. Client JS Bundle
+
+The temporary skeleton covers bundle download, client initialization, and the time before the first React commit. Successful client JavaScript replaces the root contents. This is distinct from the no-JavaScript Level 3 static emergency page.
 
 
 
@@ -346,7 +351,7 @@ async prefetchData() {
 
 
 
-Default response cache:
+Default response cache when GSP does not declare `revalidate`:
 
 
 
@@ -392,11 +397,15 @@ SSR performs data prefetching and React rendering on the server side for each re
 ```text
 SSRRenderer.render(context)
   -> callPluginHook('beforeRender')
+  -> resolvePluginCacheHit(context)
   -> withTimeout(executeSSR(), config.server.ssrTimeout)
        -> prefetchData(context)
        -> context.initialData = prefetchResult.data
+       -> redirect/notFound? return early
        -> renderAppHTML(context)
-       -> ensureDocumentHTML(renderedHTML, context)
+            -> appElementFactory(context)
+            -> renderToString(element)
+       -> assembleHTML(renderedHTML, context)
        -> createDefaultResult(..., RenderMode.SSR)
   -> callPluginHook('afterRender')
 ```
@@ -407,18 +416,16 @@ SSRRenderer.render(context)
 
 
 
-SSR supports two server-side rendering portals:
+The server entry has one rendering contract:
 
-
-
-| Entrance | Description |
+| Entry export | Description |
 |------|------|
-| `htmlRenderer(context, initialData)` | Compatible with `entry-server.renderToHTML()`, directly returns HTML string |
-| `appElementFactory(context)` | Returns the React element, the framework dynamically imports `react-dom/server` and calls `renderToString()` |
+| `createAppElement(context)` | Returns the React element tree. The CLI resolves it as `appElementFactory`, and the selected renderer calls React's string or streaming API. |
 
-
-
-`renderAppHTML()` takes precedence over `htmlRenderer`. If `htmlRenderer` is not available, use `appElementFactory`.
+The application does not return an HTML string or a complete document. Keeping the
+entry at the React-tree boundary lets ordinary SSR, Streaming SSR, SSG, and ISR use
+the same component tree while Nami consistently controls rendering, the outer
+Document, manifest assets, and serialized hydration data.
 
 
 
@@ -446,7 +453,7 @@ Pass in the context of `getServerSideProps`:
 
 
 
-In the current HTML rendering link, `SSRRenderer` will execute `getServerSideProps` first. If `redirect` or `notFound` is returned, the renderer will short-circuit before React rendering and return 30x or 404 respectively; otherwise, `result.props ?? {}` will be used as page data to continue assembling HTML. Streaming SSR will also process such early results before starting streaming output to avoid trying to change the status code after the shell has been written.
+In the current HTML rendering path, `SSRRenderer` executes `getServerSideProps` first. A `redirect` short-circuits to 30x, while `notFound` returns a stable static 404 before business React rendering. The default 404 intentionally includes neither Hydration data nor a client bundle, preventing an empty root from rebuilding the original business route with CSR. Streaming SSR handles the same early results before any shell bytes are written.
 
 
 
@@ -454,7 +461,8 @@ In the current HTML rendering link, `SSRRenderer` will execute `getServerSidePro
 
 
 
-If `htmlRenderer` returns a complete HTML document, `ensureDocumentHTML()` directly transmits it transparently; otherwise, `assembleHTML()` assembles the document:
+After React produces the application markup, `assembleHTML()` always assembles the
+framework-owned document:
 
 
 
@@ -533,7 +541,9 @@ SSG is divided into build phase and run phase.
 
 
 
-Currently the static generation of `nami build` is mainly done by `NamiBuilder.generateStaticPages()` instead of executing `SSGRenderer.generateStatic()` separately:
+`NamiBuilder.generateStaticPages()` delegates the build-time work to
+`SSGRenderer.generateStatic()`, so static generation and runtime rendering share
+the same element-factory and document-assembly contracts:
 
 
 
@@ -541,31 +551,50 @@ Currently the static generation of `nami build` is mainly done by `NamiBuilder.g
 nami build
   -> client/server Webpack compilation completed
   -> generateStaticPages(routes)
-       -> Read dist/server/entry-server.js
-       -> Create ModuleLoader
-       -> Traverse SSG/ISR route
-       -> Dynamic routing executes getStaticPaths()
-       -> Execute getStaticProps() for each path
-       -> renderToHTML / pageModule.render / pageModule.default / hidden shell
-       -> write dist/static/{path}/index.html
+       -> read createAppElement from dist/server/entry-server.js
+       -> create ModuleLoader and read asset-manifest.json
+       -> create SSGRenderer
+       -> SSGRenderer.generateStatic(routes)
+            -> traverse SSG/ISR routes
+            -> dynamic routes execute getStaticPaths()
+            -> execute getStaticProps() for each path
+            -> createAppElement(context) + renderToString()
+            -> framework Document/assets/hydration assembly
+            -> write matching *.html and *.html.nami.json files
 ```
 
 
 
-For dynamic routing, `generateStaticPages()` is only executed when `route.path.includes(':') && route.getStaticPaths` is `getStaticPaths`. If the dynamic route cannot find the corresponding function, a warn will be logged and the route will be skipped.
+For a static route, the renderer generates one path. A dynamic route requires a
+configured `getStaticPaths` export resolvable through `ModuleLoader`. A missing
+declaration, unresolved export, or degraded data-prefetch result is recorded as a
+generation error; other routes continue, and the Builder includes the failures in
+the build result.
 
+Here “dynamic” covers the matcher's complete segment syntax, not only a bare
+`:param`:
 
+| Route token | `getStaticPaths.params` key | Value shape |
+|-------------|-----------------------------|-------------|
+| `:id` | `id` | One non-empty segment |
+| `:id?` | Optional `id` | Optional single segment |
+| `:id(\\d+)` | `id` | Must satisfy the constraint |
+| `:path+` | `path` | One or more `/`-separated segments |
+| `*` | `'*'` | Non-empty remaining path |
+| `(.*)` | `$0` (then `$1`, and so on) | Multi-segment value that may be empty |
 
-Build-time rendering strategies in order of priority:
+The build first materializes params into a segment-encoded canonical URL, then runs
+formal `matchPath(route.path, url, { exact: true })` parameter round-trip validation.
+A missing required parameter, wrong parameter type, `/` in a single-segment value,
+constraint mismatch, or generated URL that cannot match exactly becomes a page error.
+If two routes/param sets resolve to the same absolute artifact path, the collision is
+also a build failure. These checks do not introduce a new URL-to-file format: `/`
+still maps to `index.html`, `/about` to `about.html`, and `/blog/hello` to
+`blog/hello.html`.
 
-
-
-| Priority | Conditions | Behavior |
-|--------|------|------|
-| 1 | `serverBundle.renderToHTML` is a function | calls `renderToHTML(actualPath, props)` |
-| 2 | `pageModule.render` is a function | calling `pageModule.render({ path, props })` |
-| 3 | `pageModule.default` is the function | `React.createElement(default, props)` followed by `renderToString()` |
-| 4 | None of them exist | Generate minimal HTML shell with `window.__NAMI_DATA__` |
+There is no Builder-specific page renderer or hidden-shell fallback. The compiled
+server entry must export `createAppElement(context)` and the client asset manifest
+must exist.
 
 
 
@@ -575,9 +604,20 @@ The output path is:
 
 ```text
 dist/static/index.html
-dist/static/about/index.html
-dist/static/blog/hello/index.html
+dist/static/index.html.nami.json
+dist/static/about.html
+dist/static/about.html.nami.json
+dist/static/blog/hello.html
+dist/static/blog/hello.html.nami.json
 ```
+
+Each `*.html.nami.json` response sidecar records its version,
+`page | redirect | not-found` kind, status, headers, and optional `revalidate`.
+The runtime reads the HTML and sidecar together, so build-time GSP redirects/404s
+do not become 200 responses. A legacy artifact without a sidecar remains compatible
+as a normal 200 SSG page; an existing but invalid sidecar fails loudly.
+An explicit GSP redirect status is limited to `301/302/303/307/308`; when omitted,
+permanent resolves to `308` and temporary to `307`.
 
 
 
@@ -592,15 +632,31 @@ The runtime logic of `SSGRenderer.render()` is to read static files:
 ```text
 SSGRenderer.render(context)
   -> callPluginHook('beforeRender')
-  -> resolveStaticFilePath(context.path)
+  -> materializeStaticRoutePath(route.path, context.params)
+  -> matchPath(..., { exact: true }) round-trip
+  -> resolveStaticFilePath(canonicalPath)
   -> fileReader.readFile(filePath)
+  -> readStaticPageMetadata(filePath)
   -> createDefaultResult(..., RenderMode.SSG)
   -> callPluginHook('afterRender')
 ```
 
 
 
-When the static file does not exist, `RenderError` is thrown, and the upper layer enters the downgrade process.
+For a dynamic SSG route with `fallback: false`, a path without an artifact returns a
+stable static 404 with no Hydration payload or client bundle. Other missing static
+files still throw `RenderError` and enter the upper degradation path.
+
+The supported `getStaticPaths.fallback` matrix is:
+
+| Mode | Supported value | Non-prebuilt path |
+|------|-----------------|-------------------|
+| SSG | `false` | Stable static 404 |
+| ISR | `'blocking'` | Cold `MISS`; synchronously run GSP + React and write CacheStore |
+
+`true` and other SSG/ISR combinations are not implemented. A mismatch between the
+route and `getStaticPaths()` value, or an unsupported value, is recorded as a build
+generation error.
 
 
 
@@ -612,13 +668,19 @@ Default response cache:
 Cache-Control: public, max-age=3600, s-maxage=86400
 ```
 
+When GSP explicitly returns `revalidate` (including a valid `0`), the build writes
+the matching `s-maxage` / `stale-while-revalidate` headers into the sidecar and the
+runtime uses that page-specific value.
+
 
 
 ### `SSGRenderer.generateStatic()`
 
-
-
-`SSGRenderer` itself also implements `generateStatic(routes)`, `getStaticPaths`, `getStaticProps` and other construction capabilities, but the current CLI uses `NamiBuilder.generateStaticPages()` to build the main link. Documentation and troubleshooting should be based on the Builder link.
+This is the implementation used by the Builder. It resolves route paths and data
+functions through `ModuleLoader`, creates a complete `RenderContext`, calls the
+shared application element factory, renders the tree with `renderToString()`,
+assembles the framework Document, and writes the static file. The Builder supplies
+the absolute static directory and records the renderer's per-page failures.
 
 
 
@@ -670,12 +732,16 @@ The default cache keys are:
 
 
 ```typescript
-ctx.path
+ctx.url
 ```
 
 
 
-This means that the default ISR cache layer does not contain queries, cookies, or headers. If the page content depends on these factors, you need to customize the cache key, otherwise different variants may share the same cache.
+This is the raw full request URL, so the query string is included and query ordering
+is not canonicalized: `?a=1&b=2` and `?b=2&a=1` are distinct keys. Cookies,
+headers, and tenant identity are not included. Use a custom `generateCacheKey()`
+when those are content dimensions, and use tags when invalidating a family of URL
+variants.
 
 
 
@@ -703,7 +769,12 @@ Default `staleMultiplier = 2`.
 | `Fresh` | Return to cache directly, `X-Nami-Cache: HIT` |
 | `Stale` | Return the old HTML, initiate internal revalidation in the background, `X-Nami-Cache: STALE` |
 | `Expired` | Do not return old HTML, use synchronous rendering |
-| Miss | Render synchronously and write to cache asynchronously |
+| Miss | Render synchronously, await the cache write, then release same-key singleflight |
+
+An effective `revalidate = 0` is a persistent-ISR-cache bypass: Nami does not read or
+write CacheStore, removes the old key on a best-effort basis, and allows only
+same-key in-flight Promise coalescing inside the current Node process. It does not
+create a persistent entry with TTL zero.
 
 
 
@@ -720,6 +791,14 @@ X-Requested-With: nami-isr-revalidate
 
 Requests with this header will bypass `isrCacheMiddleware` and directly enter the rendering layer to avoid background re-validation and hitting the stale cache again.
 
+For normal successful pages, both cold rendering and background rebuilds store safely
+filtered `statusCode` / end-to-end headers in `CacheEntry` and generate an ETag from
+HTML; HIT/STALE restores them. If a background rebuild produces a valid GSP redirect
+or `404 notFound`, it deletes the old key and does not cache the control response;
+degradation and ordinary failures retain the old stale page. Synchronous singleflight
+and queue deduplication are process-local, and a queue `Promise.race()` timeout only
+stops waiting—it does not cancel the underlying render/fetch.
+
 
 
 ### `ISRRenderer`
@@ -733,11 +812,14 @@ The responsibility of `ISRRenderer` is not to handle cache hits, but to generate
 ```text
 ISRRenderer.render(context)
   -> callPluginHook('beforeRender')
+  -> resolvePluginCacheHit(context)
   -> handleCacheMiss()
        -> prefetchData(context)  // getStaticProps
        -> context.initialData = props
-       -> renderAppHTML(context)
-       -> ensureDocumentHTML(...)
+       -> redirect/notFound? short-circuit 30x/404 + no-store
+       -> appElementFactory(context)
+       -> renderToString(element)
+       -> assembleHTML(appHTML, context)
        -> createDefaultResult(..., RenderMode.ISR, cacheControl)
   -> callPluginHook('afterRender')
 ```
@@ -754,8 +836,8 @@ The `cacheControl` returned by ISRRenderer contains:
 
 ```typescript
 {
-  revalidate,
-  staleWhileRevalidate: revalidate * 2,
+  revalidate: effectiveRevalidate,
+  staleWhileRevalidate: effectiveRevalidate * 2,
   tags: extractCacheTags(context),
 }
 ```
@@ -773,7 +855,7 @@ There are two types of tag sources:
 
 
 
-Two sets of cache key logic need to be distinguished: `isrCacheMiddleware` uses `ctx.path` by default, while `ISRRenderer.buildCacheKey()` will spell the sorted query into the key. The default production link usually passes through the middleware first, so the actual cache hit behavior is subject to the default key of the middleware.
+`isrCacheMiddleware` and `ISRRenderer.buildCacheKey()` now use the raw full request URL (pathname + query), matching the client Hydration data scope. Query ordering is not canonicalized, and cookies, headers, or tenant identity are not included; customize `generateCacheKey()` for other dimensions.
 
 
 
@@ -814,19 +896,19 @@ Streaming SSR is based on React 18’s `renderToPipeableStream()`. It is not a s
 
 
 
-`RendererFactory` creates `StreamingSSRRenderer` only if the following conditions are true:
+After validating the mandatory application factory, `RendererFactory` creates
+`StreamingSSRRenderer` when:
 
 
 
 ```typescript
 mode === RenderMode.SSR
   && preferStreaming
-  && appElementFactory
 ```
 
-
-
-If the SSR only provides `htmlRenderer`, the Streaming SSR will not be entered because streaming rendering requires a React element tree.
+The same `createAppElement(context)` tree is used by both ordinary and Streaming
+SSR. The difference is framework-controlled execution with `renderToString()` or
+`renderToPipeableStream()`.
 
 
 
@@ -915,7 +997,8 @@ But in the catch branch of the default `renderMiddleware`, the actual degradatio
 
 
 
-SSRs, ISRs, Streaming SSRs, and build-time boilerplate HTML can all be injected:
+Normal hydratable HTML from SSR, ISR, Streaming SSR, and build-time SSG uses the
+same hydration envelope:
 
 
 
@@ -935,7 +1018,24 @@ export const NAMI_DATA_VARIABLE = '__NAMI_DATA__';
 
 
 
-`generateDataScript(context.initialData)` injects the `initialData` object itself, which is the `props` returned by `getServerSideProps` / `getStaticProps`.
+Every normal server-side HTML output that can be hydrated calls `BaseRenderer.createHydrationData(context)` and
+passes the result through the XSS-safe `generateDataScript()` serializer:
+
+```typescript
+{
+  version: NAMI_DATA_PROTOCOL_VERSION,
+  props: context.initialData ?? {},
+  degraded: context.extra.__nami_data_degraded === true,
+  renderMode: context.route.renderMode,
+  // SSG reuses the build artifact by pathname; SSR/ISR bind pathname + query.
+  routePath: context.route.renderMode === RenderMode.SSG
+    ? context.path
+    : context.url,
+}
+```
+
+Page data and rendering metadata therefore have one stable boundary across SSR,
+Streaming SSR, SSG, and ISR.
 
 
 
@@ -949,7 +1049,7 @@ The client reads at `packages/client/src/data/data-hydrator.ts`:
 
 ```typescript
 const rawData = hydrateData<ServerInjectedData>(NAMI_DATA_VARIABLE);
-cachedData = rawData;
+cachedData = normalizeServerData(rawData);
 ```
 
 
@@ -962,12 +1062,19 @@ The client mounting entry is located at `packages/client/src/entry-client.tsx`:
 const serverData = readServerData();
 const renderMode = (serverData.renderMode || config.defaultRenderMode) as RenderMode;
 
-<NamiApp initialData={serverData.props} />
+<NamiApp
+  initialData={serverData.props}
+  initialDataDegraded={serverData.degraded}
+  initialRoutePath={serverData.routePath}
+  initialRenderMode={serverData.renderMode}
+/>
 ```
 
 
 
-This means that the current type level describes `window.__NAMI_DATA__` as containing `props`, `renderMode`, `routePath`, but the renderer injects the `props` object itself by default. If the business wants the client to read according to `serverData.props`, it needs to ensure that the injected data structure is consistent with the client's reading agreement. This is an area that needs special attention in the current implementation. The documentation does not treat type annotations as the actual output shape of all renderers.
+The client and server now consume the same envelope: `serverData.props` is the
+initial page data, `serverData.renderMode` selects the mount strategy, and
+`serverData.routePath` records the initial route.
 
 
 
@@ -975,14 +1082,14 @@ This means that the current type level describes `window.__NAMI_DATA__` as conta
 
 
 
-The client decides whether to Hydration based on `renderMode !== 'csr'` and the container has child nodes:
+The client hydrates only when the wire-protocol version is compatible, `renderMode !== 'csr'`, and the container has child nodes:
 
 
 
 | Conditions | Mounting method |
 |------|----------|
-| Non-CSR and `container.childNodes.length > 0` | `hydrateApp()`, reuse server-side HTML |
-| CSR or container is empty | `renderApp()`, client creates DOM |
+| Compatible `version`, non-CSR, and non-empty container | `hydrateApp()`, reuse server-side HTML |
+| Incompatible protocol, CSR, or empty container | `renderApp()`, client creates DOM |
 
 
 
@@ -1025,7 +1132,7 @@ Compared to HTML links:
 |------|--------------|--------------|
 | SSR data functions | `SSRRenderer.prefetchData()` | `dataPrefetchMiddleware` execution |
 | SSG/ISR data function | Build-time or ISR miss/revalidate execution | `dataPrefetchMiddleware` execution |
-| `redirect` / `notFound` | SSR / Streaming SSR will be short-circuited to 30x / 404 before rendering | API will be converted to 307/308 or 404 |
+| `redirect` / `notFound` | SSR / Streaming SSR short-circuit per request; SSG writes a control document + sidecar; explicit GSP redirect accepts only 301/302/303/307/308; an ISR cold MISS returns the control response while a background rebuild deletes the old key, and neither caches it | API uses explicit `statusCode` or default 307/308; `notFound` is 404 |
 | Return content | HTML/stream | JSON or 204 |
 | Path prefix | Page original path | `/_nami/data` |
 
@@ -1048,37 +1155,22 @@ Source code location:
 
 
 
-After the rendering error is thrown, `renderMiddleware` first checks whether the plug-in provides skeleton screen HTML:
-
-
-
-```typescript
-if (typeof renderContext.extra.__skeleton_fallback === 'string') {
-  ctx.status = 200;
-  ctx.set('X-Nami-Render-Mode', 'skeleton-fallback');
-  ctx.body = skeletonHtml;
-  return;
-}
-```
-
-
-
-Otherwise enter `DegradationManager.executeWithDegradation()`:
+`renderMiddleware` delegates the first render attempt to `DegradationManager`, which owns the full sequence:
 
 
 
 | Level | Conditions | Return |
 |------|------|------|
-| Level 0 | Original rendering retry successful | Original rendering result |
+| Level 0 | Initial rendering succeeds | Original rendering result |
 | Level 1 | `config.maxRetries > 0` | Result after retry |
-| Level 2 | `config.ssrToCSR` | CSR empty shell |
-| Level 3 | `context.route.skeleton` exists | Built-in skeleton screen HTML |
+| Level 2 | `config.ssrToCSR` | CSR shell with a temporary skeleton and client JavaScript |
+| Level 3 | Plugin static-emergency content or `context.route.skeleton` | No-JavaScript static emergency page (compatibility name: Skeleton) |
 | Level 4 | `config.staticHTML` exists | Static HTML |
 | Level 5 | All failed | 503 pages |
 
 
 
-Note: `context.route.skeleton` is currently only a condition that triggers the built-in skeleton HTML, not loading and rendering the skeleton component file.
+Note: `__csr_shell_skeleton` is recoverable loading UI for normal and degraded CSR. Level 3 plugin content cannot bypass Levels 1/2, and `context.route.skeleton` only triggers built-in static emergency HTML; it does not load the referenced component file. Route-chunk and business-data skeletons are client loading UI, not Level 3.
 
 
 
@@ -1138,7 +1230,10 @@ No. The source code's `RenderMode` enumeration has only four values. Streaming S
 
 
 
-Server-side rendering does not need to be performed during the runtime, but the server bundle execution page module, `getStaticProps`, `getStaticPaths` or `renderToHTML` is required during the build period. This is why `NEEDS_SERVER_BUNDLE` includes SSG.
+Server-side rendering does not need to be performed during runtime, but the build
+still needs the server bundle to execute page modules, `getStaticProps`,
+`getStaticPaths`, and `createAppElement(context)`. This is why
+`NEEDS_SERVER_BUNDLE` includes SSG.
 
 
 
@@ -1154,23 +1249,37 @@ No. It is an API for client-side routing to prefetch JSON. Data prefetching for 
 
 
 
-The HTML link of SSR and Streaming SSR will convert `redirect` / `notFound` of `getServerSideProps` into an HTTP response; the data prefetch API will also return the corresponding JSON/status code. SSG/ISR still needs to be understood in conjunction with the execution timing of the build period, cache layer, and specific renderer. Do not simply equate all modes to the complete semantics of Next.js.
+Execution timing differs, but the control semantics are now consistent. SSR and
+Streaming SSR short-circuit GSSP to 30x/404 per request. SSG writes GSP redirects or
+static 404 HTML plus a sidecar and restores the status/headers at runtime; an explicit
+GSP redirect status is limited to `301/302/303/307/308`. An ISR cold MISS returns the
+control response with `X-Nami-Cache: SKIP` and `private, no-store`. An internal
+background rebuild instead carries `private, no-store` and tells the queue to delete
+the old key; the original user response remains `STALE`. Neither path stores the
+control response as a successful page. Degradation and ordinary failures are
+different: they retain the old stale page.
 
 
 
-### Misunderstanding 5: ISR caches the complete URL by default
+### Misunderstanding 5: ISR canonicalizes query parameters in its full-URL cache key
 
 
 
-The default `isrCacheMiddleware` uses `ctx.path` as the cache key, without query. `ISRRenderer` The internal helper will spell query, but by default the production cache hits go through the middleware first, so it needs to be understood according to the middleware behavior.
+It does not. `isrCacheMiddleware`, `ISRRenderer`, and the Hydration data scope all use the raw full URL (pathname + query). Thus `?a=1&b=2` and `?b=2&a=1` are separate entries, while cookies, headers, and tenant identity are not included. Customize `generateCacheKey()` when different semantics are required.
 
 
 
-### Misunderstanding 6: `window.__NAMI_DATA__` must be `{ props, renderMode }`
+### Misunderstanding 6: `window.__NAMI_DATA__` contains only page props
 
 
 
-The type allows this structure, but the renderer injects `context.initialData` itself by default. The client `entry-client.tsx` reads `serverData.props`, so if the project relies on structured water injection, it needs to ensure that the server bundle output is consistent with the client reading protocol.
+No. For normal hydratable output, Nami consistently injects
+`{ version: 1, props, degraded, renderMode, routePath }`.
+The page consumes `props` and the optional degradation state; the client validates
+`version`, then uses the remaining metadata to choose hydration versus CSR mounting
+and scope the snapshot to the initial URL. Application entries should not replace
+it. A stable static 404 is the exception and injects neither this envelope nor a
+client bundle.
 
 
 

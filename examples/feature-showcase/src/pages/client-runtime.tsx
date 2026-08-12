@@ -7,6 +7,7 @@ import {
   useRouter,
 } from '@nami/client';
 import { useRequest } from '@nami/plugin-request';
+import { SkeletonText } from '@nami/plugin-skeleton';
 
 type JsonRecord = Record<string, unknown>;
 type PrefetchState = 'idle' | 'loading' | 'hit' | 'empty';
@@ -35,6 +36,9 @@ export default function ClientRuntimePage(): JSX.Element {
     cacheTime: 5_000,
     staleWhileRevalidate: true,
   });
+  const hasRuntimeData = runtimeRequest.data !== undefined;
+  const isRuntimeInitialLoading = runtimeRequest.loading && !hasRuntimeData;
+  const isRuntimeRefreshing = runtimeRequest.loading && hasRuntimeData;
 
   // NamiRequestPlugin 会在 onClientInit 中安装浏览器请求适配器。
   // useRequest 的自动请求发生在 useEffect 中，不承担 SSR 数据加载职责。
@@ -170,16 +174,63 @@ export default function ClientRuntimePage(): JSX.Element {
         <article className="feature-card">
           <p className="eyebrow">@nami/client</p>
           <h2>useClientFetch + SWR</h2>
-          <p>固定 URL 使用 5 秒缓存；缓存过期时先展示旧值，再在后台更新。</p>
-          <p className="data-value" aria-live="polite">
-            {runtimeRequest.loading ? '请求中…' : runtimeRequest.error ? '请求失败' : '请求完成'}
+          <p>
+            固定 URL 使用 5 秒缓存；首次没有数据时展示局部骨架，缓存过期时保留旧值并在后台更新。
           </p>
-          {runtimeRequest.error && (
-            <p className="callout" role="alert">
-              {runtimeRequest.error.message}
-            </p>
+          <p className="data-value" aria-live="polite">
+            {isRuntimeInitialLoading && '首次请求中…'}
+            {isRuntimeRefreshing && '正在后台刷新，旧数据继续可见…'}
+            {!runtimeRequest.loading &&
+              runtimeRequest.error &&
+              (hasRuntimeData ? '刷新失败，继续展示旧数据' : '请求失败')}
+            {!runtimeRequest.loading && !runtimeRequest.error && hasRuntimeData && '请求完成'}
+          </p>
+          {runtimeRequest.error && !hasRuntimeData && (
+            <div className="callout callout--danger" role="alert">
+              <strong>数据加载失败</strong>
+              <p>{runtimeRequest.error.message}</p>
+              <button
+                className="button"
+                type="button"
+                onClick={() => {
+                  void runtimeRequest.refetch();
+                }}
+              >
+                重试请求
+              </button>
+            </div>
           )}
-          <pre className="code-block">{formatJSON(runtimeRequest.data)}</pre>
+          {isRuntimeInitialLoading ? (
+            <div
+              className="skeleton-row"
+              role="status"
+              aria-live="polite"
+              aria-label="运行时数据加载中"
+            >
+              <div className="skeleton-copy">
+                <SkeletonText lines={4} width={['100%', '82%', '92%', '58%']} animation="pulse" />
+              </div>
+            </div>
+          ) : hasRuntimeData ? (
+            <>
+              {runtimeRequest.error && (
+                <div className="callout callout--danger" role="alert">
+                  <strong>后台刷新失败，继续展示旧数据</strong>
+                  <p>{runtimeRequest.error.message}</p>
+                  <button
+                    className="button"
+                    type="button"
+                    onClick={() => {
+                      void runtimeRequest.refetch();
+                    }}
+                  >
+                    重试刷新
+                  </button>
+                </div>
+              )}
+              <pre className="code-block">{formatJSON(runtimeRequest.data)}</pre>
+            </>
+          ) : null}
           <div className="button-row">
             <button
               className="button"

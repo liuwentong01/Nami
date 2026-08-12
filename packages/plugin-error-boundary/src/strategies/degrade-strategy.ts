@@ -5,8 +5,8 @@
  *
  * Level 0: 正常 SSR 渲染（不在此策略内，是正常流程）
  * Level 1: 重试 SSR 渲染（可恢复错误时自动重试）
- * Level 2: 降级到 CSR（返回空壳 HTML，由客户端接管渲染）
- * Level 3: 返回骨架屏（至少让用户看到页面结构）
+ * Level 2: 降级到 CSR（返回带临时骨架的 Shell，由客户端接管渲染）
+ * Level 3: 返回静态应急页（不再假装页面仍处于可恢复的 loading）
  * Level 4: 返回兜底静态 HTML（纯静态的错误提示页面）
  * Level 5: 返回 503 Service Unavailable
  *
@@ -31,12 +31,12 @@ export interface DegradeStrategyOptions {
 
   /**
    * CSR 降级的 HTML 模板
-   * 包含空的 React 挂载点和客户端 JS 引用
+   * 应包含带临时骨架的 React 挂载点和客户端 JS 引用
    */
   csrFallbackHTML?: string;
 
   /**
-   * 骨架屏降级的 HTML
+   * Level 3 静态应急 HTML（字段名保留兼容）
    */
   skeletonHTML?: string;
 
@@ -86,7 +86,7 @@ const LEVEL_NAMES: Record<DegradationLevel, string> = {
   [DegradationLevel.None]: '正常渲染',
   [DegradationLevel.Retry]: '重试成功',
   [DegradationLevel.CSRFallback]: 'CSR 降级',
-  [DegradationLevel.Skeleton]: '骨架屏降级',
+  [DegradationLevel.Skeleton]: '静态应急兜底',
   [DegradationLevel.StaticHTML]: '静态 HTML 降级',
   [DegradationLevel.ServiceUnavailable]: '服务不可用',
 };
@@ -117,14 +117,17 @@ export class DegradeStrategy {
   /** CSR 降级 HTML */
   private readonly csrFallbackHTML: string;
 
-  /** 骨架屏 HTML */
+  /** Level 3 静态应急 HTML（字段名保留兼容） */
   private readonly skeletonHTML: string;
 
   /** 静态兜底 HTML */
   private readonly staticHTML: string;
 
   /** 自定义决策函数 */
-  private readonly customDecision?: (error: Error, currentLevel: DegradationLevel) => DegradationLevel;
+  private readonly customDecision?: (
+    error: Error,
+    currentLevel: DegradationLevel,
+  ) => DegradationLevel;
 
   constructor(options: DegradeStrategyOptions = {}) {
     this.maxLevel = options.maxDegradationLevel ?? DegradationLevel.StaticHTML;
@@ -143,10 +146,7 @@ export class DegradeStrategy {
    * @param currentLevel - 当前已经处于的降级等级（避免重复降级）
    * @returns 降级结果
    */
-  degrade(
-    error: Error,
-    currentLevel: DegradationLevel = DegradationLevel.None,
-  ): DegradeResult {
+  degrade(error: Error, currentLevel: DegradationLevel = DegradationLevel.None): DegradeResult {
     const degradationPath: DegradationLevel[] = [currentLevel];
 
     // 决定目标降级等级
@@ -159,7 +159,10 @@ export class DegradeStrategy {
 
     // 确保降级等级是递进的（不允许回退到更高等级）
     if (targetLevel <= currentLevel) {
-      targetLevel = Math.min(currentLevel + 1, DegradationLevel.ServiceUnavailable) as DegradationLevel;
+      targetLevel = Math.min(
+        currentLevel + 1,
+        DegradationLevel.ServiceUnavailable,
+      ) as DegradationLevel;
     }
 
     degradationPath.push(targetLevel);
@@ -185,7 +188,7 @@ export class DegradeStrategy {
    * 1. 有自定义决策函数时使用自定义逻辑
    * 2. Fatal 错误直接降级到静态 HTML 或 503
    * 3. 超时/数据预取错误可以降级到 CSR
-   * 4. 渲染错误降级到骨架屏
+   * 4. 渲染错误降级到静态应急页
    * 5. 其他错误降级到下一级
    */
   private decideLevel(error: Error, currentLevel: DegradationLevel): DegradationLevel {
@@ -203,10 +206,7 @@ export class DegradeStrategy {
 
       // Warning 级别：降级到 CSR（还有希望在客户端恢复）
       if (error.severity === ErrorSeverity.Warning) {
-        return Math.max(
-          currentLevel + 1,
-          DegradationLevel.CSRFallback,
-        ) as DegradationLevel;
+        return Math.max(currentLevel + 1, DegradationLevel.CSRFallback) as DegradationLevel;
       }
     }
 
@@ -228,7 +228,8 @@ export class DegradeStrategy {
       case DegradationLevel.Skeleton:
         return {
           html: this.skeletonHTML,
-          statusCode: 200, // 骨架屏也返回 200（用户角度页面在加载中）
+          // 保留历史状态码，避免影响既有代理和监控规则；语义已改为静态应急。
+          statusCode: 200,
         };
 
       case DegradationLevel.StaticHTML:
@@ -268,8 +269,7 @@ export class DegradeStrategy {
   /**
    * 默认 CSR 降级 HTML
    *
-   * 返回包含 React 挂载点的空壳 HTML，
-   * 客户端 JS 将接管渲染。
+   * 返回包含临时骨架与 React 挂载点的 Shell，客户端 JS 将接管渲染。
    */
   private getDefaultCSRHTML(): string {
     return `<!DOCTYPE html>
@@ -285,15 +285,18 @@ export class DegradeStrategy {
 </head>
 <body>
   <div id="root">
-    <!-- SSR 降级到 CSR，客户端 JS 将接管渲染 -->
+    <div data-nami-csr-shell="loading" role="status" aria-live="polite" aria-busy="true" style="max-width:800px;margin:0 auto;padding:24px">
+      <div style="height:24px;width:60%;background:#f0f0f0;border-radius:4px;margin-bottom:16px"></div>
+      <div style="height:16px;width:100%;background:#f0f0f0;border-radius:4px;margin-bottom:12px"></div>
+      <div style="height:16px;width:80%;background:#f0f0f0;border-radius:4px"></div>
+    </div>
   </div>
-  <script>window.__NAMI_DEGRADED__ = true;</script>
 </body>
 </html>`;
   }
 
   /**
-   * 默认骨架屏 HTML
+   * 默认静态应急 HTML（方法名保留兼容）
    */
   private getDefaultSkeletonHTML(): string {
     return `<!DOCTYPE html>
@@ -301,7 +304,7 @@ export class DegradeStrategy {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Loading...</title>
+  <title>页面暂时不可用</title>
   <style>
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
@@ -311,6 +314,11 @@ export class DegradeStrategy {
 </head>
 <body>
   <div id="root">
+    <main role="alert" style="max-width:800px;margin:0 auto;padding:24px">
+      <h1>页面暂时不可用</h1>
+      <p>服务端和客户端降级均未能完成，请稍后重试。</p>
+      <a href="">重新加载</a>
+    </main>
     <div class="sk-container">
       <div class="sk" style="width:100%;height:48px;margin-bottom:16px;border-radius:0"></div>
       <div class="sk" style="width:100%;height:200px;margin-bottom:16px;border-radius:8px"></div>
@@ -321,7 +329,6 @@ export class DegradeStrategy {
       <div class="sk" style="width:80%;height:16px;margin-bottom:10px"></div>
     </div>
   </div>
-  <script>window.__NAMI_DEGRADED__ = true;</script>
 </body>
 </html>`;
   }

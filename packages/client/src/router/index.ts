@@ -13,6 +13,10 @@
 export { NamiRouter } from './nami-router';
 export type { NamiRouterProps, ComponentResolver } from './nami-router';
 
+// 默认路由加载骨架
+export { RouteLoadingFallback } from './route-loading-fallback';
+export type { RouteLoadingFallbackProps } from './route-loading-fallback';
+
 // 链接组件
 export { NamiLink } from './link';
 export type { NamiLinkProps } from './link';

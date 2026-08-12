@@ -19,6 +19,7 @@ import type {
   CacheStore,
   ISRCacheResult,
 } from '@nami/shared';
+import type { ReactElement } from 'react';
 
 import type { AssetManifest } from '../html/script-injector';
 
@@ -82,7 +83,6 @@ export interface CreateRendererOptions extends RendererOptions {
   /** 目标渲染模式 — 决定工厂返回哪种渲染器实例 */
   mode: RenderMode;
 
-
   /**
    * 是否优先使用 Streaming SSR
    *
@@ -102,23 +102,12 @@ export interface CreateRendererOptions extends RendererOptions {
    * SSR 渲染时的 React 组件树工厂函数
    *
    * 由业务入口提供，渲染器调用它获取待渲染的 React 元素树。
-   * 仅 SSR 和 ISR 模式需要此选项。
+   * SSR/ISR 运行期和 SSG 构建期需要此选项。
    *
    * @param context - 当前渲染上下文
    * @returns React 元素（JSX 树的根节点）
    */
   appElementFactory?: AppElementFactory;
-
-  /**
-   * 服务端 HTML 渲染函数
-   *
-   * 这是对 `appElementFactory` 的兼容补充，主要用于接入
-   * `entry-server.tsx` 中导出的 `renderToHTML(url, props)` 风格入口。
-   *
-   * 当业务侧尚未迁移到 React 元素工厂协议时，
-   * 渲染器可以直接复用这个 HTML 入口，避免默认 SSR/ISR 链路断开。
-   */
-  htmlRenderer?: HTMLRenderer;
 
   /**
    * ISR 管理器实例
@@ -134,7 +123,8 @@ export interface CreateRendererOptions extends RendererOptions {
    *
    * 用于从编译后的 server bundle 中加载组件模块，
    * 获取 getServerSideProps / getStaticProps / getStaticPaths 等数据预取函数。
-   * 可选，不传时渲染器会尝试直接 require 组件路径作为降级方案。
+   * 可选；声明了数据预取函数的 SSR/SSG/ISR 路由必须由上层注入，
+   * 否则相应的数据预取会进入降级结果。
    */
   moduleLoader?: ModuleLoaderLike;
 }
@@ -147,23 +137,10 @@ export interface CreateRendererOptions extends RendererOptions {
  * 接收渲染上下文，返回可被 renderToString 处理的 React 元素。
  * 这是 SSR/ISR 渲染器与业务 React 代码的桥梁。
  *
- * 使用 React.ReactElement 类型需要 @types/react，
- * 这里使用 unknown 来避免强制依赖 React 类型包，
- * 实际传入时由调用方保证类型安全。
+ * 返回值固定为 ReactElement，使普通 SSR、Streaming SSR、SSG 与 ISR
+ * 共享同一份应用树协议，HTML 文档组装由框架统一负责。
  */
-export type AppElementFactory = (context: RenderContext) => unknown;
-
-/**
- * 服务端 HTML 渲染函数
- *
- * 输入是完整的渲染上下文和已预取的数据，
- * 输出既可以是页面主体 HTML 片段，也可以是完整 HTML 文档。
- * 渲染器会在运行时判断输出形态，并在需要时补齐外层文档壳。
- */
-export type HTMLRenderer = (
-  context: RenderContext,
-  initialData: Record<string, unknown>,
-) => Promise<string> | string;
+export type AppElementFactory = (context: RenderContext) => ReactElement;
 
 /**
  * 插件管理器的最小接口
@@ -181,6 +158,14 @@ export interface PluginManagerLike {
    * @param args - 传递给钩子函数的参数
    */
   callHook(hookName: string, ...args: unknown[]): Promise<void>;
+
+  /**
+   * 执行需要逐层转换值的 waterfall hook。
+   *
+   * Renderer 只在该能力存在时调用 `wrapApp`，因此轻量测试替身和未提供
+   * 插件管理器的纯静态场景仍可保持最小实现。
+   */
+  runWaterfallHook?<T>(hookName: string, initialValue: T, ...args: unknown[]): Promise<T>;
 }
 
 /**

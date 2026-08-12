@@ -126,7 +126,7 @@ export enum DegradationLevel {
   Retry = 1,
   /** 降级到 CSR */
   CSRFallback = 2,
-  /** 返回骨架屏 */
+  /** 静态应急兜底（历史名称保留兼容） */
   Skeleton = 3,
   /** 返回兜底静态 HTML */
   StaticHTML = 4,

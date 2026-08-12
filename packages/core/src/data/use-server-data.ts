@@ -66,8 +66,9 @@ export function useServerData<T = Record<string, unknown>>(
   // 优先从 React Context 读取数据
   const context = useNamiContext();
 
-  // 如果 Context 中有数据，直接返回
-  if (context.data && Object.keys(context.data).length > 0) {
+  // 只要存在 Provider 就尊重它的作用域；空对象也可能是合法 props，或表示
+  // 客户端已离开首屏路由，不能因此重新读取旧 window.__NAMI_DATA__。
+  if (context.provided) {
     return extractData<T>(context.data, context.degraded, key);
   }
 
@@ -76,7 +77,17 @@ export function useServerData<T = Record<string, unknown>>(
   if (!isServer()) {
     const windowData = hydrateData<Record<string, unknown>>(NAMI_DATA_VARIABLE);
     if (windowData) {
-      return extractData<T>(windowData, false, key);
+      const envelopeProps = windowData.props;
+      const isHydrationEnvelope = 'version' in windowData
+        || 'renderMode' in windowData
+        || 'routePath' in windowData;
+      const pageData = isHydrationEnvelope
+        && typeof envelopeProps === 'object'
+        && envelopeProps !== null
+        && !Array.isArray(envelopeProps)
+        ? envelopeProps as Record<string, unknown>
+        : windowData;
+      return extractData<T>(pageData, false, key);
     }
   }
 

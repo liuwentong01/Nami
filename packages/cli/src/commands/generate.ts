@@ -50,10 +50,18 @@ export function registerGenerateCommand(program: Command): void {
         await withSpinner('正在生成静态页面...', async () => {
           const { NamiBuilder } = await import('@nami/webpack');
           const builder = new NamiBuilder(config, process.cwd());
-          await builder.build('production', {
+          const result = await builder.build('production', {
             clean: false,
             ssgRoutes: routes.map((route) => route.path),
           });
+
+          if (!result.success) {
+            throw new Error(
+              result.errors.length > 0
+                ? result.errors.join('; ')
+                : '静态页面构建未成功完成',
+            );
+          }
         });
 
         cliLogger.success('静态页面生成完成');

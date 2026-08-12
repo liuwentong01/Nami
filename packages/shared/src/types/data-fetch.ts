@@ -40,6 +40,12 @@ export interface PrefetchResult<T = Record<string, unknown>> {
   /** SSR/SSG 数据函数声明当前请求应返回 404 */
   notFound?: boolean;
 
+  /**
+   * getStaticProps 为本次静态结果声明的重验证间隔（秒）。
+   * 仅 SSG/ISR 预取会设置；0 表示每次请求都需要重新验证。
+   */
+  revalidate?: number;
+
   /** SSR 数据函数返回的自定义响应头 */
   headers?: Record<string, string>;
 

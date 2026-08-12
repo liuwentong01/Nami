@@ -97,13 +97,18 @@ This documentation set is designed for developer training. Its goal is to help y
 Build Phase              Server Phase              Client Phase
 ────────                 ────────                  ────────
 modifyRoutes      →      onServerStart      →      onClientInit
-modifyWebpackConfig      onRequest                 wrapApp
+modifyWebpackConfig      onRequest
 onBuildStart             onBeforeRender            onHydrated
 onBuildEnd               onAfterRender             onRouteChange
                          onRenderError
 
+                    Isomorphic waterfall: wrapApp
                     Common: onError / onDispose
 ```
+
+`wrapApp` is not client-only: normal renderable pages run the waterfall in the same
+order on server and client. A stable static 404 short-circuits before the business
+tree, so it does not run `wrapApp`.
 
 ---
 

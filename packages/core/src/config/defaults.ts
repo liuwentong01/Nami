@@ -14,14 +14,7 @@ import type { NamiConfig } from '@nami/shared';
 
 import {
   DEFAULT_APP_NAME,
-  DEFAULT_SRC_DIR,
-  DEFAULT_OUT_DIR,
-  DEFAULT_RENDER_MODE,
-  DEFAULT_SERVER_CONFIG,
-  DEFAULT_ISR_CONFIG,
-  DEFAULT_MONITOR_CONFIG,
-  DEFAULT_FALLBACK_CONFIG,
-  DEFAULT_ASSETS_CONFIG,
+  resolveNamiConfig,
 } from '@nami/shared';
 
 /**
@@ -42,41 +35,5 @@ import {
  * ```
  */
 export function getDefaultConfig(): NamiConfig {
-  return {
-    /** 默认应用名称 */
-    appName: DEFAULT_APP_NAME,
-
-    /** 默认源码目录 */
-    srcDir: DEFAULT_SRC_DIR,
-
-    /** 默认输出目录 */
-    outDir: DEFAULT_OUT_DIR,
-
-    /** 默认渲染模式 — CSR（最安全的兜底方案） */
-    defaultRenderMode: DEFAULT_RENDER_MODE,
-
-    /** 路由配置 — 默认为空数组，业务方必须自行配置 */
-    routes: [],
-
-    /** 服务端配置 — 使用 @nami/shared 定义的默认值 */
-    server: { ...DEFAULT_SERVER_CONFIG },
-
-    /** Webpack 配置 — 默认不做任何自定义修改 */
-    webpack: {},
-
-    /** ISR 配置 — 默认关闭 */
-    isr: { ...DEFAULT_ISR_CONFIG },
-
-    /** 静态资源配置 */
-    assets: { ...DEFAULT_ASSETS_CONFIG },
-
-    /** 监控配置 — 默认关闭 */
-    monitor: { ...DEFAULT_MONITOR_CONFIG },
-
-    /** 降级配置 — 默认 SSR 失败时自动降级到 CSR */
-    fallback: { ...DEFAULT_FALLBACK_CONFIG },
-
-    /** 插件列表 — 默认为空 */
-    plugins: [],
-  };
+  return resolveNamiConfig({ appName: DEFAULT_APP_NAME });
 }

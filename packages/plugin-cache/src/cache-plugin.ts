@@ -24,6 +24,7 @@ import type {
   RenderResult,
   CacheStore,
 } from '@nami/shared';
+import { RenderMode } from '@nami/shared';
 import { NamiLRUCache, type LRUCacheOptions } from './strategies/lru-cache';
 import { NamiTTLCache, type TTLCacheOptions } from './strategies/ttl-cache';
 import { CDNCacheManager, type CDNCacheConfig } from './strategies/cdn-cache';
@@ -106,6 +107,13 @@ export interface CachePluginOptions {
   enabled?: boolean;
 
   /**
+   * 是否允许缓存带 Cookie / Authorization 的个性化请求。
+   * 开启后必须通过 keyGenerator 把用户维度纳入缓存键。
+   * @default false
+   */
+  cachePrivateRequests?: boolean;
+
+  /**
    * 缓存命中时的日志前缀
    * @default '[NamiCache]'
    */
@@ -162,7 +170,10 @@ export class NamiCachePlugin implements NamiPlugin {
 
   /** 插件配置 */
   private readonly options: Required<
-    Pick<CachePluginOptions, 'keyGenerator' | 'defaultTTL' | 'enabled' | 'logPrefix'>
+    Pick<
+      CachePluginOptions,
+      'keyGenerator' | 'defaultTTL' | 'enabled' | 'cachePrivateRequests' | 'logPrefix'
+    >
   > & CachePluginOptions;
 
   constructor(options: CachePluginOptions = {}) {
@@ -172,6 +183,7 @@ export class NamiCachePlugin implements NamiPlugin {
       keyGenerator: options.keyGenerator ?? defaultKeyGenerator,
       defaultTTL: options.defaultTTL ?? 60,
       enabled: options.enabled ?? true,
+      cachePrivateRequests: options.cachePrivateRequests ?? false,
       logPrefix: options.logPrefix ?? '[NamiCache]',
     };
 
@@ -204,6 +216,14 @@ export class NamiCachePlugin implements NamiPlugin {
     api.onBeforeRender(async (context: RenderContext) => {
       if (!this.options.enabled) return;
 
+      // ISR 已有独立的 SWR 缓存与失效协议，不能再被插件页面缓存短路。
+      // 个性化请求默认旁路，避免仅按 URL 缓存时跨用户复用 HTML。
+      if (this.shouldBypassRequest(context)) {
+        context.extra['__cache_hit'] = false;
+        context.extra['__cache_bypass'] = true;
+        return;
+      }
+
       try {
         const cacheKey = this.options.keyGenerator(context);
         const cached = await this.store.get(cacheKey);
@@ -216,6 +236,8 @@ export class NamiCachePlugin implements NamiPlugin {
           context.extra['__cache_content'] = cached.content;
           context.extra['__cache_etag'] = cached.etag;
           context.extra['__cache_created_at'] = cached.createdAt;
+          context.extra['__cache_status_code'] = cached.meta?.statusCode;
+          context.extra['__cache_headers'] = cached.meta?.headers;
 
           logger.debug(`${this.options.logPrefix} 缓存命中`, {
             url: context.url,
@@ -246,14 +268,42 @@ export class NamiCachePlugin implements NamiPlugin {
     api.onAfterRender(async (context: RenderContext, result: RenderResult) => {
       if (!this.options.enabled) return;
 
-      // 仅缓存成功的渲染结果（HTTP 2xx）
-      if (result.statusCode < 200 || result.statusCode >= 300) {
+      if (this.shouldBypassRequest(context)) return;
+
+      // 仅缓存完整、成功且非流式的渲染结果。
+      // 降级页面和尚未收集完整 HTML 的流式响应都不能作为页面缓存写入。
+      if (
+        result.statusCode < 200
+        || result.statusCode >= 300
+        || result.meta.degraded
+        || ('isStreaming' in result && result.isStreaming === true)
+      ) {
+        return;
+      }
+
+      const cacheControl = getHeader(result.headers, 'cache-control');
+      if (
+        /(?:^|,)\s*(?:private|no-store)\b/i.test(cacheControl ?? '')
+        || getHeader(result.headers, 'set-cookie') !== undefined
+      ) {
         return;
       }
 
       // 如果是缓存命中的结果，不需要再次写入
       if (context.extra['__cache_hit'] === true) {
         return;
+      }
+
+      // 先确定最终 CDN 头，再将允许跨请求复用的安全响应头快照写入缓存。
+      if (this.options.cdnConfig) {
+        result.headers['Cache-Control'] = this.cdnManager.generateHeader(
+          this.options.cdnConfig,
+        );
+      } else if (result.cacheControl) {
+        result.headers['Cache-Control'] = this.cdnManager.generateISRHeader(
+          result.cacheControl.revalidate,
+          result.cacheControl.staleWhileRevalidate,
+        );
       }
 
       try {
@@ -276,24 +326,11 @@ export class NamiCachePlugin implements NamiPlugin {
               statusCode: result.statusCode,
               renderMode: result.meta.renderMode,
               duration: result.meta.duration,
+              headers: selectCacheableHeaders(result.headers),
             },
           },
           ttl,
         );
-
-        // 添加 CDN Cache-Control 响应头
-        if (this.options.cdnConfig) {
-          result.headers['Cache-Control'] = this.cdnManager.generateHeader(
-            this.options.cdnConfig,
-          );
-        } else if (result.cacheControl) {
-          // 如果没有自定义 CDN 配置，但渲染结果中有 cacheControl，
-          // 则自动生成 ISR 风格的 Cache-Control 头
-          result.headers['Cache-Control'] = this.cdnManager.generateISRHeader(
-            result.cacheControl.revalidate,
-            result.cacheControl.staleWhileRevalidate,
-          );
-        }
 
         logger.debug(`${this.options.logPrefix} 缓存写入成功`, {
           url: context.url,
@@ -317,6 +354,19 @@ export class NamiCachePlugin implements NamiPlugin {
       }
       logger.info(`${this.options.logPrefix} 插件已销毁，缓存资源已清理`);
     });
+  }
+
+  /** 判断当前请求是否不应进入插件页面缓存。 */
+  private shouldBypassRequest(context: RenderContext): boolean {
+    if (context.route.renderMode === RenderMode.ISR) {
+      return true;
+    }
+
+    if (this.options.cachePrivateRequests) {
+      return false;
+    }
+
+    return Boolean(context.headers.authorization || context.headers.cookie);
   }
 
   /**
@@ -351,4 +401,31 @@ export class NamiCachePlugin implements NamiPlugin {
   getCDNManager(): CDNCacheManager {
     return this.cdnManager;
   }
+}
+
+function getHeader(
+  headers: Record<string, string>,
+  name: string,
+): string | undefined {
+  const normalizedName = name.toLowerCase();
+  const entry = Object.entries(headers).find(
+    ([headerName]) => headerName.toLowerCase() === normalizedName,
+  );
+  return entry?.[1];
+}
+
+/** 只缓存可以安全跨请求复用的表示元数据，显式排除 Set-Cookie/Request-Id 等头。 */
+function selectCacheableHeaders(
+  headers: Record<string, string>,
+): Record<string, string> {
+  const allowed = new Set([
+    'content-type',
+    'content-language',
+    'cache-control',
+    'etag',
+  ]);
+
+  return Object.fromEntries(
+    Object.entries(headers).filter(([name]) => allowed.has(name.toLowerCase())),
+  );
 }

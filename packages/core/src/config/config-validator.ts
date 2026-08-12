@@ -112,7 +112,7 @@ export class ConfigValidator {
     if (!VALID_RENDER_MODES.has(config.defaultRenderMode)) {
       errors.push(
         `defaultRenderMode 值无效: "${config.defaultRenderMode}"，` +
-        `有效值为: ${Array.from(VALID_RENDER_MODES).join(', ')}`,
+          `有效值为: ${Array.from(VALID_RENDER_MODES).join(', ')}`,
       );
     }
   }
@@ -160,11 +160,11 @@ export class ConfigValidator {
       if (route.renderMode && !VALID_RENDER_MODES.has(route.renderMode)) {
         errors.push(
           `${prefix}.renderMode 值无效: "${route.renderMode}"，` +
-          `有效值为: ${Array.from(VALID_RENDER_MODES).join(', ')}`,
+            `有效值为: ${Array.from(VALID_RENDER_MODES).join(', ')}`,
         );
       }
 
-      // ISR 路由必须配置 revalidate
+      // SSG / ISR 路由的 revalidate 使用统一的整数秒语义
       this.validateRouteISR(route, prefix, errors);
 
       // 递归校验子路由
@@ -181,12 +181,14 @@ export class ConfigValidator {
    * 校验路由的 ISR 相关配置
    */
   private validateRouteISR(route: NamiRoute, prefix: string, errors: string[]): void {
-    if (route.renderMode === RenderMode.ISR) {
-      if (route.revalidate !== undefined) {
-        if (typeof route.revalidate !== 'number' || route.revalidate < 0) {
-          errors.push(`${prefix}.revalidate 必须是非负数字`);
-        }
-      }
+    if (
+      route.revalidate !== undefined &&
+      (typeof route.revalidate !== 'number' ||
+        !Number.isFinite(route.revalidate) ||
+        !Number.isInteger(route.revalidate) ||
+        route.revalidate < 0)
+    ) {
+      errors.push(`${prefix}.revalidate 的单位为秒，必须是非负有限整数`);
     }
   }
 
@@ -204,9 +206,7 @@ export class ConfigValidator {
 
     // 端口范围校验
     if (typeof server.port !== 'number' || server.port < 1 || server.port > 65535) {
-      errors.push(
-        `server.port 必须是 1-65535 范围内的整数，当前值: ${server.port}`,
-      );
+      errors.push(`server.port 必须是 1-65535 范围内的整数，当前值: ${server.port}`);
     } else if (!Number.isInteger(server.port)) {
       errors.push(`server.port 必须是整数，当前值: ${server.port}`);
     }
@@ -228,7 +228,7 @@ export class ConfigValidator {
       ) {
         errors.push(
           `server.gracefulShutdownTimeout 必须是正数，` +
-          `当前值: ${server.gracefulShutdownTimeout}`,
+            `当前值: ${server.gracefulShutdownTimeout}`,
         );
       }
     }
@@ -236,9 +236,7 @@ export class ConfigValidator {
     // 集群配置校验
     if (server.cluster) {
       if (typeof server.cluster.workers !== 'number' || server.cluster.workers < 0) {
-        errors.push(
-          `server.cluster.workers 必须是非负整数，当前值: ${server.cluster.workers}`,
-        );
+        errors.push(`server.cluster.workers 必须是非负整数，当前值: ${server.cluster.workers}`);
       }
     }
   }
@@ -257,12 +255,14 @@ export class ConfigValidator {
     // 重验证间隔校验
     if (
       typeof isr.defaultRevalidate !== 'number' ||
+      !Number.isFinite(isr.defaultRevalidate) ||
+      !Number.isInteger(isr.defaultRevalidate) ||
       isr.defaultRevalidate < MIN_REVALIDATE_INTERVAL ||
       isr.defaultRevalidate > MAX_REVALIDATE_INTERVAL
     ) {
       errors.push(
-        `isr.defaultRevalidate 必须在 ${MIN_REVALIDATE_INTERVAL}-${MAX_REVALIDATE_INTERVAL} 秒范围内，` +
-        `当前值: ${isr.defaultRevalidate}`,
+        `isr.defaultRevalidate 的单位为秒，必须是 ${MIN_REVALIDATE_INTERVAL}-${MAX_REVALIDATE_INTERVAL} 范围内的有限整数，` +
+          `当前值: ${isr.defaultRevalidate}`,
       );
     }
 
@@ -292,10 +292,12 @@ export class ConfigValidator {
     const monitor = config.monitor;
     if (!monitor || !monitor.enabled) return;
 
-    if (typeof monitor.sampleRate !== 'number' || monitor.sampleRate < 0 || monitor.sampleRate > 1) {
-      errors.push(
-        `monitor.sampleRate 必须在 0-1 范围内，当前值: ${monitor.sampleRate}`,
-      );
+    if (
+      typeof monitor.sampleRate !== 'number' ||
+      monitor.sampleRate < 0 ||
+      monitor.sampleRate > 1
+    ) {
+      errors.push(`monitor.sampleRate 必须在 0-1 范围内，当前值: ${monitor.sampleRate}`);
     }
   }
 
@@ -319,9 +321,7 @@ export class ConfigValidator {
       fallback.maxRetries < 0 ||
       !Number.isInteger(fallback.maxRetries)
     ) {
-      errors.push(
-        `fallback.maxRetries 必须是非负整数，当前值: ${fallback.maxRetries}`,
-      );
+      errors.push(`fallback.maxRetries 必须是非负整数，当前值: ${fallback.maxRetries}`);
     }
   }
 }
