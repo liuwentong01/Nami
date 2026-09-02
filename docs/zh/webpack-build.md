@@ -210,7 +210,7 @@ SSG/ISR 静态 HTML 写入 `dist/static`：根路径 `/` 对应 `dist/static/ind
 | `resolve.alias`      | `@` 和 `~` 指向 `srcDir`                  |
 | `resolve.modules`    | `node_modules` 和项目根 `node_modules`    |
 | `module.rules`       | TypeScript、资源、SVG                     |
-| `module.noParse`     | 跳过 `jquery` 和 `lodash`                |
+| `module.noParse`     | 跳过 `jquery` 和 `lodash`                 |
 | `performance`        | 生产模式开启资源大小警告                  |
 | `stats`              | dev `minimal`，生产 `normal`              |
 | `cache`              | Webpack 5 filesystem cache                |
@@ -491,7 +491,21 @@ value = route.component 去掉开头 "./" 后追加 ".js"
 }
 ```
 
-`packages/cli/src/utils/server-runtime.ts` 启动生产服务器时会读取 `nami-manifest.json`，把 `moduleManifest` 交给 `ModuleLoader`，用于 SSR/ISR 解析页面级数据函数。
+`packages/cli/src/utils/server-runtime.ts` 启动生产服务器时会读取 `nami-manifest.json`，把 `moduleManifest` 和 `dist/server` 目录交给 `ModuleLoader`，用于 SSR/ISR 解析页面级数据函数。
+
+ModuleLoader 只接受这条确定链路：
+
+```text
+route.component
+  -> moduleManifest 中的相对文件名
+  -> dist/server 下的页面文件
+  -> require()
+  -> 模块缓存
+  -> 页面具名导出
+```
+
+它不会再猜测 Bundle key、候选文件名或把入口 Bundle 当成单页面模块。缺少映射、
+产物不存在以及路径逃逸 `dist/server` 都会产生明确错误。
 
 ---
 

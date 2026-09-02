@@ -540,7 +540,7 @@ export class StreamingSSRRenderer extends BaseRenderer {
         requestId: context.requestId,
       };
 
-      // 通过 ModuleLoader 从 server bundle 中解析 getServerSideProps 函数
+      // 通过 ModuleLoader 从 manifest 指向的页面产物中解析 getServerSideProps 函数
       let gsspFn: ((ctx: GetServerSidePropsContext) => Promise<GetServerSidePropsResult>) | null =
         null;
 

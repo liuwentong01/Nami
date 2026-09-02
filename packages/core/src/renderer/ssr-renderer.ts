@@ -198,7 +198,7 @@ export class SSRRenderer extends BaseRenderer {
       // 构造 getServerSideProps 的入参上下文
       const gsspContext = this.buildGSSPContext(context);
 
-      // ModuleLoader 根据构建清单从已编译的 server bundle 页面模块中
+      // ModuleLoader 根据构建清单从已编译的服务端页面产物中
       // 提取 getServerSideProps；这里已是正式运行链路，不是占位实现。
       const gsspFn = await this.resolveGetServerSideProps(
         route.component,
@@ -520,7 +520,7 @@ export class SSRRenderer extends BaseRenderer {
   /**
    * 解析 getServerSideProps 函数
    *
-   * 通过上层注入的 ModuleLoader，从编译后的 server bundle 页面模块中
+   * 通过上层注入的 ModuleLoader，从 manifest 指向的服务端页面产物中
    * 获取指定的数据预取函数。
    *
    * @param componentPath - 组件文件路径
@@ -537,7 +537,7 @@ export class SSRRenderer extends BaseRenderer {
         functionName,
       });
 
-      // 通过 ModuleLoader 从 server bundle 加载组件模块
+      // 通过 ModuleLoader 从 manifest 指向的服务端页面产物加载导出函数
       if (this.moduleLoader) {
         return await this.moduleLoader.getExportedFunction(componentPath, functionName);
       }

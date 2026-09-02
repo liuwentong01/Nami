@@ -18,16 +18,16 @@
  *
  * @example
  * ```typescript
- * // 生产模式
+ * 生产模式
  * import { startServer } from '@nami/server';
  * await startServer(config);
  *
- * // 自定义模式
+ * 自定义模式
  * import { createNamiServer } from '@nami/server';
  * const { app } = await createNamiServer(config);
  * app.listen(3000);
  *
- * // 开发模式
+ * 开发模式
  * import { createDevServer } from '@nami/server';
  * const devServer = await createDevServer(devOptions);
  * devServer.listen(3000);
@@ -119,15 +119,9 @@ export type {
 
 // ==================== 集群模式 ====================
 
-export {
-  startMaster,
-  startWorker,
-} from './cluster';
+export { startMaster, startWorker } from './cluster';
 
-export type {
-  MasterOptions,
-  WorkerOptions,
-} from './cluster';
+export type { MasterOptions, WorkerOptions } from './cluster';
 
 // ==================== 开发服务器 ====================
 

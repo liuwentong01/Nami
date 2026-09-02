@@ -14,23 +14,23 @@ Nami 的路由系统负责把 URL 映射到页面组件，并把同一份路由�
 
 ## 1. 源码地图
 
-| 主题 | 源码 |
-|------|------|
-| 路由类型定义 | `packages/shared/src/types/route.ts` |
-| 路径编译、匹配、排序 | `packages/core/src/router/path-matcher.ts` |
-| 路由匹配封装 | `packages/core/src/router/route-matcher.ts` |
-| 路由注册管理 | `packages/core/src/router/route-manager.ts` |
-| 懒加载路由工具 | `packages/core/src/router/lazy-route.ts` |
-| 服务端统一匹配 | `packages/server/src/middleware/route-match.ts` |
-| 数据预取 API | `packages/server/src/middleware/data-prefetch-middleware.ts` |
-| 渲染中间件匹配入口 | `packages/server/src/middleware/render-middleware.ts` |
-| ISR 缓存路由判断 | `packages/server/src/middleware/isr-cache-middleware.ts` |
-| 客户端路由组件 | `packages/client/src/router/nami-router.tsx` |
-| 客户端链接组件 | `packages/client/src/router/link.tsx` |
-| 客户端预取工具 | `packages/client/src/router/route-prefetch.ts` |
-| `useRouter` Hook | `packages/client/src/router/use-router.ts` |
-| 构建生成路由模块 | `packages/webpack/src/configs/client.config.ts` |
-| 数据 API 前缀常量 | `packages/shared/src/constants/defaults.ts` |
+| 主题                 | 源码                                                         |
+| -------------------- | ------------------------------------------------------------ |
+| 路由类型定义         | `packages/shared/src/types/route.ts`                         |
+| 路径编译、匹配、排序 | `packages/core/src/router/path-matcher.ts`                   |
+| 路由匹配封装         | `packages/core/src/router/route-matcher.ts`                  |
+| 路由注册管理         | `packages/core/src/router/route-manager.ts`                  |
+| 懒加载路由工具       | `packages/core/src/router/lazy-route.ts`                     |
+| 服务端统一匹配       | `packages/server/src/middleware/route-match.ts`              |
+| 数据预取 API         | `packages/server/src/middleware/data-prefetch-middleware.ts` |
+| 渲染中间件匹配入口   | `packages/server/src/middleware/render-middleware.ts`        |
+| ISR 缓存路由判断     | `packages/server/src/middleware/isr-cache-middleware.ts`     |
+| 客户端路由组件       | `packages/client/src/router/nami-router.tsx`                 |
+| 客户端链接组件       | `packages/client/src/router/link.tsx`                        |
+| 客户端预取工具       | `packages/client/src/router/route-prefetch.ts`               |
+| `useRouter` Hook     | `packages/client/src/router/use-router.ts`                   |
+| 构建生成路由模块     | `packages/webpack/src/configs/client.config.ts`              |
+| 数据 API 前缀常量    | `packages/shared/src/constants/defaults.ts`                  |
 
 ---
 
@@ -60,21 +60,21 @@ export interface NamiRoute {
 
 字段语义：
 
-| 字段 | 说明 |
-|------|------|
-| `path` | 路由路径模式，支持静态段、动态参数、约束参数、通配符 |
-| `component` | 页面组件路径，相对 `srcDir` |
-| `renderMode` | 路由渲染模式，合并后的运行时配置里必有值 |
-| `getServerSideProps` | SSR 数据函数的导出名字符串 |
-| `getStaticProps` | SSG/ISR 数据函数的导出名字符串 |
-| `getStaticPaths` | SSG/ISR 动态路径函数的导出名字符串 |
-| `revalidate` | ISR 路由级重验证间隔；必须是非负有限整数秒，`0` 表示不读写持久 CacheStore、只做同进程 in-flight 合并并清旧 key |
-| `fallback` | ISR/SSG 动态路径兜底策略 |
-| `skeleton` | Level 3 静态应急配置标记；目前只判断是否存在，不加载组件，也不负责路由 Chunk loading |
-| `errorBoundary` | 自定义错误边界组件路径，类型层面预留 |
-| `meta` | 路由元信息，例如 `title`、`description`、`streaming`、`cacheTags` |
-| `children` | 嵌套路由 |
-| `exact` | 是否精确匹配；只有 `exact === false` 时走前缀匹配 |
+| 字段                 | 说明                                                                                                           |
+| -------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `path`               | 路由路径模式，支持静态段、动态参数、约束参数、通配符                                                           |
+| `component`          | 页面组件路径，相对 `srcDir`                                                                                    |
+| `renderMode`         | 路由渲染模式，合并后的运行时配置里必有值                                                                       |
+| `getServerSideProps` | SSR 数据函数的导出名字符串                                                                                     |
+| `getStaticProps`     | SSG/ISR 数据函数的导出名字符串                                                                                 |
+| `getStaticPaths`     | SSG/ISR 动态路径函数的导出名字符串                                                                             |
+| `revalidate`         | ISR 路由级重验证间隔；必须是非负有限整数秒，`0` 表示不读写持久 CacheStore、只做同进程 in-flight 合并并清旧 key |
+| `fallback`           | ISR/SSG 动态路径兜底策略                                                                                       |
+| `skeleton`           | Level 3 静态应急配置标记；目前只判断是否存在，不加载组件，也不负责路由 Chunk loading                           |
+| `errorBoundary`      | 自定义错误边界组件路径，类型层面预留                                                                           |
+| `meta`               | 路由元信息，例如 `title`、`description`、`streaming`、`cacheTags`                                              |
+| `children`           | 嵌套路由                                                                                                       |
+| `exact`              | 是否精确匹配；只有 `exact === false` 时走前缀匹配                                                              |
 
 示例：
 
@@ -115,7 +115,7 @@ export default defineConfig({
 });
 ```
 
-`getServerSideProps`、`getStaticProps`、`getStaticPaths` 都是**导出函数名字符串**，不是函数引用。框架运行时会通过 `ModuleLoader` 从 server bundle 中按名称查找对应导出。
+`getServerSideProps`、`getStaticProps`、`getStaticPaths` 都是**导出函数名字符串**，不是函数引用。框架运行时会先根据 module manifest 定位服务端页面文件，再通过 `ModuleLoader` 按名称读取对应导出。
 
 ---
 
@@ -125,23 +125,23 @@ export default defineConfig({
 
 Nami 自带一个无外部依赖的 path-to-regexp 风格匹配器，核心 API：
 
-| API | 作用 |
-|-----|------|
-| `compilePath(pattern, options)` | 把路径模式编译成匹配函数 |
-| `matchPath(pattern, pathname, options)` | 快捷匹配 |
-| `rankRoutes(routes)` | 按路由特异性排序 |
+| API                                     | 作用                     |
+| --------------------------------------- | ------------------------ |
+| `compilePath(pattern, options)`         | 把路径模式编译成匹配函数 |
+| `matchPath(pattern, pathname, options)` | 快捷匹配                 |
+| `rankRoutes(routes)`                    | 按路由特异性排序         |
 
 ### 支持的路径语法
 
-| 语法 | 示例 | 说明 |
-|------|------|------|
-| 静态路径 | `/about` | 字面匹配 |
-| 必选参数 | `/user/:id` | 匹配单个路径段，输出 `{ id }` |
-| 可选参数 | `/user/:id?` | 整个参数段可省略 |
-| 约束参数 | `/post/:id(\\d+)` | 参数必须满足括号内正则 |
-| 多值参数 | `/docs/:path+` | 匹配一个或多个路径段 |
-| 通配符 | `/docs/*` | 匹配剩余路径，参数名为 `'*'` |
-| 正则分组 | `/file/(.*)` | 正则分组参数名为 `$0`、`$1` |
+| 语法     | 示例              | 说明                          |
+| -------- | ----------------- | ----------------------------- |
+| 静态路径 | `/about`          | 字面匹配                      |
+| 必选参数 | `/user/:id`       | 匹配单个路径段，输出 `{ id }` |
+| 可选参数 | `/user/:id?`      | 整个参数段可省略              |
+| 约束参数 | `/post/:id(\\d+)` | 参数必须满足括号内正则        |
+| 多值参数 | `/docs/:path+`    | 匹配一个或多个路径段          |
+| 通配符   | `/docs/*`         | 匹配剩余路径，参数名为 `'*'`  |
+| 正则分组 | `/file/(.*)`      | 正则分组参数名为 `$0`、`$1`   |
 
 注意：`/docs/*` 中的 `*` 编译为 `(.+)`，需要至少一个后续路径段，因此它不匹配 `/docs` 本身。
 
@@ -171,15 +171,15 @@ round-trip。
 默认大小写不敏感，因为正则 flags 使用 `i`。精确匹配默认允许尾部可选 `/`：
 
 ```typescript
-exact ? /^pattern\/?$/i : /^pattern/i
+exact ? /^pattern\/?$/i : /^pattern/i;
 ```
 
 ### `exact`
 
-| 配置 | 正则形态 | 行为 |
-|------|----------|------|
+| 配置              | 正则形态    | 行为                 |
+| ----------------- | ----------- | -------------------- |
 | `exact !== false` | `^...\\/?$` | 精确匹配，允许尾斜杠 |
-| `exact === false` | `^...` | 前缀匹配 |
+| `exact === false` | `^...`      | 前缀匹配             |
 
 `exact: false` 会让父路径命中更多 URL，应谨慎与子路由、重叠路由搭配。
 
@@ -191,13 +191,13 @@ exact ? /^pattern\/?$/i : /^pattern/i
 
 `rankRoutes()` 不是简单按配置顺序匹配，而是先算分：
 
-| 段类型 | 分值 | 示例 |
-|--------|------|------|
-| 静态段 | `+3` | `/users` |
-| 约束参数 | `+2` | `/:id(\\d+)` |
-| 普通动态参数 | `+1` | `/:id` |
+| 段类型            | 分值 | 示例           |
+| ----------------- | ---- | -------------- |
+| 静态段            | `+3` | `/users`       |
+| 约束参数          | `+2` | `/:id(\\d+)`   |
+| 普通动态参数      | `+1` | `/:id`         |
 | 通配符 / 多值参数 | `+0` | `/*`、`:path+` |
-| 无 `*` 的模式 | `+1` | 精确性加分 |
+| 无 `*` 的模式     | `+1` | 精确性加分     |
 
 排序规则：
 
@@ -244,11 +244,11 @@ matchConfiguredRoute(path, routes)
 
 这个函数被三类服务端中间件共用：
 
-| 中间件 | 用途 |
-|--------|------|
-| `isr-cache-middleware.ts` | 判断请求是否为 ISR 路由，并决定是否走缓存 |
-| `data-prefetch-middleware.ts` | 匹配 `/_nami/data/*` 对应页面路由 |
-| `render-middleware.ts` | 创建 `RenderContext` 并选择 Renderer |
+| 中间件                        | 用途                                      |
+| ----------------------------- | ----------------------------------------- |
+| `isr-cache-middleware.ts`     | 判断请求是否为 ISR 路由，并决定是否走缓存 |
+| `data-prefetch-middleware.ts` | 匹配 `/_nami/data/*` 对应页面路由         |
+| `render-middleware.ts`        | 创建 `RenderContext` 并选择 Renderer      |
 
 统一匹配源避免出现“缓存层命中路由 A、渲染层命中路由 B”的问题。
 
@@ -337,21 +337,19 @@ pluginManager.runParallelHook('onRouteChange', {
 
 ```typescript
 export const generatedComponentLoaders = {
-  "./pages/home": () => import(/* webpackChunkName: "route-pages-home" */ "..."),
+  './pages/home': () => import(/* webpackChunkName: "route-pages-home" */ '...'),
 } as Record<string, () => Promise<unknown>>;
 
-export const generatedRouteDefinitions = [
-  { path: "/", component: "./pages/home", exact: true },
-];
+export const generatedRouteDefinitions = [{ path: '/', component: './pages/home', exact: true }];
 ```
 
 生成逻辑来自 `ensureGeneratedRouteModules()`：
 
-| 产物 | 来源 |
-|------|------|
-| `generatedComponentLoaders` | `config.routes.map(route => route.component)` 去重 |
+| 产物                        | 来源                                                       |
+| --------------------------- | ---------------------------------------------------------- |
+| `generatedComponentLoaders` | `config.routes.map(route => route.component)` 去重         |
 | `generatedRouteDefinitions` | `config.routes.map(route => ({ path, component, exact }))` |
-| `exact` | `route.exact === false ? false : true` |
+| `exact`                     | `route.exact === false ? false : true`                     |
 
 当前生成逻辑只扫描**顶层** `config.routes`，不会递归收集 `children`。如果子路由有独立 `component`，默认生成模块可能缺少对应 loader，客户端预取或渲染会找不到组件映射。使用嵌套路由时需要确认构建生成结果，或通过自定义 `componentResolver` 补齐。
 
@@ -378,17 +376,17 @@ export const generatedRouteDefinitions = [
 
 新增 props：
 
-| 字段 | 默认值 | 行为 |
-|------|--------|------|
-| `prefetchOnHover` | `false` | 鼠标悬停后触发预取 |
-| `prefetchOnVisible` | `false` | 进入视口后触发预取 |
-| `prefetchMargin` | `'100px'` | `IntersectionObserver.rootMargin` |
-| `prefetchDelay` | `100` | hover 延迟，设为 `0` 立即预取 |
+| 字段                | 默认值    | 行为                              |
+| ------------------- | --------- | --------------------------------- |
+| `prefetchOnHover`   | `false`   | 鼠标悬停后触发预取                |
+| `prefetchOnVisible` | `false`   | 进入视口后触发预取                |
+| `prefetchMargin`    | `'100px'` | `IntersectionObserver.rootMargin` |
+| `prefetchDelay`     | `100`     | hover 延迟，设为 `0` 立即预取     |
 
 `NamiLink` 内部调用：
 
 ```typescript
-prefetchRoute(targetPath)
+prefetchRoute(targetPath);
 ```
 
 没有传 options，因此默认只预取 JS chunk，不预取数据。
@@ -443,11 +441,11 @@ return `${to.pathname ?? '/'}${to.search ?? ''}${to.hash ?? ''}`;
 ```typescript
 const router = useRouter();
 
-router.path;      // location.pathname
-router.fullPath;  // pathname + search + hash
-router.query;     // URLSearchParams 转普通对象
-router.params;    // useParams()
-router.hash;      // location.hash
+router.path; // location.pathname
+router.fullPath; // pathname + search + hash
+router.query; // URLSearchParams 转普通对象
+router.params; // useParams()
+router.hash; // location.hash
 
 router.push('/dashboard');
 router.replace('/login');
@@ -460,13 +458,13 @@ router.go(-2);
 
 导航方法：
 
-| 方法 | 实现 |
-|------|------|
-| `push(path, { state })` | `navigate(path, { state })` |
+| 方法                       | 实现                                       |
+| -------------------------- | ------------------------------------------ |
+| `push(path, { state })`    | `navigate(path, { state })`                |
 | `replace(path, { state })` | `navigate(path, { replace: true, state })` |
-| `back()` | `navigate(-1)` |
-| `forward()` | `navigate(1)` |
-| `go(delta)` | `navigate(delta)` |
+| `back()`                   | `navigate(-1)`                             |
+| `forward()`                | `navigate(1)`                              |
+| `go(delta)`                | `navigate(delta)`                          |
 
 `useRouter` 当前不内置 `prefetch` 方法；预取请使用 `NamiLink` 或直接调用 `prefetchRoute()`。
 
@@ -493,13 +491,13 @@ await About.preload();
 
 实现要点：
 
-| 机制 | 行为 |
-|------|------|
-| `cachedImport()` | 缓存 import Promise，避免重复加载 |
-| import 失败 | 清空缓存，允许下次重试 |
-| `Suspense` | 加载中显示 `loading` |
-| `LazyErrorBoundary` | 仅在提供 `errorFallback` 时包裹 |
-| `preload()` | 提前调用 `cachedImport()`，失败只 warn，不抛给调用者 |
+| 机制                | 行为                                                 |
+| ------------------- | ---------------------------------------------------- |
+| `cachedImport()`    | 缓存 import Promise，避免重复加载                    |
+| import 失败         | 清空缓存，允许下次重试                               |
+| `Suspense`          | 加载中显示 `loading`                                 |
+| `LazyErrorBoundary` | 仅在提供 `errorFallback` 时包裹                      |
+| `preload()`         | 提前调用 `cachedImport()`，失败只 warn，不抛给调用者 |
 
 默认的 `NamiRouter` 已经使用 `React.lazy + Suspense` 加载组件。`lazyRoute()` 更适合用户在自定义路由组件或局部动态组件中手动使用。
 
@@ -512,7 +510,7 @@ await About.preload();
 数据 API 前缀来自：
 
 ```typescript
-NAMI_DATA_API_PREFIX = '/_nami/data'
+NAMI_DATA_API_PREFIX = '/_nami/data';
 ```
 
 只处理 GET 请求：
@@ -529,36 +527,35 @@ GET /_nami/data/products/123
 条件：
 
 ```typescript
-route.renderMode === RenderMode.SSR && route.getServerSideProps
+route.renderMode === RenderMode.SSR && route.getServerSideProps;
 ```
 
 从 server bundle 中读取 `route.getServerSideProps` 指定的导出函数。传入上下文：
 
-| 字段 | 来源 |
-|------|------|
-| `params` | 路由动态参数 |
-| `query` | Koa query，只保留字符串或字符串数组 |
-| `headers` | 小写请求头 |
-| `path` | 去掉 `/_nami/data` 后的页面路径 |
-| `url` | 页面路径 + 原始 querystring |
-| `cookies` | 从 `Cookie` 请求头解析 |
+| 字段        | 来源                                 |
+| ----------- | ------------------------------------ |
+| `params`    | 路由动态参数                         |
+| `query`     | Koa query，只保留字符串或字符串数组  |
+| `headers`   | 小写请求头                           |
+| `path`      | 去掉 `/_nami/data` 后的页面路径      |
+| `url`       | 页面路径 + 原始 querystring          |
+| `cookies`   | 从 `Cookie` 请求头解析               |
 | `requestId` | `ctx.state.requestId` 或 `'unknown'` |
 
 返回处理：
 
-| 返回 | HTTP 响应 |
-|------|-----------|
-| `notFound` | `404 { notFound: true }` |
+| 返回       | HTTP 响应                                         |
+| ---------- | ------------------------------------------------- |
+| `notFound` | `404 { notFound: true }`                          |
 | `redirect` | `statusCode` 或 `308/307`，body 为 `{ redirect }` |
-| `props` | `200`，body 为 `props` |
+| `props`    | `200`，body 为 `props`                            |
 
 ### SSG / ISR
 
 条件：
 
 ```typescript
-(route.renderMode === SSG || route.renderMode === ISR)
-  && route.getStaticProps
+(route.renderMode === SSG || route.renderMode === ISR) && route.getStaticProps;
 ```
 
 调用 `getStaticProps({ params })`。当前数据 API 链路只传 `params`，不传 query、headers、cookies、locale。
@@ -587,8 +584,8 @@ route.renderMode === RenderMode.SSR && route.getServerSideProps
 类型与客户端 `NamiRouter` 都支持 `children`，服务端 `matchConfiguredRoute()` 也会递归匹配子路由。但当前构建生成文件只遍历顶层 `config.routes`：
 
 ```typescript
-config.routes.map((route) => route.component)
-config.routes.map((route) => ({ path, component, exact }))
+config.routes.map((route) => route.component);
+config.routes.map((route) => ({ path, component, exact }));
 ```
 
 这带来两个实践建议：

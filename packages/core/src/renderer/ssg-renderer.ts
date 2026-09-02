@@ -879,7 +879,7 @@ export class SSGRenderer extends BaseRenderer {
       );
     }
 
-    // 通过 ModuleLoader 从 server bundle 加载 getStaticPaths
+    // 通过 ModuleLoader 从 manifest 指向的页面产物加载 getStaticPaths
     if (this.moduleLoader && route.getStaticPaths) {
       const getStaticPathsFn = await this.moduleLoader.getExportedFunction<
         () => Promise<GetStaticPathsResult>

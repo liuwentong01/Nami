@@ -21,7 +21,7 @@ Nami 是一个面向大规模前端团队的企业级框架，提供从开发、
 - **插件系统** — waterfall / parallel 生命周期钩子覆盖构建、服务端、客户端全流程，核心调度器预留 bail 短路能力
 - **ISR 引擎** — stale-while-revalidate 语义，可插拔缓存后端（Memory / FileSystem / Redis），后台重验证队列
 - **多级降级** — 正常渲染 → 重试 → CSR 降级 → 骨架屏 → 静态 HTML → 503，逐级自动兜底
-- **模块加载器** — ModuleLoader 桥接路由配置与 server bundle，自动解析 getServerSideProps / getStaticProps / getStaticPaths
+- **模块加载器** — ModuleLoader 根据 manifest 加载服务端页面产物，自动解析 getServerSideProps / getStaticProps / getStaticPaths
 - **智能路由匹配** — PathMatcher 支持优先级评分（静态 > 约束参数 > 动态参数 > 通配符）、正则约束、可选参数
 - **Koa 中间件管线** — shutdownAware → timing → security → requestContext → healthCheck → staticServe → dataPrefetch → 用户/插件中间件 → errorIsolation → isrCache → render
 - **集群模式** — Master/Worker 进程管理，崩溃自动重启，优雅停机
@@ -65,7 +65,7 @@ packages/
 ├── shared/                 # @nami/shared — 共享类型与工具（零依赖基础层）
 ├── core/                   # @nami/core — 核心运行时
 │   ├── renderer/           #   渲染器：Base / CSR / SSR / SSG / ISR / StreamingSSR
-│   ├── module/             #   模块加载器：ModuleLoader（server bundle → 页面导出函数）
+│   ├── module/             #   模块加载器：ModuleLoader（manifest → 页面文件 → 导出函数）
 │   ├── plugin/             #   插件系统：HookRegistry / PluginManager / PluginAPI
 │   ├── data/               #   数据层：PrefetchManager / DataContext / Serializer
 │   ├── config/             #   配置：ConfigLoader / ConfigValidator
@@ -159,23 +159,23 @@ export default defineConfig({
 
 ## 渲染模式
 
-| 模式 | 说明 | 适用场景 |
-|------|------|---------|
-| **CSR** | 客户端渲染，服务端返回空 HTML Shell | 后台管理、SPA 应用 |
-| **SSR** | 服务端渲染，每次请求实时生成 HTML | SEO 要求高、首屏性能敏感的页面 |
+| 模式              | 说明                                             | 适用场景                                   |
+| ----------------- | ------------------------------------------------ | ------------------------------------------ |
+| **CSR**           | 客户端渲染，服务端返回空 HTML Shell              | 后台管理、SPA 应用                         |
+| **SSR**           | 服务端渲染，每次请求实时生成 HTML                | SEO 要求高、首屏性能敏感的页面             |
 | **Streaming SSR** | 流式 SSR，基于 React 18 `renderToPipeableStream` | 大型页面、Suspense 密集页面、TTFB 敏感场景 |
-| **SSG** | 构建时生成静态 HTML | 文档、博客等内容型站点 |
-| **ISR** | 增量静态再生，后台自动重新生成过期页面 | 电商商品页、新闻列表等频繁更新的内容 |
+| **SSG**           | 构建时生成静态 HTML                              | 文档、博客等内容型站点                     |
+| **ISR**           | 增量静态再生，后台自动重新生成过期页面           | 电商商品页、新闻列表等频繁更新的内容       |
 
 每条路由可独立配置渲染模式，同一应用内可混合使用：
 
 ```typescript
 routes: [
-  { path: '/',         component: './pages/home',    renderMode: RenderMode.ISR  },
-  { path: '/blog/:id', component: './pages/blog',    renderMode: RenderMode.SSG  },
-  { path: '/app',      component: './pages/app',     renderMode: RenderMode.CSR  },
-  { path: '/api/data', component: './pages/api',     renderMode: RenderMode.SSR  },
-]
+  { path: '/', component: './pages/home', renderMode: RenderMode.ISR },
+  { path: '/blog/:id', component: './pages/blog', renderMode: RenderMode.SSG },
+  { path: '/app', component: './pages/app', renderMode: RenderMode.CSR },
+  { path: '/api/data', component: './pages/api', renderMode: RenderMode.SSR },
+];
 ```
 
 SSR、SSG 或 ISR 项目使用同一个服务端应用入口。业务代码只根据框架提供的
@@ -225,6 +225,7 @@ Nami 支持 React 18 的流式 SSR，通过 `renderToPipeableStream` 实现边�
 ```
 
 优势：
+
 - **更快的 TTFB** — HTML `<head>` 和页面 Shell 立即发送，无需等待完整渲染
 - **Suspense 支持** — `<Suspense>` 边界内容异步加载，先发送 fallback，数据就绪后发送补丁
 - **选择性 Hydration** — 客户端可优先 hydrate 用户正在交互的部分
@@ -248,6 +249,7 @@ export default defineConfig({
 ```
 
 说明：
+
 - `Streaming SSR` 仍归属 `RenderMode.SSR`，通过路由级 `meta.streaming = true` 开启
 - `entry-server.tsx` 必须导出 `createAppElement(context)`；缺少入口时构建或生产启动直接报错
 - `HEAD` 请求仍走普通 SSR 响应头路径，不启用流式输出
@@ -256,19 +258,22 @@ export default defineConfig({
 
 ## 模块加载器
 
-ModuleLoader 是连接路由配置与 server bundle 的桥梁，负责从编译产物中解析页面级导出函数：
+ModuleLoader 是连接路由配置、module manifest 与服务端页面产物的桥梁，负责从确定的页面文件中解析具名导出函数：
 
 ```typescript
 import { ModuleLoader } from '@nami/core';
 
 const loader = new ModuleLoader({
-  serverBundlePath: 'dist/server/entry-server.js',
+  serverOutputDir: 'dist/server',
+  moduleManifest: {
+    './pages/home': 'pages/home.js',
+  },
 });
 
-// 从 server bundle 中提取页面的 getServerSideProps 函数
+// 根据 manifest 加载页面文件，再提取 getServerSideProps 函数
 const gssp = await loader.getExportedFunction(
-  './pages/home',           // 组件路径
-  'getServerSideProps',     // 导出函数名
+  './pages/home', // 组件路径
+  'getServerSideProps', // 导出函数名
 );
 
 if (gssp) {
@@ -277,11 +282,19 @@ if (gssp) {
 }
 ```
 
-模块查找策略（按优先级）：
-1. 通过 moduleManifest 映射查找
-2. 直接以组件路径为 key 查找
-3. 标准化路径后查找（去前缀、加 pages/ 前缀等）
-4. 兜底返回 bundle 自身（单模块场景）
+模块加载只有一条确定链路：
+
+```text
+route.component
+  → moduleManifest
+  → dist/server 页面文件
+  → require()
+  → 模块缓存
+  → 页面具名导出
+```
+
+缺少 manifest 映射、页面文件不存在或 manifest 路径逃逸 `dist/server`
+时都会直接报出明确错误，不再猜测历史 Bundle key 或候选文件名。
 
 ---
 
@@ -340,13 +353,13 @@ export default defineConfig({
 
 ### 官方插件
 
-| 插件 | 说明 |
-|------|------|
-| `@nami/plugin-cache` | LRU / TTL / CDN 多级缓存策略 |
-| `@nami/plugin-monitor` | 性能指标、错误、渲染数据采集 + Beacon 上报 |
-| `@nami/plugin-skeleton` | 骨架屏组件库 + 自动生成 |
-| `@nami/plugin-request` | 同构 HTTP 客户端 + 拦截器 + `useRequest` Hook |
-| `@nami/plugin-error-boundary` | 路由级错误边界 + 5 级渐进降级 |
+| 插件                          | 说明                                          |
+| ----------------------------- | --------------------------------------------- |
+| `@nami/plugin-cache`          | LRU / TTL / CDN 多级缓存策略                  |
+| `@nami/plugin-monitor`        | 性能指标、错误、渲染数据采集 + Beacon 上报    |
+| `@nami/plugin-skeleton`       | 骨架屏组件库 + 自动生成                       |
+| `@nami/plugin-request`        | 同构 HTTP 客户端 + 拦截器 + `useRequest` Hook |
+| `@nami/plugin-error-boundary` | 路由级错误边界 + 5 级渐进降级                 |
 
 ### 自定义插件
 
@@ -425,11 +438,11 @@ L5 503 Service Unavailable
 
 ISR 引擎支持三种可插拔的缓存后端：
 
-| 缓存后端 | 适用场景 |
-|---------|---------|
-| **MemoryStore** | 单机开发 / 小规模部署 |
+| 缓存后端            | 适用场景              |
+| ------------------- | --------------------- |
+| **MemoryStore**     | 单机开发 / 小规模部署 |
 | **FileSystemStore** | 单机生产 / 持久化需求 |
-| **RedisStore** | 多机集群 / 分布式部署 |
+| **RedisStore**      | 多机集群 / 分布式部署 |
 
 ```typescript
 export default defineConfig({
@@ -443,6 +456,7 @@ export default defineConfig({
 ```
 
 说明：
+
 - 当前正式字段为 `cacheAdapter`
 - 历史项目中的 `cacheStrategy` 仍兼容，会在 CLI 加载配置时自动归一化为 `cacheAdapter`
 - 当默认渲染模式或任一路由使用 `ISR` 时，若未显式关闭，CLI 会自动开启 `isr.enabled`
@@ -461,6 +475,7 @@ nami info       # 输出环境信息
 ```
 
 补充说明：
+
 - `nami build --analyze` 会为 client / server 构建注入 bundle report
 - `nami build --no-minimize` 会关闭 client 侧压缩，便于排查产物问题
 - `nami generate --route /foo --route /bar` 会只生成匹配到的 SSG / ISR 路由
@@ -490,12 +505,12 @@ curl http://localhost:3004/_nami/data/products/1001
 
 仓库内包含 4 个示例，分别演示不同渲染模式：
 
-| 示例 | 渲染模式 | 说明 |
-|------|---------|------|
-| `examples/basic-csr` | CSR | 交互式计数器 + 主题切换 |
-| `examples/basic-ssr` | SSR | 文章列表 + 详情页（服务端数据预取） |
-| `examples/basic-ssg` | SSG | 博客站点（构建时生成） |
-| `examples/basic-isr` | ISR | 电商产品页（首页 60s、列表/详情 30s 重验证，含 `getStaticPaths + fallback: 'blocking'` 动态预生成示例） |
+| 示例                 | 渲染模式 | 说明                                                                                                    |
+| -------------------- | -------- | ------------------------------------------------------------------------------------------------------- |
+| `examples/basic-csr` | CSR      | 交互式计数器 + 主题切换                                                                                 |
+| `examples/basic-ssr` | SSR      | 文章列表 + 详情页（服务端数据预取）                                                                     |
+| `examples/basic-ssg` | SSG      | 博客站点（构建时生成）                                                                                  |
+| `examples/basic-isr` | ISR      | 电商产品页（首页 60s、列表/详情 30s 重验证，含 `getStaticPaths + fallback: 'blocking'` 动态预生成示例） |
 
 ```bash
 # 克隆后运行示例
@@ -532,16 +547,16 @@ pnpm dev
 
 ## 技术栈
 
-| 层次 | 技术 |
-|------|------|
-| UI 框架 | React 18（hydrateRoot / createRoot / renderToPipeableStream） |
-| 服务端框架 | Koa 3 |
-| 构建工具 | Webpack 5（持久化文件系统缓存） |
-| 语言 | TypeScript 5（strict 模式） |
-| 测试框架 | Vitest |
-| 包管理 | pnpm workspace（Monorepo） |
-| 版本管理 | Changesets |
-| 代码规范 | ESLint + Prettier |
+| 层次       | 技术                                                          |
+| ---------- | ------------------------------------------------------------- |
+| UI 框架    | React 18（hydrateRoot / createRoot / renderToPipeableStream） |
+| 服务端框架 | Koa 3                                                         |
+| 构建工具   | Webpack 5（持久化文件系统缓存）                               |
+| 语言       | TypeScript 5（strict 模式）                                   |
+| 测试框架   | Vitest                                                        |
+| 包管理     | pnpm workspace（Monorepo）                                    |
+| 版本管理   | Changesets                                                    |
+| 代码规范   | ESLint + Prettier                                             |
 
 ---
 
@@ -571,11 +586,11 @@ pnpm test:coverage
 
 测试模块覆盖：
 
-| 模块 | 测试文件 | 覆盖内容 |
-|------|---------|---------|
-| RendererFactory | `core/tests/renderer-factory.test.ts` | 渲染器创建、降级链、模式判断 |
-| RouteMatcher | `core/tests/route-matcher.test.ts` | 静态/动态/可选/通配符路径匹配 |
-| CSRRenderer | `core/src/renderer/__tests__/csr-renderer.test.ts` | CSR 渲染流程 |
+| 模块            | 测试文件                                           | 覆盖内容                      |
+| --------------- | -------------------------------------------------- | ----------------------------- |
+| RendererFactory | `core/tests/renderer-factory.test.ts`              | 渲染器创建、降级链、模式判断  |
+| RouteMatcher    | `core/tests/route-matcher.test.ts`                 | 静态/动态/可选/通配符路径匹配 |
+| CSRRenderer     | `core/src/renderer/__tests__/csr-renderer.test.ts` | CSR 渲染流程                  |
 
 ---
 
@@ -585,61 +600,61 @@ Nami 的渲染模型和数据预取 API 高度借鉴了 Next.js（降低团队�
 
 ### 相似之处
 
-| 维度 | Next.js | Nami |
-|------|---------|------|
-| 多渲染模式 | CSR / SSR / SSG / ISR | 同样四种 + Streaming SSR |
-| 路由级渲染配置 | 每个页面独立选择渲染模式 | 每条路由独立配置 `renderMode` |
-| 数据预取 API | `getServerSideProps` / `getStaticProps` / `getStaticPaths` | 完全相同的三个 API 命名和语义 |
-| ISR 语义 | `revalidate: 60` stale-while-revalidate | 同样的 SWR 语义 + 可插拔缓存后端 |
-| Hydration | React 18 `hydrateRoot` | 同样基于 React 18 |
-| 构建产物 | Client Bundle + Server Bundle | 同样双产物 + SSG 静态文件 |
+| 维度           | Next.js                                                    | Nami                             |
+| -------------- | ---------------------------------------------------------- | -------------------------------- |
+| 多渲染模式     | CSR / SSR / SSG / ISR                                      | 同样四种 + Streaming SSR         |
+| 路由级渲染配置 | 每个页面独立选择渲染模式                                   | 每条路由独立配置 `renderMode`    |
+| 数据预取 API   | `getServerSideProps` / `getStaticProps` / `getStaticPaths` | 完全相同的三个 API 命名和语义    |
+| ISR 语义       | `revalidate: 60` stale-while-revalidate                    | 同样的 SWR 语义 + 可插拔缓存后端 |
+| Hydration      | React 18 `hydrateRoot`                                     | 同样基于 React 18                |
+| 构建产物       | Client Bundle + Server Bundle                              | 同样双产物 + SSG 静态文件        |
 
 ### 核心差异
 
 #### 服务端框架
 
-| | Next.js | Nami |
-|---|---------|------|
-| 底层 | 自研 HTTP 服务器 | **Koa 3** |
-| 中间件 | 自有 Middleware API（Edge Runtime） | 标准 Koa 中间件管线（固定核心顺序 + 用户/插件可插层） |
-| 影响 | 生态封闭，不能直接用 Express/Koa 中间件 | 可复用公司已有的 Koa 中间件资产 |
+|        | Next.js                                 | Nami                                                  |
+| ------ | --------------------------------------- | ----------------------------------------------------- |
+| 底层   | 自研 HTTP 服务器                        | **Koa 3**                                             |
+| 中间件 | 自有 Middleware API（Edge Runtime）     | 标准 Koa 中间件管线（固定核心顺序 + 用户/插件可插层） |
+| 影响   | 生态封闭，不能直接用 Express/Koa 中间件 | 可复用公司已有的 Koa 中间件资产                       |
 
 #### 构建工具
 
-| | Next.js | Nami |
-|---|---------|------|
-| 构建器 | Turbopack + SWC | **Webpack 5**（持久化 FS 缓存） |
-| 原因 | 追求极致开发体验 | 兼容企业已有的大量 Webpack Loader / Plugin |
+|        | Next.js          | Nami                                       |
+| ------ | ---------------- | ------------------------------------------ |
+| 构建器 | Turbopack + SWC  | **Webpack 5**（持久化 FS 缓存）            |
+| 原因   | 追求极致开发体验 | 兼容企业已有的大量 Webpack Loader / Plugin |
 
 #### 插件系统
 
-| | Next.js | Nami |
-|---|---------|------|
-| 扩展方式 | `next.config.js` + `withXxx()` 包装函数 | 正式的 Plugin API（waterfall / parallel 生命周期钩子，核心调度器具备 bail 能力） |
-| 生命周期覆盖 | 主要覆盖构建阶段 | 覆盖构建 + 服务端 + 客户端全生命周期 |
-| 隔离性 | 无 | 插件错误隔离，不影响核心渲染 |
+|              | Next.js                                 | Nami                                                                             |
+| ------------ | --------------------------------------- | -------------------------------------------------------------------------------- |
+| 扩展方式     | `next.config.js` + `withXxx()` 包装函数 | 正式的 Plugin API（waterfall / parallel 生命周期钩子，核心调度器具备 bail 能力） |
+| 生命周期覆盖 | 主要覆盖构建阶段                        | 覆盖构建 + 服务端 + 客户端全生命周期                                             |
+| 隔离性       | 无                                      | 插件错误隔离，不影响核心渲染                                                     |
 
 #### 降级策略
 
-| | Next.js | Nami |
-|---|---------|------|
+|          | Next.js         | Nami                                                    |
+| -------- | --------------- | ------------------------------------------------------- |
 | SSR 失败 | 返回 500 错误页 | **5 级渐进降级**：重试 → CSR → 骨架屏 → 兜底 HTML → 503 |
-| 设计理念 | 开发者自行处理 | 框架级保障"永远有内容返回" |
+| 设计理念 | 开发者自行处理  | 框架级保障"永远有内容返回"                              |
 
 #### ISR 缓存后端
 
-| | Next.js | Nami |
-|---|---------|------|
-| 默认 | 文件系统缓存 | Memory / FileSystem / **Redis** 可插拔 |
-| 分布式 | 需要 Vercel 或第三方方案 | 原生支持 Redis 集群缓存 + tag 批量失效 |
+|          | Next.js                                | Nami                                               |
+| -------- | -------------------------------------- | -------------------------------------------------- |
+| 默认     | 文件系统缓存                           | Memory / FileSystem / **Redis** 可插拔             |
+| 分布式   | 需要 Vercel 或第三方方案               | 原生支持 Redis 集群缓存 + tag 批量失效             |
 | 按需失效 | `revalidatePath()` / `revalidateTag()` | `invalidate(path)` / `invalidateByTag(tag)` + 预热 |
 
 #### 部署模型
 
-| | Next.js | Nami |
-|---|---------|------|
+|          | Next.js            | Nami                                       |
+| -------- | ------------------ | ------------------------------------------ |
 | 最佳实践 | Vercel（深度绑定） | **自建集群部署**（Master/Worker 进程管理） |
-| 集群 | 依赖 K8s / PM2 | 内置 cluster 模式 + 优雅停机 |
+| 集群     | 依赖 K8s / PM2     | 内置 cluster 模式 + 优雅停机               |
 
 ### 何时选择 Next.js
 
@@ -667,43 +682,43 @@ Nami 的渲染模型和数据预取 API 高度借鉴了 Next.js（降低团队�
 
 #### P0 — 核心功能修复
 
-| 编号 | 问题 | 修复 |
-|------|------|------|
-| P0-1 | 插件 `context.extra` 写入后无人消费 | `render-middleware` 新增 `applyPluginExtras()`，读取 `__cache_hit`、`__skeleton_fallback`、`__custom_headers`、`__retry_attempted` 并映射到 HTTP 响应 |
-| P0-2 | 渲染器硬编码 `static/css/main.css` / `static/js/main.js` | `BaseRenderer` 新增 `resolveAssets()` + `ScriptInjector`，优先从 `asset-manifest.json` 读取真实文件路径（含 content hash），CSR/SSR/SSG/ISR/StreamingSSR 全部切换 |
-| P0-3 | `RouteManager.match()` 按注册顺序匹配，未使用 `rankRoutes` | 引入 `rankRoutes` 优先级排序（静态 > 约束参数 > 动态参数 > 通配符），带缓存，注册/移除时自动失效 |
-| P0-4 | `SelectiveHydration` 未触发前渲染 `fallback \|\| null`，与 SSR HTML 不一致 | 未 hydrate 时使用 `suppressHydrationWarning` 保留服务端 DOM，不渲染子节点 |
+| 编号 | 问题                                                                       | 修复                                                                                                                                                              |
+| ---- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P0-1 | 插件 `context.extra` 写入后无人消费                                        | `render-middleware` 新增 `applyPluginExtras()`，读取 `__cache_hit`、`__skeleton_fallback`、`__custom_headers`、`__retry_attempted` 并映射到 HTTP 响应             |
+| P0-2 | 渲染器硬编码 `static/css/main.css` / `static/js/main.js`                   | `BaseRenderer` 新增 `resolveAssets()` + `ScriptInjector`，优先从 `asset-manifest.json` 读取真实文件路径（含 content hash），CSR/SSR/SSG/ISR/StreamingSSR 全部切换 |
+| P0-3 | `RouteManager.match()` 按注册顺序匹配，未使用 `rankRoutes`                 | 引入 `rankRoutes` 优先级排序（静态 > 约束参数 > 动态参数 > 通配符），带缓存，注册/移除时自动失效                                                                  |
+| P0-4 | `SelectiveHydration` 未触发前渲染 `fallback \|\| null`，与 SSR HTML 不一致 | 未 hydrate 时使用 `suppressHydrationWarning` 保留服务端 DOM，不渲染子节点                                                                                         |
 
 #### P1 — 重要改进
 
-| 编号 | 问题 | 修复 |
-|------|------|------|
-| P1-5 | `RedisStore` 只有 `disconnect()`，`ISRManager.close()` 无法正确关闭 | 新增 `close()` 别名方法，与 `CacheStore` 接口对齐 |
-| P1-6 | 集群主进程用 `online` 事件判断 Worker 就绪，但此时端口尚未绑定 | 改为监听 `worker:ready` IPC 消息（Worker 在 `app.listen` 回调中发送） |
-| P1-7 | `createShutdownAwareMiddleware` 已实现但未接入 `app.ts` | 注册为中间件管线最外层，停机时新请求返回 503 + `Connection: close` |
-| P1-8 | SSG 单路由生成失败仅 `logger.error`，`BuildResult.errors` 为空 | 收集 `ssgErrors`，合并到 `BuildResult.errors`，CI 可感知 |
-| P1-9 | `RevalidationQueue` 渲染失败时超时计时器未 `clearTimeout` | 将 `timeoutHandle` 提升到 `try` 外，`finally` 中统一清理 |
+| 编号  | 问题                                                                     | 修复                                                                                |
+| ----- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| P1-5  | `RedisStore` 只有 `disconnect()`，`ISRManager.close()` 无法正确关闭      | 新增 `close()` 别名方法，与 `CacheStore` 接口对齐                                   |
+| P1-6  | 集群主进程用 `online` 事件判断 Worker 就绪，但此时端口尚未绑定           | 改为监听 `worker:ready` IPC 消息（Worker 在 `app.listen` 回调中发送）               |
+| P1-7  | `createShutdownAwareMiddleware` 已实现但未接入 `app.ts`                  | 注册为中间件管线最外层，停机时新请求返回 503 + `Connection: close`                  |
+| P1-8  | SSG 单路由生成失败仅 `logger.error`，`BuildResult.errors` 为空           | 收集 `ssgErrors`，合并到 `BuildResult.errors`，CI 可感知                            |
+| P1-9  | `RevalidationQueue` 渲染失败时超时计时器未 `clearTimeout`                | 将 `timeoutHandle` 提升到 `try` 外，`finally` 中统一清理                            |
 | P1-10 | `NamiHead` 在 SSR 分支 `return null` 后调用 `useEffect`，违反 Hooks 规则 | 移除条件 return，SSR 分支仅收集标签，`useEffect` 内部通过 `isSSR` 守卫跳过 DOM 操作 |
 
 ### v0.3.0 — 第二轮 P0/P1 缺陷修复
 
 #### P0 — 核心功能修复
 
-| 编号 | 问题 | 修复 |
-|------|------|------|
-| P0-1 | 集群模式 `startServer` 中 Worker 进程不发送 `worker:ready` | 在 `server.ts` 的 `app.listen` 回调中增加 `process.send({ type: 'worker:ready' })`，使主进程能正确感知 Worker 就绪 |
-| P0-2 | `triggerShutdown` 未接入 `setupGracefulShutdown` 信号处理 | `GracefulShutdownOptions` 新增 `onSignalReceived` 回调，收到 SIGTERM/SIGINT 后首先激活 shutdownAware 中间件，再执行 server.close |
-| P0-3 | `PluginManager.runParallelHook` 失败统计永远为 0 | `handleHookError` 记录日志后 re-throw，使 `Promise.allSettled` 能正确感知 rejected 状态；`dispose()` 同步修复 |
-| P0-4 | `DegradationManager` CSR fallback 缺少 JS/CSS 引用 | 构造函数接受 `publicPath` 和 `assetManifest`，`createCSRFallback` 通过 `resolveAssets()` 注入正确的资源标签 |
+| 编号 | 问题                                                       | 修复                                                                                                                             |
+| ---- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| P0-1 | 集群模式 `startServer` 中 Worker 进程不发送 `worker:ready` | 在 `server.ts` 的 `app.listen` 回调中增加 `process.send({ type: 'worker:ready' })`，使主进程能正确感知 Worker 就绪               |
+| P0-2 | `triggerShutdown` 未接入 `setupGracefulShutdown` 信号处理  | `GracefulShutdownOptions` 新增 `onSignalReceived` 回调，收到 SIGTERM/SIGINT 后首先激活 shutdownAware 中间件，再执行 server.close |
+| P0-3 | `PluginManager.runParallelHook` 失败统计永远为 0           | `handleHookError` 记录日志后 re-throw，使 `Promise.allSettled` 能正确感知 rejected 状态；`dispose()` 同步修复                    |
+| P0-4 | `DegradationManager` CSR fallback 缺少 JS/CSS 引用         | 构造函数接受 `publicPath` 和 `assetManifest`，`createCSRFallback` 通过 `resolveAssets()` 注入正确的资源标签                      |
 
 #### P1 — 重要改进
 
-| 编号 | 问题 | 修复 |
-|------|------|------|
-| P1-5 | `startWorker` 优雅停机不释放 ISR / 插件资源 | 解构 `createNamiServer` 返回值获取 `pluginManager`、`isrManager`、`triggerShutdown`，在 `onShutdown` 中依次关闭 ISR → 销毁插件 |
-| P1-6 | 渲染器降级链未传递 `assetManifest` | `StreamingSSR → SSR → CSR`、`ISR → CSR`、`SSG → CSR` 四处 `createFallbackRenderer` 均传递 `this.assetManifest` |
-| P1-7 | `lazyRoute` `errorFallback` 选项声明但未实现 | 内置轻量 `LazyErrorBoundary`（React Error Boundary），当提供 `errorFallback` 时包裹 Suspense 树 |
-| P1-9 | ISR 后台重验证写入缓存 TTL 与主路径不一致 | `RevalidationQueue.executeJob` 的 `cacheStore.set` TTL 从 `revalidateSeconds` 改为 `revalidateSeconds * 2`，与 `ISRManager.getOrRevalidate` 对齐 |
+| 编号 | 问题                                         | 修复                                                                                                                                             |
+| ---- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| P1-5 | `startWorker` 优雅停机不释放 ISR / 插件资源  | 解构 `createNamiServer` 返回值获取 `pluginManager`、`isrManager`、`triggerShutdown`，在 `onShutdown` 中依次关闭 ISR → 销毁插件                   |
+| P1-6 | 渲染器降级链未传递 `assetManifest`           | `StreamingSSR → SSR → CSR`、`ISR → CSR`、`SSG → CSR` 四处 `createFallbackRenderer` 均传递 `this.assetManifest`                                   |
+| P1-7 | `lazyRoute` `errorFallback` 选项声明但未实现 | 内置轻量 `LazyErrorBoundary`（React Error Boundary），当提供 `errorFallback` 时包裹 Suspense 树                                                  |
+| P1-9 | ISR 后台重验证写入缓存 TTL 与主路径不一致    | `RevalidationQueue.executeJob` 的 `cacheStore.set` TTL 从 `revalidateSeconds` 改为 `revalidateSeconds * 2`，与 `ISRManager.getOrRevalidate` 对齐 |
 
 ---
 

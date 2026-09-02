@@ -627,7 +627,7 @@ export class NamiBuilder {
 
     const moduleManifest = this.buildModuleManifest();
     const moduleLoader = new ModuleLoader({
-      serverBundlePath,
+      serverOutputDir: path.dirname(serverBundlePath),
       moduleManifest,
     });
 

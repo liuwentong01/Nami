@@ -38,7 +38,8 @@ interface ResolveServerRuntimeOptions {
  */
 export function resolveServerRuntime(options: ResolveServerRuntimeOptions): ResolvedServerRuntime {
   const { projectRoot, config, fresh = false, requireServerEntry = false } = options;
-  const serverBundlePath = path.resolve(projectRoot, config.outDir, 'server', 'entry-server.js');
+  const serverOutputDir = path.resolve(projectRoot, config.outDir, 'server');
+  const serverBundlePath = path.resolve(serverOutputDir, 'entry-server.js');
   const assetManifest = readAssetManifest(projectRoot, config);
 
   if (!fs.existsSync(serverBundlePath)) {
@@ -63,7 +64,7 @@ export function resolveServerRuntime(options: ResolveServerRuntimeOptions): Reso
     );
   }
   const moduleLoader = new ModuleLoader({
-    serverBundlePath,
+    serverOutputDir,
     moduleManifest: readModuleManifest(projectRoot, config),
   });
 

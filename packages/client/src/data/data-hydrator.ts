@@ -266,7 +266,7 @@ export function invalidateServerData(): void {
  *
  * @example
  * ```typescript
- * // 在 Hydration 完成后清理
+ * 在 Hydration 完成后清理
  * api.onHydrated(() => {
  *   cleanupServerData();
  * });

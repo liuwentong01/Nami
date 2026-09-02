@@ -224,7 +224,7 @@ async function registerServiceWorker(url: string, options?: RegistrationOptions)
  *
  * @example
  * ```typescript
- * // 在 webpack 入口文件中调用
+ * 在 webpack 入口文件中调用
  * import { initNamiClient } from '@nami/client';
  * import routes from './routes';
  * import config from './nami.config';

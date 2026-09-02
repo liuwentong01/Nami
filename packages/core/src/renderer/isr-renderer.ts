@@ -85,7 +85,7 @@ export class ISRRenderer extends BaseRenderer {
   /** React 组件树工厂函数 */
   private readonly appElementFactory: AppElementFactory;
 
-  /** 模块加载器 — 用于从 server bundle 中加载数据预取函数 */
+  /** 模块加载器 — 用于从 manifest 指向的页面产物中加载数据预取函数 */
   private readonly moduleLoader?: ModuleLoaderLike;
 
   /** 默认重验证间隔（秒），来自 config.isr.defaultRevalidate */
@@ -515,7 +515,7 @@ export class ISRRenderer extends BaseRenderer {
   /**
    * 解析 getStaticProps 函数
    *
-   * 通过 ModuleLoader 从 server bundle 中加载指定组件的 getStaticProps 导出函数。
+   * 通过 ModuleLoader 从 manifest 指向的页面产物中加载 getStaticProps 导出函数。
    * ModuleLoader 未配置时返回 null 并打印警告。
    *
    * @param componentPath - 组件路径（如 './pages/home'）

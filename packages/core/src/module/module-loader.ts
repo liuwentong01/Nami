@@ -1,287 +1,302 @@
 /**
- * @nami/core - 模块加载器
+ * @nami/core - 服务端页面模块加载器
  *
- * ModuleLoader 负责从编译后的 server bundle 中加载页面组件模块，
- * 提取 getServerSideProps / getStaticProps / getStaticPaths 等导出函数。
+ * `ModuleLoader` 只实现一条确定的加载链路：
  *
- * 工作原理：
- * 1. Webpack 将每个页面组件编译为 server bundle 中的一个模块
- * 2. 构建阶段生成模块清单（module manifest），记录组件路径到模块 ID 的映射
- * 3. ModuleLoader 在运行时根据组件路径查找并加载对应的模块
- * 4. 从模块的 exports 中提取指定的函数
+ * ```text
+ * route.component
+ *   -> moduleManifest
+ *   -> dist/server 下的页面文件
+ *   -> require()
+ *   -> moduleCache
+ *   -> 页面具名导出
+ * ```
+ *
+ * 例如路由配置：
+ *
+ * ```ts
+ * {
+ *   path: '/products/:id',
+ *   component: './pages/product-detail',
+ *   getServerSideProps: 'getServerSideProps',
+ * }
+ * ```
+ *
+ * 构建器会生成页面产物和 manifest：
+ *
+ * ```text
+ * dist/server/pages/product-detail.js
+ *
+ * moduleManifest = {
+ *   './pages/product-detail': 'pages/product-detail.js',
+ * }
+ * ```
+ *
+ * 页面文件经 `require()` 后的输出类似：
+ *
+ * ```ts
+ * {
+ *   default: ProductDetailPage,
+ *   getServerSideProps: async (context) => ({
+ *     props: { product: { id: context.params.id, name: 'Nami' } },
+ *   }),
+ * }
+ * ```
+ *
+ * ModuleLoader 负责定位并返回这个导出对象或其中的函数，不负责执行数据函数；
+ * 函数调用、超时、降级和数据注水由 SSR/SSG/ISR Renderer 处理。
  */
 
 import { createLogger } from '@nami/shared';
-import path from 'path';
 import fs from 'fs';
+import path from 'path';
 
 const logger = createLogger('@nami/core:module-loader');
 
-/**
- * 模块加载器配置
- */
+/** ModuleLoader 的唯一正式输入契约。 */
 export interface ModuleLoaderOptions {
-  /** server bundle 的绝对路径（如 dist/server/entry-server.js） */
-  serverBundlePath?: string;
+  /**
+   * 服务端构建产物目录。
+   *
+   * 输入示例：
+   * ```text
+   * /app/dist/server
+   * ```
+   */
+  serverOutputDir: string;
 
   /**
-   * 已加载的 server bundle 模块对象
-   * 如果提供此选项，则直接使用而不从文件加载
+   * 路由组件路径到服务端页面文件的映射。
+   *
+   * key 必须与 `route.component` 完全一致；value 必须是
+   * `serverOutputDir` 内的相对文件路径。
+   *
+   * 输入示例：
+   * ```ts
+   * {
+   *   './pages/home': 'pages/home.js',
+   *   './pages/product-detail': 'pages/product-detail.js',
+   * }
+   * ```
    */
-  serverBundle?: Record<string, unknown>;
-
-  /**
-   * 模块清单：组件路径 → 模块导出名 的映射
-   * 如果不提供，则尝试直接用组件路径作为 key 查找
-   */
-  moduleManifest?: Record<string, string>;
+  moduleManifest: Readonly<Record<string, string>>;
 }
 
 /**
- * 模块加载器
+ * 根据 module manifest 加载服务端页面 CommonJS 产物。
  *
- * 从 server bundle 中加载页面组件模块并提取导出函数。
+ * 业务项目通常不直接创建该实例。Nami Builder 生成 manifest，CLI 启动服务时
+ * 创建 ModuleLoader，Renderer 再根据路由声明提取数据函数。
+ *
+ * @example 手动使用
+ * ```ts
+ * const loader = new ModuleLoader({
+ *   serverOutputDir: '/app/dist/server',
+ *   moduleManifest: {
+ *     './pages/product-detail': 'pages/product-detail.js',
+ *   },
+ * });
+ *
+ * const getServerSideProps = await loader.getExportedFunction<
+ *   (context: { params: Record<string, string> }) => Promise<{
+ *     props: { product: { id: string; name: string } };
+ *   }>
+ * >('./pages/product-detail', 'getServerSideProps');
+ *
+ * const result = await getServerSideProps?.({ params: { id: '42' } });
+ * // { props: { product: { id: '42', name: 'Nami' } } }
+ * ```
  */
 export class ModuleLoader {
-  private serverBundle: Record<string, unknown> | null = null;
-  private readonly serverBundlePath?: string;
-  private readonly moduleManifest: Record<string, string>;
+  /** 绝对化后的服务端产物根目录。 */
+  private readonly serverOutputDir: string;
+
+  /** 构造时复制一份，避免外部运行时修改映射导致同一实例前后行为不一致。 */
+  private readonly moduleManifest: Readonly<Record<string, string>>;
+
+  /** 已加载页面模块缓存，key 为原始 route.component。 */
   private readonly moduleCache = new Map<string, Record<string, unknown>>();
 
-  constructor(options: ModuleLoaderOptions = {}) {
-    this.serverBundlePath = options.serverBundlePath;
-    this.moduleManifest = options.moduleManifest ?? {};
-
-    if (options.serverBundle) {
-      this.serverBundle = options.serverBundle;
+  constructor(options: ModuleLoaderOptions) {
+    if (
+      !options ||
+      typeof options.serverOutputDir !== 'string' ||
+      !options.serverOutputDir.trim()
+    ) {
+      throw new Error('ModuleLoader: serverOutputDir 必须是非空路径');
     }
 
+    if (!options.moduleManifest || typeof options.moduleManifest !== 'object') {
+      throw new Error('ModuleLoader: moduleManifest 必须是页面路径映射对象');
+    }
+
+    this.serverOutputDir = path.resolve(options.serverOutputDir);
+    this.moduleManifest = { ...options.moduleManifest };
+
     logger.debug('ModuleLoader 已初始化', {
-      hasServerBundle: !!options.serverBundle,
-      serverBundlePath: this.serverBundlePath,
+      serverOutputDir: this.serverOutputDir,
       manifestEntries: Object.keys(this.moduleManifest).length,
     });
   }
 
   /**
-   * 确保 server bundle 已加载
+   * 加载一个路由对应的服务端页面模块。
+   *
+   * 输入：
+   * ```text
+   * componentPath = './pages/product-detail'
+   * ```
+   *
+   * 处理过程：
+   * ```text
+   * moduleManifest['./pages/product-detail']
+   *   -> 'pages/product-detail.js'
+   *   -> '/app/dist/server/pages/product-detail.js'
+   *   -> require(...)
+   * ```
+   *
+   * 成功输出：
+   * ```ts
+   * {
+   *   default: ProductDetailPage,
+   *   getServerSideProps: [AsyncFunction: getServerSideProps],
+   * }
+   * ```
+   *
+   * 同一实例第一次加载后写入 `moduleCache`，后续使用相同 componentPath 时
+   * 直接返回同一个模块对象。
+   *
+   * @param componentPath - 路由配置中的 `route.component`
+   * @returns 页面 CommonJS 模块的完整导出对象
+   * @throws manifest 缺少映射、映射越界、页面文件不存在或 require 失败时抛错
    */
-  private async ensureBundle(): Promise<Record<string, unknown>> {
-    if (this.serverBundle) {
-      return this.serverBundle;
+  async loadModule(componentPath: string): Promise<Record<string, unknown>> {
+    const cached = this.moduleCache.get(componentPath);
+    if (cached) {
+      return cached;
     }
 
-    if (!this.serverBundlePath) {
+    const relativeModulePath = this.moduleManifest[componentPath];
+    if (typeof relativeModulePath !== 'string' || !relativeModulePath.trim()) {
+      throw new Error(`ModuleLoader: moduleManifest 中不存在页面 "${componentPath}"`);
+    }
+
+    const absoluteModulePath = this.resolveModulePath(componentPath, relativeModulePath);
+
+    if (!fs.existsSync(absoluteModulePath)) {
       throw new Error(
-        'ModuleLoader: 未配置 serverBundlePath 且未提供 serverBundle，无法加载模块',
+        `ModuleLoader: 页面 "${componentPath}" 的编译产物不存在: ${absoluteModulePath}`,
+      );
+    }
+
+    if (!fs.statSync(absoluteModulePath).isFile()) {
+      throw new Error(
+        `ModuleLoader: 页面 "${componentPath}" 的 manifest 目标不是文件: ${absoluteModulePath}`,
       );
     }
 
     try {
+      const resolvedModulePath = require.resolve(absoluteModulePath);
+
+      // 新 ModuleLoader 可能由开发态 runtimeProvider 在重新编译后创建。
+      // 清除 Node 进程级缓存，保证本实例第一次读取的是当前磁盘产物；
+      // 随后的请求内复用由 moduleCache 负责。
+      delete require.cache[resolvedModulePath];
+
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      this.serverBundle = require(this.serverBundlePath);
-      logger.info('Server bundle 加载成功', {
-        path: this.serverBundlePath,
-        exports: Object.keys(this.serverBundle!).length,
+      const loaded = require(resolvedModulePath) as unknown;
+      if (!loaded || typeof loaded !== 'object') {
+        throw new Error(`页面模块必须导出 CommonJS 对象，实际类型为 ${typeof loaded}`);
+      }
+
+      const pageModule = loaded as Record<string, unknown>;
+      this.moduleCache.set(componentPath, pageModule);
+
+      logger.debug('页面模块加载成功', {
+        componentPath,
+        source: absoluteModulePath,
+        exports: Object.keys(pageModule),
       });
-      return this.serverBundle!;
+
+      return pageModule;
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      logger.error('Server bundle 加载失败', {
-        path: this.serverBundlePath,
-        error: msg,
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error('页面模块加载失败', {
+        componentPath,
+        source: absoluteModulePath,
+        error: message,
       });
-      throw new Error(`Server bundle 加载失败: ${msg}`);
+      throw new Error(`ModuleLoader: 页面 "${componentPath}" 加载失败: ${message}`);
     }
   }
 
   /**
-   * 加载指定组件路径的模块
+   * 从页面模块中提取指定的具名导出函数。
    *
-   * @param componentPath - 组件路径（如 './pages/home'）
-   * @returns 模块的所有导出
-   */
-  async loadModule(componentPath: string): Promise<Record<string, unknown>> {
-    // 查缓存
-    const cached = this.moduleCache.get(componentPath);
-    if (cached) return cached;
-
-    const bundle = await this.ensureBundle();
-
-    // 策略 1：通过 moduleManifest 查找模块名
-    const manifestKey = this.moduleManifest[componentPath];
-    if (manifestKey && bundle[manifestKey]) {
-      const mod = bundle[manifestKey] as Record<string, unknown>;
-      this.moduleCache.set(componentPath, mod);
-      return mod;
-    }
-
-    // 策略 1.5：如果 manifest 指向的是独立编译出来的页面文件，
-    // 则直接从 dist/server 中 require 对应产物。
-    if (manifestKey) {
-      const fileModule = this.loadCompiledModuleFromFile(manifestKey);
-      if (fileModule) {
-        this.moduleCache.set(componentPath, fileModule);
-        return fileModule;
-      }
-    }
-
-    // 策略 2：直接以组件路径为 key 查找
-    if (bundle[componentPath]) {
-      const mod = bundle[componentPath] as Record<string, unknown>;
-      this.moduleCache.set(componentPath, mod);
-      return mod;
-    }
-
-    // 策略 3：尝试标准化路径后查找（去掉 ./ 前缀，加/不加 index）
-    const normalizedPath = componentPath.replace(/^\.\//, '');
-    const candidates = [
-      normalizedPath,
-      `pages/${normalizedPath}`,
-      `./pages/${normalizedPath}`,
-      `${normalizedPath}/index`,
-    ];
-
-    for (const candidate of candidates) {
-      if (bundle[candidate]) {
-        const mod = bundle[candidate] as Record<string, unknown>;
-        this.moduleCache.set(componentPath, mod);
-        return mod;
-      }
-    }
-
-    // 策略 3.5：当 server bundle 本身不直接导出页面模块时，
-    // 退一步尝试从 dist/server 下的独立页面产物中加载。
-    for (const candidate of this.buildCompiledModuleCandidates(componentPath)) {
-      const fileModule = this.loadCompiledModuleFromFile(candidate);
-      if (fileModule) {
-        this.moduleCache.set(componentPath, fileModule);
-        return fileModule;
-      }
-    }
-
-    // 策略 4：如果 bundle 自身就是单个模块的导出（简单场景），直接返回 bundle
-    // 这处理的是 server bundle 直接导出所有页面函数的情况
-    if (typeof bundle['getServerSideProps'] === 'function' ||
-        typeof bundle['getStaticProps'] === 'function' ||
-        typeof bundle['getStaticPaths'] === 'function' ||
-        typeof bundle['default'] === 'function') {
-      this.moduleCache.set(componentPath, bundle);
-      return bundle;
-    }
-
-    logger.warn('模块未找到', {
-      componentPath,
-      normalizedPath,
-      availableKeys: Object.keys(bundle).slice(0, 20),
-    });
-
-    return {};
-  }
-
-  /**
-   * 根据页面组件路径推导可能的编译产物相对路径
+   * 输入：
+   * ```text
+   * componentPath = './pages/product-detail'
+   * functionName  = 'getServerSideProps'
+   * ```
    *
-   * 当前 server 构建会将页面作为独立 entry 输出到 `dist/server/<entry>.js`。
-   * 为了兼容历史 manifest 缺失或运行时未显式传入映射的情况，
-   * 这里保留一组保守的文件名候选规则。
-   */
-  private buildCompiledModuleCandidates(componentPath: string): string[] {
-    const normalizedPath = componentPath.replace(/^\.\//, '');
-    const withoutPagesPrefix = normalizedPath.replace(/^pages\//, '');
-
-    return [
-      `${normalizedPath}.js`,
-      `${withoutPagesPrefix}.js`,
-      `pages/${withoutPagesPrefix}.js`,
-      `${normalizedPath}/index.js`,
-      `pages/${withoutPagesPrefix}/index.js`,
-    ];
-  }
-
-  /**
-   * 从编译产物文件中加载页面模块
+   * 输出：
+   * ```text
+   * [AsyncFunction: getServerSideProps]
+   * ```
    *
-   * 这是对“server bundle 统一导出所有页面模块”方案的兼容补充。
-   * 当页面被单独编译为 `dist/server/pages/foo.js` 之类的文件时，
-   * ModuleLoader 可以直接从磁盘加载对应模块。
-   */
-  private loadCompiledModuleFromFile(relativeOrAbsolutePath: string): Record<string, unknown> | null {
-    if (!this.serverBundlePath) {
-      return null;
-    }
-
-    const absolutePath = path.isAbsolute(relativeOrAbsolutePath)
-      ? relativeOrAbsolutePath
-      : path.resolve(path.dirname(this.serverBundlePath), relativeOrAbsolutePath);
-
-    if (!fs.existsSync(absolutePath)) {
-      return null;
-    }
-
-    try {
-      // 开发模式下 server bundle 可能持续重编译。
-      // 这里按文件维度清除 require 缓存，保证后续解析拿到的是最新页面模块。
-      delete require.cache[require.resolve(absolutePath)];
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const loaded = require(absolutePath) as Record<string, unknown>;
-      logger.debug('从编译产物文件加载模块成功', {
-        source: absolutePath,
-      });
-      return loaded;
-    } catch (error) {
-      logger.warn('从编译产物文件加载模块失败', {
-        source: absolutePath,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return null;
-    }
-  }
-
-  /**
-   * 从模块中提取指定的导出函数
+   * 如果模块存在，但该导出不存在或不是函数，则返回 `null`。该方法只返回函数
+   * 引用，不会执行它；泛型 `T` 也只提供 TypeScript 静态类型，不做运行时签名校验。
    *
-   * @param componentPath - 组件路径
-   * @param functionName - 导出函数名（如 'getServerSideProps'）
-   * @returns 导出的函数，未找到返回 null
+   * @typeParam T - 调用方期望的函数签名
+   * @param componentPath - 路由配置中的 `route.component`
+   * @param functionName - 路由配置声明的导出函数名
+   * @returns 导出函数或 `null`
    */
   async getExportedFunction<T extends (...args: any[]) => any>(
     componentPath: string,
     functionName: string,
   ): Promise<T | null> {
-    const mod = await this.loadModule(componentPath);
+    const pageModule = await this.loadModule(componentPath);
+    const exported = pageModule[functionName];
 
-    if (typeof mod[functionName] === 'function') {
-      logger.debug('成功获取导出函数', { componentPath, functionName });
-      return mod[functionName] as T;
+    if (typeof exported === 'function') {
+      logger.debug('成功获取页面导出函数', { componentPath, functionName });
+      return exported as T;
     }
 
-    logger.debug('导出函数未找到', {
+    logger.debug('页面导出函数未找到', {
       componentPath,
       functionName,
-      availableExports: Object.keys(mod),
+      availableExports: Object.keys(pageModule),
     });
-
     return null;
   }
 
   /**
-   * 清除模块缓存
-   * 用于开发模式下 server bundle 重新编译后刷新缓存
+   * 将 manifest 相对路径解析为受约束的页面绝对路径。
+   *
+   * manifest 不允许写绝对路径，也不允许通过 `../` 逃逸 `serverOutputDir`。
    */
-  clearCache(): void {
-    this.moduleCache.clear();
-    this.serverBundle = null;
-    logger.debug('ModuleLoader 缓存已清除');
-  }
+  private resolveModulePath(componentPath: string, relativeModulePath: string): string {
+    if (path.isAbsolute(relativeModulePath)) {
+      throw new Error(
+        `ModuleLoader: 页面 "${componentPath}" 的 manifest 必须使用相对路径: ${relativeModulePath}`,
+      );
+    }
 
-  /**
-   * 设置/替换 server bundle
-   * 用于开发模式下热更新
-   */
-  setServerBundle(bundle: Record<string, unknown>): void {
-    this.serverBundle = bundle;
-    this.moduleCache.clear();
-    logger.debug('Server bundle 已更新');
+    const absoluteModulePath = path.resolve(this.serverOutputDir, relativeModulePath);
+    const relativeToOutputDir = path.relative(this.serverOutputDir, absoluteModulePath);
+    const escapesOutputDir =
+      relativeToOutputDir === '..' ||
+      relativeToOutputDir.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relativeToOutputDir);
+
+    if (escapesOutputDir) {
+      throw new Error(
+        `ModuleLoader: 页面 "${componentPath}" 的 manifest 路径越界: ${relativeModulePath}`,
+      );
+    }
+
+    return absoluteModulePath;
   }
 }

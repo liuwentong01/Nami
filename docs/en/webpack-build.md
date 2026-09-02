@@ -212,7 +212,7 @@ Source location: `packages/webpack/src/configs/base.config.ts`
 | `resolve.alias`      | `@` and `~` point to `srcDir`                    |
 | `resolve.modules`    | `node_modules` and project root `node_modules`   |
 | `module.rules`       | TypeScript, assets, SVG                          |
-| `module.noParse`     | Skips `jquery` and `lodash`                     |
+| `module.noParse`     | Skips `jquery` and `lodash`                      |
 | `performance`        | Enables asset size warnings in production mode   |
 | `stats`              | `minimal` in dev, `normal` in production         |
 | `cache`              | Webpack 5 filesystem cache                       |
@@ -503,7 +503,22 @@ For example:
 }
 ```
 
-When starting the production server, `packages/cli/src/utils/server-runtime.ts` reads `nami-manifest.json` and passes `moduleManifest` to `ModuleLoader`, which is used by SSR/ISR to resolve page-level data functions.
+When starting the production server, `packages/cli/src/utils/server-runtime.ts` reads `nami-manifest.json` and passes both `moduleManifest` and the `dist/server` directory to `ModuleLoader`, which SSR/ISR use to resolve page-level data functions.
+
+ModuleLoader accepts one deterministic path only:
+
+```text
+route.component
+  -> relative file name in moduleManifest
+  -> page file under dist/server
+  -> require()
+  -> module cache
+  -> named page export
+```
+
+It no longer guesses Bundle keys or candidate file names, nor does it treat the entry
+Bundle as a single page module. Missing mappings, missing artifacts, and paths that
+escape `dist/server` produce explicit errors.
 
 ---
 

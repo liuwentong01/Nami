@@ -19,10 +19,10 @@
  * ```typescript
  * import { staticServeMiddleware } from '@nami/server';
  *
- * // 使用默认配置
+ * 使用默认配置
  * app.use(staticServeMiddleware());
  *
- * // 自定义静态资源目录
+ * 自定义静态资源目录
  * app.use(staticServeMiddleware({
  *   root: path.join(process.cwd(), 'dist/client'),
  * }));

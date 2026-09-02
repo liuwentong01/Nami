@@ -137,7 +137,7 @@ export function markNamiEvent(name: string): NamiPerformanceMark | null {
  * @example
  * ```typescript
  * markNamiEvent('route-change-start');
- * // ... 路由切换过程 ...
+ * ... 路由切换过程 ...
  * markNamiEvent('route-change-end');
  *
  * const result = measureBetween('route-change-start', 'route-change-end');
@@ -146,10 +146,7 @@ export function markNamiEvent(name: string): NamiPerformanceMark | null {
  * }
  * ```
  */
-export function measureBetween(
-  startName: string,
-  endName: string,
-): NamiPerformanceMeasure | null {
+export function measureBetween(startName: string, endName: string): NamiPerformanceMeasure | null {
   if (!isPerformanceAvailable()) {
     return null;
   }
